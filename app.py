@@ -19,6 +19,67 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Password gate ─────────────────────────────────────────────────────────────
+def _check_password():
+    """Gate the entire app behind a shared password from secrets.
+
+    Sets st.session_state.auth_ok=True on success. Re-renders the login form
+    on every wrong attempt until the right password is entered.
+    """
+    try:
+        expected = st.secrets["auth"]["password"]
+    except Exception:
+        return True  # no password configured → app is open (fail open for local dev)
+
+    if st.session_state.get("auth_ok"):
+        return True
+
+    # Hide the sidebar on the login page
+    st.markdown("""
+    <style>
+      section[data-testid="stSidebar"] { display: none !important; }
+      [data-testid="stAppViewContainer"] > .main { background:#FBF5EA; }
+      .login-wrap { max-width: 380px; margin: 8vh auto 0 auto; text-align: center; }
+      .login-logo { font-size: 32px; font-weight: 700; color: #004A2B;
+                    letter-spacing: 4px; margin-bottom: 4px; }
+      .login-sub  { font-size: 12px; color: #AB8743; letter-spacing: 3px;
+                    text-transform: uppercase; margin-bottom: 28px; }
+      .login-card { background: #ffffff; border: 1px solid #d6ccba;
+                    border-top: 3px solid #004A2B; border-radius: 10px;
+                    padding: 24px 28px; box-shadow: 0 4px 14px rgba(0,74,43,0.10); }
+      .login-card label { font-size: 12px !important; color: #AB8743 !important;
+                          font-weight: 700; letter-spacing: 0.5px;
+                          text-transform: uppercase; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="login-wrap">'
+        '<div class="login-logo">VAHDAM</div>'
+        '<div class="login-sub">Amazon P&amp;L Dashboard</div>'
+        '<div class="login-card">', unsafe_allow_html=True)
+
+    pw = st.text_input("Password", type="password", key="_pw_input",
+                       placeholder="Enter password to continue")
+    submitted = st.button("🔓 Unlock", use_container_width=True, type="primary")
+
+    if submitted:
+        if pw == expected:
+            st.session_state.auth_ok = True
+            # Clear the typed password from session state for safety
+            if "_pw_input" in st.session_state:
+                del st.session_state["_pw_input"]
+            st.rerun()
+        else:
+            st.error("❌ Incorrect password.")
+
+    st.markdown('</div><div style="text-align:center;color:#7a6a50;font-size:11px;'
+                'margin-top:16px;">Internal dashboard · Vahdam India</div></div>',
+                unsafe_allow_html=True)
+    st.stop()
+
+_check_password()
+
 # ── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
