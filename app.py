@@ -221,8 +221,10 @@ with st.sidebar:
                                key="flt_brand")
     f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
                                key="flt_cat")
-    f_channel = st.multiselect("Channel",      sorted(opts["CHANNEL"].dropna().unique()),
-                               key="flt_channel")
+    _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
+    _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
+    _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
+    f_channel = [c.replace(" ", "_") for c in _ch_pick]
     f_geo     = st.multiselect("GEO",
                                [g for g in GEO_ORDER if g in opts["GEO"].dropna().unique()],
                                key="flt_geo")
@@ -254,7 +256,7 @@ days_elapsed      = min((d_to - month_start).days + 1, _total_days)
 
 # ── WHERE builder ─────────────────────────────────────────────────────────────
 def build_where(geo_override=None, subcat_override=None, date_from=None, date_to=None,
-                extra_filters=None):
+                extra_filters=None, apply_sku=True):
     d1 = date_from or d_from
     d2 = date_to   or d_to
     w  = [f"DAY BETWEEN '{d1}' AND '{d2}'", GEO_EXCL]
@@ -273,6 +275,11 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
             w.append(f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))")
     elif f_subcat:
         w.append(f"SUB_CATEGORY IN ({','.join(repr(x) for x in f_subcat)})")
+    # SKU / ASIN / product-name filter applies to all main views unless suppressed
+    if apply_sku and sku_search and sku_search.strip():
+        t = sku_search.strip().replace("'", "''")
+        w.append(f"(UPPER(ASIN) LIKE UPPER('%{t}%') "
+                 f"OR UPPER(COALESCE(COMMON_SKU_DESCRIPTION,'')) LIKE UPPER('%{t}%'))")
     if extra_filters:
         w.append(extra_filters)
     return " AND ".join(w)
@@ -602,6 +609,38 @@ def get_pnl_category(where, sfx):
     """)
 
 @st.cache_data(ttl=300, show_spinner=False)
+def get_pnl_channel(where, sfx):
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND"]
+    sel   = _pnl_metric_sql(pfxs, sfx)
+    no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
+    return run_query(f"""
+        SELECT REPLACE(COALESCE(NULLIF(CHANNEL,''),'(unknown)'),'_',' ') AS CHANNEL, {sel}
+        FROM {TABLE} WHERE {where} AND COALESCE(CHANNEL,'') <> 'TOTAL'
+        GROUP BY CHANNEL
+        UNION ALL
+        SELECT 'GRAND TOTAL', {no_al} FROM {TABLE} WHERE {where}
+            AND COALESCE(CHANNEL,'') <> 'TOTAL'
+        ORDER BY CASE CHANNEL WHEN 'GRAND TOTAL' THEN 9999 ELSE 1 END,
+                 SALES_ACT DESC NULLS LAST
+    """)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_pnl_geo(where, sfx):
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND"]
+    sel   = _pnl_metric_sql(pfxs, sfx)
+    no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
+    return run_query(f"""
+        SELECT COALESCE(NULLIF(GEO,''),'(unknown)') AS GEO, {sel}
+        FROM {TABLE} WHERE {where} AND COALESCE(CHANNEL,'') <> 'TOTAL'
+        GROUP BY GEO
+        UNION ALL
+        SELECT 'GRAND TOTAL', {no_al} FROM {TABLE} WHERE {where}
+            AND COALESCE(CHANNEL,'') <> 'TOTAL'
+        ORDER BY (CASE WHEN GEO = 'GRAND TOTAL' THEN 1 ELSE 0 END),
+                 SALES_ACT DESC NULLS LAST
+    """)
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_sku_lookup(term, d1, d2, sfx):
     t = term.strip().replace("'", "''")
     return run_query(f"""
@@ -741,6 +780,7 @@ def render_overview():
                   on=["GEO","CHANNEL"], how="left")
 
     disp = df.copy()
+    disp["CHANNEL"]      = disp["CHANNEL"].astype(str).str.replace("_", " ", regex=False)
     disp["Qty"]          = disp["QTY"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "—")
     disp["Revenue Act"]  = disp["SALES_ACT"].apply(fmt_lakhs)
     disp["Revenue Bud"]  = disp["SALES_BUD"].apply(fmt_lakhs)
@@ -1178,6 +1218,12 @@ def render_pnl():
             f' &nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"}'
             f' &nbsp;&bull;&nbsp; {(d_to - d_from).days + 1} days</div>',
             unsafe_allow_html=True)
+        if sku_search and sku_search.strip():
+            st.markdown(
+                f'<div style="display:inline-block;background:#fef3d6;color:#7a5c00;'
+                f'padding:4px 12px;border-radius:14px;font-size:12px;font-weight:600;'
+                f'margin:4px 0 12px 0;">🔍 Filtered by: <b>{sku_search.strip()}</b></div>',
+                unsafe_allow_html=True)
 
     where = build_where()
 
@@ -1220,7 +1266,10 @@ def render_pnl():
             unsafe_allow_html=True)
         st.markdown("")
 
-    t1, t2, t3 = st.tabs(["📊 P&L Statement", "📈 Daily Trend", "🗂️ By Category"])
+    t1, t2, t3, t4, t5 = st.tabs([
+        "📊 P&L Statement", "📈 Daily Trend",
+        "🗂️ By Category", "🛒 By Channel", "🌍 By Country",
+    ])
 
     # ── Tab 1: Waterfall ──
     with t1:
@@ -1346,65 +1395,82 @@ def render_pnl():
                     file_name=f"pnl_daily_{d_from}_{d_to}.csv",
                     mime="text/csv", use_container_width=True, key="dl_pnl_daily")
 
+    def _render_breakdown(df_in, dim_col, dim_label, section_hdr, dl_key, file_slug):
+        """Render a P&L breakdown table with %-of-total, Rev %, totals row, and CSV export."""
+        if df_in.empty:
+            st.info(f"📭 No {dim_label.lower()} data available.")
+            return
+        disp = df_in.copy()
+        col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
+                   ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
+                   ("PM_SPEND_ACT","PM Spend")]
+        for src, lbl in col_map:
+            if src in disp.columns:
+                disp[lbl] = disp[src].apply(fmt_lakhs)
+
+        _of_total_n = None
+        if "SALES_ACT" in disp.columns:
+            _sales_num = pd.to_numeric(disp["SALES_ACT"], errors="coerce")
+            _gt_mask   = disp[dim_col] == "GRAND TOTAL"
+            _gt_val    = _sales_num[_gt_mask].iloc[0] if _gt_mask.any() else _sales_num.sum()
+            _of_total_n = (_sales_num / _gt_val * 100).reset_index(drop=True)
+            disp["% of Total"] = _of_total_n.apply(fmt_pct)
+
+        _rev_n = None
+        if "SALES_ACT" in disp.columns and "SALES_BUD" in disp.columns:
+            _rev_n = (pd.to_numeric(disp["SALES_ACT"], errors="coerce") /
+                      pd.to_numeric(disp["SALES_BUD"], errors="coerce") * 100
+                     ).reset_index(drop=True)
+            disp["Rev %"] = _rev_n.apply(fmt_pct)
+
+        labels  = [lbl for src, lbl in col_map if src in disp.columns]
+        show_c  = [dim_col] + labels
+        if "% of Total" in disp.columns: show_c.append("% of Total")
+        if "Rev %"      in disp.columns: show_c.append("Rev %")
+        ct      = disp[show_c].rename(columns={dim_col: dim_label}).reset_index(drop=True)
+
+        def style_row(row):
+            s   = [""] * len(row)
+            idx = row.index.tolist()
+            if "Rev %" in idx and _rev_n is not None:
+                s[idx.index("Rev %")] = color_pct(_rev_n.iloc[row.name])
+            if row.get(dim_label) == "GRAND TOTAL":
+                s = [(x + TOTAL_ROW).lstrip(";") for x in s]
+            return s
+
+        st.markdown(f'<div class="section-hdr">{section_hdr}</div>',
+                    unsafe_allow_html=True)
+        st.dataframe(ct.style.apply(style_row, axis=1).hide(axis="index"),
+                     use_container_width=True, height=420)
+        _cl1, _cl2 = st.columns([6, 1])
+        with _cl1:
+            st.caption("**% of Total** = share of Grand Total Sales (Actual). "
+                       "**Rev %** = Sales Actual ÷ Sales Budget.")
+        with _cl2:
+            st.download_button("📥 CSV", ct.to_csv(index=False).encode("utf-8"),
+                file_name=f"pnl_{file_slug}_{d_from}_{d_to}.csv",
+                mime="text/csv", use_container_width=True, key=dl_key)
+
     # ── Tab 3: By Category ──
     with t3:
         with st.spinner("Loading category P&L…"):
             cat = get_pnl_category(where, sfx)
-        if cat.empty:
-            st.info("📭 No category data available.")
-        else:
-            disp = cat.copy()
-            col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
-                       ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
-                       ("PM_SPEND_ACT","PM Spend")]
-            for src, lbl in col_map:
-                if src in disp.columns:
-                    disp[lbl] = disp[src].apply(fmt_lakhs)
+        _render_breakdown(cat, "CATEGORY", "Category",
+                          "Category P&amp;L", "dl_pnl_cat", "category")
 
-            # % of Total Sales (excluding Grand Total)
-            _of_total_n = None
-            if "SALES_ACT" in disp.columns:
-                _sales_num = pd.to_numeric(disp["SALES_ACT"], errors="coerce")
-                _gt_mask   = disp["CATEGORY"] == "GRAND TOTAL"
-                _gt_val    = _sales_num[_gt_mask].iloc[0] if _gt_mask.any() else _sales_num.sum()
-                _of_total_n = (_sales_num / _gt_val * 100).reset_index(drop=True)
-                disp["% of Total"] = _of_total_n.apply(fmt_pct)
+    # ── Tab 4: By Channel ──
+    with t4:
+        with st.spinner("Loading channel P&L…"):
+            ch = get_pnl_channel(where, sfx)
+        _render_breakdown(ch, "CHANNEL", "Channel",
+                          "Channel P&amp;L", "dl_pnl_chan", "channel")
 
-            if "SALES_ACT" in disp.columns and "SALES_BUD" in disp.columns:
-                _rev_n = (pd.to_numeric(disp["SALES_ACT"], errors="coerce") /
-                          pd.to_numeric(disp["SALES_BUD"], errors="coerce") * 100
-                         ).reset_index(drop=True)
-                disp["Rev %"] = _rev_n.apply(fmt_pct)
-            else:
-                _rev_n = None
-
-            labels  = [lbl for src, lbl in col_map if src in disp.columns]
-            show_c  = ["CATEGORY"] + labels
-            if "% of Total" in disp.columns: show_c.append("% of Total")
-            if "Rev %"      in disp.columns: show_c.append("Rev %")
-            ct      = disp[show_c].rename(columns={"CATEGORY": "Category"}).reset_index(drop=True)
-
-            def style_cat(row):
-                s   = [""] * len(row)
-                idx = row.index.tolist()
-                if "Rev %" in idx and _rev_n is not None:
-                    s[idx.index("Rev %")] = color_pct(_rev_n.iloc[row.name])
-                if row.get("Category") == "GRAND TOTAL":
-                    s = [(x + TOTAL_ROW).lstrip(";") for x in s]
-                return s
-
-            st.markdown('<div class="section-hdr">Category P&amp;L</div>',
-                        unsafe_allow_html=True)
-            st.dataframe(ct.style.apply(style_cat, axis=1).hide(axis="index"),
-                         use_container_width=True, height=420)
-            _cl1, _cl2 = st.columns([6, 1])
-            with _cl1:
-                st.caption("% of Total = share of Grand Total Sales (Actual). "
-                           "Rev % = Sales Actual ÷ Sales Budget.")
-            with _cl2:
-                st.download_button("📥 CSV", ct.to_csv(index=False).encode("utf-8"),
-                    file_name=f"pnl_category_{d_from}_{d_to}.csv",
-                    mime="text/csv", use_container_width=True, key="dl_pnl_cat")
+    # ── Tab 5: By Country ──
+    with t5:
+        with st.spinner("Loading country P&L…"):
+            geo = get_pnl_geo(where, sfx)
+        _render_breakdown(geo, "GEO", "Country",
+                          "Country P&amp;L", "dl_pnl_geo", "country")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
