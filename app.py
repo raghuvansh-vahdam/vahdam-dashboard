@@ -131,6 +131,48 @@ st.markdown("""
     }
     div[data-baseweb="tab-highlight"] { background-color: #004A2B !important; height: 3px !important; }
 
+    /* ── Auto-narrative card ── */
+    .narrative {
+        background: linear-gradient(135deg, #ffffff 0%, #faf5ea 60%, #f4e9d2 100%);
+        border: 1px solid #d6ccba; border-left: 4px solid #AB8743;
+        border-radius: 10px; padding: 14px 20px; margin: 4px 0 18px 0;
+        font-size: 14px; line-height: 1.55; color: #2a2520;
+        box-shadow: 0 1px 4px rgba(0,74,43,0.05);
+    }
+    .narrative b, .narrative strong { color: #004A2B; }
+    .narrative .nw { color: #1a7a3e; font-weight: 700; }
+    .narrative .nd { color: #8b1a1a; font-weight: 700; }
+    .narrative .nl { color: #AB8743; font-weight: 700; }
+
+    /* ── Movers chips ── */
+    .movers-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 12px 0; }
+    .mover-chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 12px; border-radius: 18px;
+        font-size: 12px; font-weight: 600;
+        border: 1px solid; background: #ffffff;
+    }
+    .mover-up   { color: #1a7a3e; border-color: #b6dcc4; background: #eaf6ee; }
+    .mover-down { color: #8b1a1a; border-color: #f0c5c5; background: #fbeaea; }
+
+    /* ── CEO hero KPI ── */
+    .hero-card {
+        background: linear-gradient(180deg, #ffffff 0%, #faf5ea 100%);
+        border: 1px solid #d6ccba; border-top: 4px solid #004A2B;
+        border-radius: 12px; padding: 20px 22px;
+        box-shadow: 0 2px 10px rgba(0,74,43,0.07);
+        transition: transform .15s ease, box-shadow .15s ease;
+        min-height: 138px; display: flex; flex-direction: column; justify-content: center;
+    }
+    .hero-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,74,43,0.12); }
+    .hero-label  { font-size: 11px; color: #AB8743; text-transform: uppercase;
+                   letter-spacing: 1.4px; font-weight: 700; margin-bottom: 6px; }
+    .hero-value  { font-size: 32px; font-weight: 700; color: #004A2B; line-height: 1.05; }
+    .hero-sub    { font-size: 12px; color: #7a6a50; margin-top: 6px; }
+    .hero-delta  { font-size: 12px; font-weight: 700; margin-top: 4px; }
+    .hero-up     { color: #1a7a3e; }
+    .hero-down   { color: #8b1a1a; }
+
     /* ── Misc ── */
     hr { border-color: #d6ccba; }
     .small-muted { font-size: 11px; color: #7a6a50; }
@@ -161,7 +203,7 @@ def run_query(sql: str) -> pd.DataFrame:
     return cur.fetch_pandas_all()
 
 # ── Session state ─────────────────────────────────────────────────────────────
-for k, v in [("view","overview"), ("selected_geo",None), ("selected_subcat",None)]:
+for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None)]:
     if k not in st.session_state: st.session_state[k] = v
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -238,6 +280,9 @@ with st.sidebar:
 
     # ── Navigation ──
     st.markdown("---")
+    if st.button("⭐ CEO Summary", use_container_width=True, key="nav_ceo"):
+        st.session_state.view = "ceo"
+        st.rerun()
     _nc1, _nc2 = st.columns(2)
     with _nc1:
         if st.button("🏠 Overview", use_container_width=True, key="nav_overview"):
@@ -253,6 +298,11 @@ month_start       = d_from.replace(day=1)
 _total_days       = calendar.monthrange(d_from.year, d_from.month)[1]
 month_end         = date(d_from.year, d_from.month, _total_days)
 days_elapsed      = min((d_to - month_start).days + 1, _total_days)
+
+# Previous comparable period (same length, immediately preceding)
+_period_len       = (d_to - d_from).days + 1
+prev_d_to         = d_from - timedelta(days=1)
+prev_d_from       = prev_d_to - timedelta(days=_period_len - 1)
 
 # ── WHERE builder ─────────────────────────────────────────────────────────────
 def build_where(geo_override=None, subcat_override=None, date_from=None, date_to=None,
@@ -427,6 +477,17 @@ def get_view1(where, sfx):
         SELECT GEO, 'TOTAL', {m} FROM {TABLE} WHERE {where} GROUP BY GEO
         ORDER BY CASE GEO {GEO_CASE} ELSE 10 END,
                  CASE CHANNEL WHEN 'TOTAL' THEN 99 ELSE 1 END, CHANNEL
+    """)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_view1_spark(where, sfx):
+    """Daily sales per GEO×CHANNEL for sparkline column."""
+    return run_query(f"""
+        SELECT GEO, CHANNEL, DAY,
+               ROUND(SUM(SALES_ACTUAL_{sfx}),0) AS SALES_ACT
+        FROM {TABLE} WHERE {where}
+        GROUP BY GEO, CHANNEL, DAY
+        ORDER BY DAY
     """)
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -663,6 +724,94 @@ def get_sku_lookup(term, d1, d2, sfx):
         LIMIT 50
     """)
 
+def hero_card(label, value, sub=None, delta_pct=None):
+    """Big hero KPI card for CEO landing."""
+    parts = [f'<div class="hero-card">'
+             f'<div class="hero-label">{label}</div>'
+             f'<div class="hero-value">{value}</div>']
+    if sub: parts.append(f'<div class="hero-sub">{sub}</div>')
+    if delta_pct is not None:
+        d = _f(delta_pct)
+        if d is not None:
+            cls = "hero-up" if d >= 0 else "hero-down"
+            arrow = "▲" if d >= 0 else "▼"
+            parts.append(f'<div class="hero-delta {cls}">{arrow} {abs(d):.1f}% vs prior period</div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def build_narrative(k, view1_df=None):
+    """Auto-generated 1-2 sentence summary from KPI row + optional GEO breakdown."""
+    sales_act = _f(k.get("SALES_ACT"))
+    rev_delta = _f(k.get("REV_DELTA"))
+    cm2_pct   = _f(k.get("CM2_ACT"))
+    cm2_delta = _f(k.get("CM2_DELTA"))
+    cm2_abs   = _f(k.get("CM2_ABS_ACT"))
+    cm2_abs_d = _f(k.get("CM2_ABS_DELTA"))
+    if sales_act is None: return None
+
+    if rev_delta is None: tone, color = "tracking budget", "nl"
+    elif rev_delta >= 5:  tone, color = f"<span class='nw'>{rev_delta:+.1f}% ahead of budget</span>", "nw"
+    elif rev_delta <= -5: tone, color = f"<span class='nd'>{rev_delta:+.1f}% behind budget</span>", "nd"
+    else:                 tone, color = f"<span class='nl'>{rev_delta:+.1f}% vs budget</span>", "nl"
+
+    parts = [f"Sales are <b>{fmt_lakhs(sales_act)}</b>, {tone}."]
+
+    if view1_df is not None and not view1_df.empty:
+        totals = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
+        if not totals.empty:
+            totals["REV_PCT_n"] = pd.to_numeric(totals["REV_PCT"], errors="coerce")
+            winners = totals.nlargest(1, "REV_PCT_n")
+            losers  = totals.nsmallest(1, "REV_PCT_n")
+            geo_parts = []
+            if not winners.empty and _f(winners.iloc[0]["REV_PCT_n"]) is not None:
+                w = winners.iloc[0]
+                geo_parts.append(f"driven by <b>{w['GEO']}</b> "
+                                 f"(<span class='nw'>{_f(w['REV_PCT_n']):.0f}%</span>)")
+            if not losers.empty and _f(losers.iloc[0]["REV_PCT_n"]) is not None:
+                l = losers.iloc[0]
+                if l['GEO'] != (winners.iloc[0]['GEO'] if not winners.empty else None):
+                    geo_parts.append(f"watch <b>{l['GEO']}</b> "
+                                     f"(<span class='nd'>{_f(l['REV_PCT_n']):.0f}%</span>)")
+            if geo_parts:
+                parts.append(" " + ", ".join(geo_parts) + ".")
+
+    if cm2_pct is not None:
+        cm_tone = ""
+        if cm2_delta is not None:
+            cm_tone = (f" (<span class='nw'>{cm2_delta:+.1f}pp vs Bud</span>)" if cm2_delta >= 0
+                       else f" (<span class='nd'>{cm2_delta:+.1f}pp vs Bud</span>)")
+        if cm2_abs is not None:
+            parts.append(f" CM2 margin is <b>{cm2_pct:.1f}%</b>{cm_tone}, "
+                         f"contributing <b>{fmt_lakhs(cm2_abs)}</b> in absolute terms.")
+        else:
+            parts.append(f" CM2 margin is <b>{cm2_pct:.1f}%</b>{cm_tone}.")
+    return "".join(parts)
+
+
+def top_movers_chips(view1_df, n=3):
+    """Generate top winners/laggards from GEO TOTAL rows."""
+    if view1_df is None or view1_df.empty: return ""
+    totals = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
+    if totals.empty: return ""
+    totals["REV_PCT_n"] = pd.to_numeric(totals["REV_PCT"], errors="coerce")
+    totals = totals.dropna(subset=["REV_PCT_n"])
+    if totals.empty: return ""
+    winners = totals.nlargest(n, "REV_PCT_n")
+    losers  = totals.nsmallest(n, "REV_PCT_n").iloc[::-1]
+    chips = []
+    for _, r in winners.iterrows():
+        if r["REV_PCT_n"] >= 100:
+            chips.append(f'<span class="mover-chip mover-up">📈 {r["GEO"]} '
+                         f'<b>{r["REV_PCT_n"]:.0f}%</b></span>')
+    for _, r in losers.iterrows():
+        if r["REV_PCT_n"] < 95:
+            chips.append(f'<span class="mover-chip mover-down">📉 {r["GEO"]} '
+                         f'<b>{r["REV_PCT_n"]:.0f}%</b></span>')
+    if not chips: return ""
+    return f'<div class="movers-row">{"".join(chips)}</div>'
+
+
 def strip_card(label, value, sub=None, delta=None):
     """Compact KPI card matching the P&L summary strip style. Reusable across views."""
     delta_html = ""
@@ -723,6 +872,143 @@ def _build_waterfall(row):
 # ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 1 — GEO × Channel Overview
 # ═══════════════════════════════════════════════════════════════════════════════
+def render_ceo():
+    """Single-screen executive summary — high signal, no scrolling required."""
+    st.markdown('<div class="page-title">⭐ Executive Summary</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} &rarr; {d_to.strftime("%d %b %Y")}'
+        f' &nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"}'
+        f' &nbsp;&bull;&nbsp; {_period_len} days  &nbsp;&bull;&nbsp; '
+        f'<span style="color:#7a6a50">vs prior {_period_len}d: '
+        f'{prev_d_from.strftime("%d %b")}–{prev_d_to.strftime("%d %b")}</span></div>',
+        unsafe_allow_html=True)
+
+    where      = build_where()
+    where_prev = build_where(date_from=prev_d_from, date_to=prev_d_to)
+    kpi        = get_kpis(where, sfx)
+    kpi_prev   = get_kpis(where_prev, sfx)
+    df         = get_view1(where, sfx)
+
+    if kpi.empty:
+        st.warning("📭 No data found for the selected filters.")
+        return
+    k = kpi.iloc[0]
+    kp = kpi_prev.iloc[0] if not kpi_prev.empty else None
+
+    # Narrative
+    narrative = build_narrative(k, df if not df.empty else None)
+    if narrative:
+        st.markdown(f'<div class="narrative">📊 {narrative}</div>',
+                    unsafe_allow_html=True)
+
+    # ── 4 hero KPIs ──
+    def _pop(key, mode="ratio"):
+        if kp is None: return None
+        cur, prev = _f(k.get(key)), _f(kp.get(key))
+        if cur is None or prev is None or (mode == "ratio" and prev == 0): return None
+        return (cur - prev) if mode == "pp" else (cur - prev) / abs(prev) * 100
+
+    cols = st.columns(4)
+    cols[0].markdown(hero_card("Sales", fmt_lakhs(k.get("SALES_ACT")),
+                                f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
+                                _pop("SALES_ACT")), unsafe_allow_html=True)
+    cols[1].markdown(hero_card("CM2 Absolute", fmt_lakhs(k.get("CM2_ABS_ACT")),
+                                f"Bud: {fmt_lakhs(k.get('CM2_ABS_BUD'))}",
+                                _pop("CM2_ABS_ACT")), unsafe_allow_html=True)
+    cols[2].markdown(hero_card("CM2 Margin", fmt_pct(k.get("CM2_ACT")),
+                                f"Bud: {fmt_pct(k.get('CM2_BUD'))}",
+                                _pop("CM2_ACT", "pp")), unsafe_allow_html=True)
+    cols[3].markdown(hero_card("Revenue vs Budget", fmt_pct(k.get("REV_PCT")),
+                                f"Δ: {fmt_lakhs((_f(k.get('SALES_ACT')) or 0) - (_f(k.get('SALES_BUD')) or 0), signed=True)}",
+                                None), unsafe_allow_html=True)
+
+    # ── Top movers ──
+    if not df.empty:
+        movers_html = top_movers_chips(df, n=3)
+        if movers_html:
+            st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                        'Top movers</div>', unsafe_allow_html=True)
+            st.markdown(movers_html, unsafe_allow_html=True)
+
+    # ── Best / Worst GEO callouts ──
+    if not df.empty:
+        totals = df[df["CHANNEL"] == "TOTAL"].copy()
+        totals["REV_PCT_n"] = pd.to_numeric(totals["REV_PCT"], errors="coerce")
+        totals = totals.dropna(subset=["REV_PCT_n"])
+        if not totals.empty:
+            best  = totals.nlargest(1,  "REV_PCT_n").iloc[0]
+            worst = totals.nsmallest(1, "REV_PCT_n").iloc[0]
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"""
+                <div class="hero-card" style="border-top-color:#1a7a3e;">
+                    <div class="hero-label" style="color:#1a7a3e;">🏆 Best-performing GEO</div>
+                    <div class="hero-value">{best['GEO']}</div>
+                    <div class="hero-sub">Revenue: {fmt_lakhs(best['SALES_ACT'])}
+                        &nbsp;·&nbsp; <b style="color:#1a7a3e;">{_f(best['REV_PCT_n']):.1f}% vs Bud</b></div>
+                </div>""", unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"""
+                <div class="hero-card" style="border-top-color:#8b1a1a;">
+                    <div class="hero-label" style="color:#8b1a1a;">⚠️ Needs attention</div>
+                    <div class="hero-value">{worst['GEO']}</div>
+                    <div class="hero-sub">Revenue: {fmt_lakhs(worst['SALES_ACT'])}
+                        &nbsp;·&nbsp; <b style="color:#8b1a1a;">{_f(worst['REV_PCT_n']):.1f}% vs Bud</b></div>
+                </div>""", unsafe_allow_html=True)
+
+    # ── Daily Sales sparkline ──
+    spark = get_view1_spark(where, sfx)
+    if not spark.empty and HAS_PLOTLY:
+        spark["DAY"] = pd.to_datetime(spark["DAY"])
+        daily = spark.groupby("DAY")["SALES_ACT"].sum().reset_index()
+        peak  = daily["SALES_ACT"].abs().max() or 0
+        if peak >= 1e7:  div, unit = 1e7, "Cr"
+        elif peak >= 1e5: div, unit = 1e5, "L"
+        elif peak >= 1e3: div, unit = 1e3, "K"
+        else:             div, unit = 1, ""
+        fig = go.Figure(go.Scatter(
+            x=daily["DAY"], y=daily["SALES_ACT"]/div,
+            mode="lines+markers", fill="tozeroy",
+            line=dict(color="#004A2B", width=2.5),
+            marker=dict(size=5, color="#004A2B"),
+            fillcolor="rgba(0,74,43,0.08)",
+            hovertemplate=f"<b>%{{x|%d %b}}</b><br>{sym}%{{y:.2f}}{unit}<extra></extra>",
+        ))
+        fig.update_layout(
+            title=dict(text=f"<b>Daily Sales</b> (₹ {unit})",
+                       font=dict(size=15, color="#004A2B")),
+            plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+            height=260, margin=dict(l=40, r=40, t=50, b=40),
+            showlegend=False,
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(171,135,67,0.15)")
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(171,135,67,0.15)",
+                          title_text=f"₹ {unit}".strip())
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Drill into full dashboard ──
+    st.markdown("---")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        if st.button("📊 Full Overview →", use_container_width=True, key="ceo_to_overview"):
+            st.session_state.view = "overview"; st.rerun()
+    with d2:
+        if st.button("📋 P&L Statement →", use_container_width=True, key="ceo_to_pnl"):
+            st.session_state.view = "pnl"; st.rerun()
+    with d3:
+        if not df.empty:
+            totals = df[df["CHANNEL"] == "TOTAL"]
+            if not totals.empty:
+                top_geo = totals.iloc[0]["GEO"]
+                if st.button(f"🌍 {top_geo} Sub-Categories →",
+                             use_container_width=True, key="ceo_to_subcat"):
+                    st.session_state.selected_geo    = top_geo
+                    st.session_state.selected_subcat = None
+                    st.session_state.view            = "subcategory"
+                    st.rerun()
+
+
 def render_overview():
     st.markdown('<div class="page-title">Amazon P&amp;L Overview</div>', unsafe_allow_html=True)
     st.markdown(
@@ -731,46 +1017,88 @@ def render_overview():
         f'&nbsp;&bull;&nbsp; Pace: {days_elapsed}/{_total_days} days elapsed</div>',
         unsafe_allow_html=True)
 
-    where    = build_where()
-    where_fm = build_where(date_from=month_start, date_to=month_end)
-    kpi      = get_kpis(where, sfx)
+    where      = build_where()
+    where_prev = build_where(date_from=prev_d_from, date_to=prev_d_to)
+    where_fm   = build_where(date_from=month_start, date_to=month_end)
+    kpi        = get_kpis(where, sfx)
+    kpi_prev   = get_kpis(where_prev, sfx)
 
     if kpi.empty:
         st.warning("📭 No data found for the selected filters. Try widening the date range or clearing some filters.")
         return
     k = kpi.iloc[0]
+    kp = kpi_prev.iloc[0] if not kpi_prev.empty else None
 
-    # ── KPI Cards ──
+    # Pre-fetch GEO breakdown so we can build narrative + movers above KPIs
+    df    = get_view1(where, sfx)
+    fm_df = get_fm_budget_v1(where_fm, sfx)
+
+    # ── Auto-narrative (#1) ──
+    narrative = build_narrative(k, df if not df.empty else None)
+    if narrative:
+        st.markdown(f'<div class="narrative">📊 {narrative}</div>',
+                    unsafe_allow_html=True)
+
+    # ── KPI Cards with period-over-period delta (#2) ──
+    def _pop_delta(key_act, mode="ratio"):
+        """Return delta vs prior period: ratio = %change, pp = percentage-point diff."""
+        if kp is None: return None
+        cur, prev = _f(k.get(key_act)), _f(kp.get(key_act))
+        if cur is None or prev is None: return None
+        if mode == "pp":   return cur - prev
+        if prev == 0:      return None
+        return (cur - prev) / abs(prev) * 100
+
+    pop_label = (f"vs prior {_period_len}d "
+                 f"({prev_d_from.strftime('%d %b')}–{prev_d_to.strftime('%d %b')})")
+
     cols = st.columns(5)
     cards = [
         ("Revenue vs Budget",  fmt_lakhs(k["SALES_ACT"]), f"Bud: {fmt_lakhs(k['SALES_BUD'])}", k["REV_PCT"],
-         kpi_delta(k["REV_DELTA"])),
+         kpi_delta(k["REV_DELTA"]),     _pop_delta("SALES_ACT")),
         ("CM1% vs Budget",     fmt_pct(k["CM1_ACT"]),    f"Bud: {fmt_pct(k['CM1_BUD'])}",     None,
-         kpi_delta(k["CM1_DELTA"], unit="pp")),
+         kpi_delta(k["CM1_DELTA"], unit="pp"),     _pop_delta("CM1_ACT", "pp")),
         ("ACoS%",              fmt_pct(k["ACOS_ACT"]),   f"Bud: {fmt_pct(k['ACOS_BUD'])}",    None,
-         kpi_delta(k["ACOS_DELTA"], unit="pp", invert=True)),
+         kpi_delta(k["ACOS_DELTA"], unit="pp", invert=True), _pop_delta("ACOS_ACT", "pp")),
         ("CM2%",               fmt_pct(k["CM2_ACT"]),    f"Bud: {fmt_pct(k['CM2_BUD'])}",     None,
-         kpi_delta(k["CM2_DELTA"], unit="pp")),
+         kpi_delta(k["CM2_DELTA"], unit="pp"),     _pop_delta("CM2_ACT", "pp")),
         ("CM2 Absolute",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", None,
-         kpi_delta(k["CM2_ABS_DELTA"])),
+         kpi_delta(k["CM2_ABS_DELTA"]), _pop_delta("CM2_ABS_ACT")),
     ]
-    for col, (label, actual, budget, pct, delta) in zip(cols, cards):
+    for col, (label, actual, budget, pct, delta, pop) in zip(cols, cards):
         badge = pct_badge(pct) if pct is not None else ""
-        col.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">{label}</div>
-            <div class="kpi-actual">{actual}</div>
-            <div class="kpi-budget">{budget}</div>
-            {delta}
-            {badge}
-        </div>""", unsafe_allow_html=True)
+        pop_html = ""
+        if pop is not None:
+            cls = "delta-up" if pop >= 0 else "delta-dn"
+            arrow = "▲" if pop >= 0 else "▼"
+            unit  = "pp" if "%" in label or label == "ACoS%" else "%"
+            pop_html = (f'<div style="font-size:10.5px;color:#7a6a50;'
+                        f'margin-top:3px;border-top:1px dashed #d6ccba;padding-top:4px;">'
+                        f'<span class="{cls}">{arrow} {abs(pop):.1f}{unit}</span> '
+                        f'<span class="small-muted">vs prev period</span></div>')
+        inner = "".join([
+            f'<div class="kpi-label">{label}</div>',
+            f'<div class="kpi-actual">{actual}</div>',
+            f'<div class="kpi-budget">{budget}</div>',
+            delta or "",
+            badge or "",
+            pop_html or "",
+        ])
+        title_attr = (f"Prior period: {prev_d_from.strftime('%d %b')} – "
+                      f"{prev_d_to.strftime('%d %b %Y')}")
+        col.markdown(f'<div class="kpi-card" title="{title_attr}">{inner}</div>',
+                     unsafe_allow_html=True)
+    st.caption(f"📅 Period comparison: prior {_period_len} days ({prev_d_from.strftime('%d %b %Y')} – "
+               f"{prev_d_to.strftime('%d %b %Y')})")
 
     st.markdown('<div class="section-hdr">GEO &times; Channel Breakdown</div>', unsafe_allow_html=True)
     st.caption(f"Pro-rata pace: {days_elapsed} of {_total_days} days elapsed this month  "
                f"|  💡 Click a **GEO TOTAL** row to drill into sub-categories")
 
-    df    = get_view1(where, sfx)
-    fm_df = get_fm_budget_v1(where_fm, sfx)
+    # ── Top movers chips (#6) ──
+    movers_html = top_movers_chips(df)
+    if movers_html:
+        st.markdown(movers_html, unsafe_allow_html=True)
 
     if df.empty:
         st.info("📭 No data available for the current selection.")
@@ -804,7 +1132,24 @@ def render_overview():
     _cm2var_n    = pd.to_numeric(df["CM2_VAR"],            errors="coerce").reset_index(drop=True)
     _prorata_s   = disp["Rev vs Plan"].reset_index(drop=True)
 
-    dcols = ["GEO","CHANNEL","Qty","Revenue Act","Revenue Bud","Rev % Achvd","Rev vs Plan",
+    # ── Sparkline data per (GEO, CHANNEL) ── (#3)
+    spark_df = get_view1_spark(where, sfx)
+    spark_map = {}
+    if not spark_df.empty:
+        spark_df["DAY"] = pd.to_datetime(spark_df["DAY"])
+        spark_df = spark_df.sort_values("DAY")
+        for (g, c), grp in spark_df.groupby(["GEO", "CHANNEL"]):
+            spark_map[(g, c.replace("_", " "))] = grp["SALES_ACT"].fillna(0).tolist()
+        # TOTAL row per GEO = sum across channels by day
+        for g, grp in spark_df.groupby("GEO"):
+            daily = grp.groupby("DAY")["SALES_ACT"].sum().fillna(0).tolist()
+            spark_map[(g, "TOTAL")] = daily
+
+    def _trend(row):
+        return spark_map.get((row["GEO"], row["CHANNEL"]), [])
+    disp["Trend"] = disp.apply(_trend, axis=1)
+
+    dcols = ["GEO","CHANNEL","Qty","Trend","Revenue Act","Revenue Bud","Rev % Achvd","Rev vs Plan",
              "CM1% Act","CM1% Bud","ACoS% Act","ACoS% Bud",
              "CM2% Act","CM2% Bud","CM2 Abs Act","CM2 Abs Bud","CM2 Abs %","CM2 Var"]
 
@@ -825,7 +1170,12 @@ def render_overview():
         table_df.style.apply(style_v1, axis=1).hide(axis="index"),
         use_container_width=True, height=680,
         on_select="rerun", selection_mode="single-row",
-        key="overview_table")
+        key="overview_table",
+        column_config={
+            "Trend": st.column_config.LineChartColumn(
+                "Daily Sales", width="small",
+                help="Daily Sales actual across the period")
+        })
 
     if event.selection.rows:
         idx = event.selection.rows[0]
@@ -1505,7 +1855,9 @@ if sku_search and sku_search.strip():
                          use_container_width=True)
 
 view = st.session_state.view
-if view == "overview":
+if view == "ceo":
+    render_ceo()
+elif view == "overview":
     render_overview()
 elif view == "subcategory":
     render_subcategory()
