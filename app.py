@@ -1514,6 +1514,30 @@ def render_asin():
         col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
     st.markdown("")
 
+    # ── Brand filter (applies to all 3 tabs) ──
+    if "BRAND" in df.columns:
+        brand_opts = sorted(b for b in df["BRAND"].dropna().unique() if str(b).strip())
+        if len(brand_opts) > 1:
+            bf1, bf2 = st.columns([4, 6])
+            with bf1:
+                picked = st.multiselect(
+                    f"🏷️ Filter by Brand ({len(brand_opts)} available)",
+                    brand_opts,
+                    key=f"asin_brand_{geo}_{subcat}",
+                    placeholder="All brands")
+            if picked:
+                df = df[df["BRAND"].isin(picked)].reset_index(drop=True)
+                with bf2:
+                    st.markdown(
+                        f'<div style="padding-top:32px;font-size:12px;color:#7a6a50;">'
+                        f'Showing <b style="color:#004A2B;">{len(df):,}</b> of '
+                        f'{len(brand_opts)} brands &nbsp;·&nbsp; '
+                        f'<b>{", ".join(picked)}</b></div>',
+                        unsafe_allow_html=True)
+        if df.empty:
+            st.info("📭 No ASINs match the selected brand(s).")
+            return
+
     # ── Tabs ──
     tab_pnl, tab_ads, tab_chart = st.tabs(
         ["📊 P&L vs Budget", "📣 Ad Performance", "🫧 Bubble Chart"])
@@ -1693,22 +1717,40 @@ def render_asin():
                 chart_df["_bud_rev_fmt"]= chart_df["BUD_REVENUE"].apply(fmt_lakhs)
                 chart_df["_rev_achvd"]  = chart_df["REV_ACHVD_PCT"].apply(fmt_pct)
 
+                # Strong diverging color scale: red (loss) → amber (thin) → green (healthy)
+                _cm2_vals = chart_df["_cm2"].dropna()
+                _cm2_min = float(_cm2_vals.min()) if not _cm2_vals.empty else -10.0
+                _cm2_max = float(_cm2_vals.max()) if not _cm2_vals.empty else 40.0
+                # Anchor 0% at the neutral point of the scale when range spans negative→positive
+                color_scale = [
+                    [0.00, "#8b1a1a"],   # deep red
+                    [0.25, "#d35a4a"],   # red-orange
+                    [0.50, "#e8b94d"],   # amber/gold
+                    [0.75, "#6db86b"],   # mid green
+                    [1.00, "#1a7a3e"],   # deep green
+                ]
                 fig = px.scatter(
                     chart_df.dropna(subset=["_acos","_impr"]),
                     x="_impr",
                     y="_acos",
                     size="_spend_size",
                     color="_cm2",
-                    color_continuous_scale=[[0,"#fde8e8"],[0.4,"#fef3d6"],[1,"#d6ece1"]],
+                    color_continuous_scale=color_scale,
+                    range_color=[_cm2_min, _cm2_max],
                     hover_name="_name_short",
                     custom_data=["ASIN","_rev_fmt","_bud_rev_fmt","_rev_achvd",
                                  "_spend_fmt","_ctr_fmt","_conv_fmt","_paid_pct",
                                  "ACT_UNITS","ACT_CM1_PCT","ACT_CM2_PCT","BUD_CM2_PCT"],
-                    size_max=60,
+                    size_max=58,
                     labels={"_impr":"Impressions","_acos":"ACoS%","_cm2":"CM2%"},
                     title=f"ASIN Performance — {geo} / {subcat}  |  Bubble size = Ad Spend  |  Color = CM2%"
                 )
                 fig.update_traces(
+                    marker=dict(
+                        opacity=0.85,
+                        line=dict(width=1.5, color="rgba(0,74,43,0.55)"),
+                        sizemin=8,
+                    ),
                     hovertemplate=(
                         "<b>%{hovertext}</b><br>"
                         "ASIN: %{customdata[0]}<br>"
@@ -1731,18 +1773,33 @@ def render_asin():
                     plot_bgcolor="#FBF5EA",
                     paper_bgcolor="#FBF5EA",
                     font=dict(family="Proxima Nova, Arial", color="#171717"),
-                    coloraxis_colorbar=dict(title="CM2%", ticksuffix="%"),
+                    coloraxis_colorbar=dict(title="CM2%", ticksuffix="%",
+                                            thickness=14, len=0.75,
+                                            bgcolor="rgba(255,255,255,0.4)",
+                                            outlinewidth=0),
                     xaxis_title="Impressions",
                     yaxis_title="ACoS%",
-                    height=520,
+                    height=540,
                     margin=dict(l=40, r=40, t=60, b=40),
+                    hoverlabel=dict(bgcolor="#ffffff", font=dict(color="#171717")),
                 )
-                fig.add_hline(y=20, line_dash="dot", line_color="#004A2B", opacity=0.4,
-                              annotation_text="ACoS 20%", annotation_position="right")
-                fig.add_hline(y=35, line_dash="dot", line_color="#AB8743", opacity=0.4,
-                              annotation_text="ACoS 35%", annotation_position="right")
-                st.plotly_chart(fig, use_container_width=True)
-                st.caption("Green zone: ACoS < 20% (efficient)  |  Amber: 20–35%  |  Red: > 35%  |  Larger bubbles = higher spend")
+                fig.update_xaxes(gridcolor="rgba(171,135,67,0.18)", zerolinecolor="rgba(171,135,67,0.3)")
+                fig.update_yaxes(gridcolor="rgba(171,135,67,0.18)", zerolinecolor="rgba(171,135,67,0.3)")
+                fig.add_hline(y=20, line_dash="dash", line_color="#1a7a3e", line_width=2,
+                              opacity=0.65,
+                              annotation_text="ACoS 20% (efficient)",
+                              annotation_position="right",
+                              annotation_font=dict(size=10.5, color="#1a7a3e"))
+                fig.add_hline(y=35, line_dash="dash", line_color="#8b1a1a", line_width=2,
+                              opacity=0.65,
+                              annotation_text="ACoS 35% (unhealthy)",
+                              annotation_position="right",
+                              annotation_font=dict(size=10.5, color="#8b1a1a"))
+                st.plotly_chart(fig, use_container_width=True,
+                                config={"displayModeBar": False})
+                st.caption("**Bubble colour** = CM2% margin (red = unprofitable, green = healthy). "
+                           "**Bubble size** = Ad Spend. **Y-axis ACoS%**: under 20% is efficient, "
+                           "20–35% acceptable, above 35% is unhealthy.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
