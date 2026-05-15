@@ -173,6 +173,74 @@ st.markdown("""
     .hero-up     { color: #1a7a3e; }
     .hero-down   { color: #8b1a1a; }
 
+    /* ── Breadcrumbs ── */
+    .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+              margin-bottom: 4px; font-size: 12px; color: #AB8743;
+              letter-spacing: 0.4px; }
+    .crumbs .crumb-sep { color: #d6ccba; padding: 0 2px; }
+    section[data-testid="stMain"] div[data-testid="stButton"] > button[kind="tertiary"],
+    section[data-testid="stMain"] div[data-testid="stButton"] > button.crumb-btn {
+        background: transparent !important; color: #AB8743 !important;
+        border: none !important; padding: 0 !important;
+        font-size: 12px !important; font-weight: 600 !important;
+        letter-spacing: 0.4px; text-transform: uppercase;
+        min-height: auto !important;
+    }
+    section[data-testid="stMain"] div[data-testid="stButton"] > button[kind="tertiary"]:hover {
+        color: #004A2B !important; text-decoration: underline;
+        background: transparent !important; transform: none !important;
+    }
+
+    /* ── Forecast card ── */
+    .forecast-card {
+        background: linear-gradient(180deg, #fff 0%, #f7efde 100%);
+        border: 1px solid #d6ccba; border-left: 4px solid #AB8743;
+        border-radius: 10px; padding: 14px 18px;
+        box-shadow: 0 1px 6px rgba(171,135,67,0.10);
+        display: flex; flex-direction: column; gap: 4px;
+    }
+    .forecast-label { font-size: 10px; color: #AB8743; text-transform: uppercase;
+                      letter-spacing: 1.2px; font-weight: 700; }
+    .forecast-val   { font-size: 22px; font-weight: 700; color: #004A2B; line-height: 1.1; }
+    .forecast-sub   { font-size: 11.5px; color: #7a6a50; }
+    .forecast-pace  { font-size: 11px; font-weight: 600; }
+    .pace-good { color: #1a7a3e; }
+    .pace-warn { color: #AB8743; }
+    .pace-bad  { color: #8b1a1a; }
+
+    /* ── Fade-in animation on view change (#11) ── */
+    @keyframes fadeSlideIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    [data-testid="stMainBlockContainer"] > div:first-child {
+        animation: fadeSlideIn 0.28s ease-out;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        [data-testid="stMainBlockContainer"] > div:first-child { animation: none; }
+        .kpi-card, .hero-card { transition: none !important; }
+    }
+
+    /* ── Responsive breakpoints (#15) ── */
+    @media (max-width: 900px) {
+        .page-title { font-size: 22px; }
+        .hero-value { font-size: 24px; }
+        .hero-card  { min-height: 110px; padding: 14px 16px; }
+        .kpi-card   { min-height: 110px; padding: 12px 14px; }
+        .kpi-actual { font-size: 20px; }
+        .narrative  { font-size: 13px; padding: 12px 14px; }
+        .pnl-strip  { min-height: 68px; padding: 8px 12px; }
+        .pnl-strip-val { font-size: 16px; }
+        section[data-testid="stSidebar"] { width: 240px !important; }
+    }
+    @media (max-width: 640px) {
+        .page-title { font-size: 19px; }
+        .page-sub   { font-size: 12px; }
+        .hero-value { font-size: 20px; }
+        .hero-card, .kpi-card { padding: 10px 12px; }
+        .narrative  { font-size: 12.5px; line-height: 1.45; }
+    }
+
     /* ── Misc ── */
     hr { border-color: #d6ccba; }
     .small-muted { font-size: 11px; color: #7a6a50; }
@@ -724,6 +792,76 @@ def get_sku_lookup(term, d1, d2, sfx):
         LIMIT 50
     """)
 
+def forecast_card(sales_act, sales_bud, days_elapsed_v, total_days_v):
+    """Forecast EOM pace card — projects current pace to end of month."""
+    s_act = _f(sales_act); s_bud = _f(sales_bud)
+    if s_act is None or days_elapsed_v <= 0 or total_days_v <= 0: return ""
+    daily_pace = s_act / days_elapsed_v
+    forecast   = daily_pace * total_days_v
+    delta_abs  = (forecast - s_bud) if s_bud is not None else None
+    delta_pct  = ((forecast - s_bud) / abs(s_bud) * 100) if (s_bud and s_bud != 0) else None
+    pace_html = ""
+    if delta_pct is not None:
+        if   delta_pct >=  2: cls, ico = "pace-good", "🟢"
+        elif delta_pct <= -2: cls, ico = "pace-bad",  "🔴"
+        else:                 cls, ico = "pace-warn", "🟡"
+        pace_html = (f'<div class="forecast-pace {cls}">{ico} '
+                     f'{("+" if delta_pct >= 0 else "")}{delta_pct:.1f}% vs FM Budget '
+                     f'({fmt_lakhs(delta_abs, signed=True)})</div>')
+    bud_line = (f'<div class="forecast-sub">FM Bud: {fmt_lakhs(s_bud)}'
+                f' &nbsp;·&nbsp; Pace: {fmt_lakhs(daily_pace)}/day</div>') if s_bud is not None else ""
+    return (f'<div class="forecast-card">'
+            f'<div class="forecast-label">🔮 Forecast End-of-Month</div>'
+            f'<div class="forecast-val">{fmt_lakhs(forecast)}</div>'
+            f'{bud_line}{pace_html}</div>')
+
+
+def render_breadcrumbs(segments):
+    """Render clickable breadcrumbs.
+
+    segments: list of (label, view_state, geo, subcat) tuples — last entry is the
+    current page (rendered as plain text, not clickable). All earlier entries are
+    rendered as tertiary buttons that navigate when clicked.
+    """
+    if not segments: return
+    n = len(segments)
+    # Each segment col is sized to comfortably fit the label.
+    # Streamlit's tertiary button has built-in padding; we need extra room.
+    col_specs = []
+    for i, seg in enumerate(segments):
+        w = max(4, int(len(seg[0]) * 1.8) + 3)
+        col_specs.append(w)
+        if i < n - 1:
+            col_specs.append(2)  # separator
+    col_specs.append(60)  # spacer pushes breadcrumbs to the left
+    cols = st.columns(col_specs, gap="small")
+    cidx = 0
+    for i, (label, view_state, geo, subcat) in enumerate(segments):
+        with cols[cidx]:
+            if i == n - 1:
+                # current page — non-clickable, slightly emphasized
+                st.markdown(
+                    f'<div style="font-size:12px;color:#004A2B;font-weight:700;'
+                    f'letter-spacing:0.4px;text-transform:uppercase;'
+                    f'padding-top:6px;white-space:nowrap;">{label}</div>',
+                    unsafe_allow_html=True)
+            else:
+                if st.button(label, key=f"crumb_{i}_{label}",
+                             type="tertiary",
+                             use_container_width=False):
+                    st.session_state.view = view_state
+                    if geo is not None:    st.session_state.selected_geo = geo
+                    if subcat is not None: st.session_state.selected_subcat = subcat
+                    st.rerun()
+        cidx += 1
+        if i < n - 1:
+            with cols[cidx]:
+                st.markdown('<div style="font-size:14px;color:#d6ccba;'
+                            'padding-top:4px;text-align:center;">›</div>',
+                            unsafe_allow_html=True)
+            cidx += 1
+
+
 def hero_card(label, value, sub=None, delta_pct=None):
     """Big hero KPI card for CEO landing."""
     parts = [f'<div class="hero-card">'
@@ -886,8 +1024,10 @@ def render_ceo():
 
     where      = build_where()
     where_prev = build_where(date_from=prev_d_from, date_to=prev_d_to)
+    where_fm   = build_where(date_from=month_start, date_to=month_end)
     kpi        = get_kpis(where, sfx)
     kpi_prev   = get_kpis(where_prev, sfx)
+    kpi_fm     = get_kpis(where_fm, sfx)  # full-month budget for forecast
     df         = get_view1(where, sfx)
 
     if kpi.empty:
@@ -895,6 +1035,7 @@ def render_ceo():
         return
     k = kpi.iloc[0]
     kp = kpi_prev.iloc[0] if not kpi_prev.empty else None
+    kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
 
     # Narrative
     narrative = build_narrative(k, df if not df.empty else None)
@@ -922,6 +1063,20 @@ def render_ceo():
     cols[3].markdown(hero_card("Revenue vs Budget", fmt_pct(k.get("REV_PCT")),
                                 f"Δ: {fmt_lakhs((_f(k.get('SALES_ACT')) or 0) - (_f(k.get('SALES_BUD')) or 0), signed=True)}",
                                 None), unsafe_allow_html=True)
+
+    # ── Forecast EOM (#9) ──
+    if kfm is not None and days_elapsed > 0:
+        # Use MTD slice for pace calc — if current period spans full month already, no forecast needed
+        mtd_where = build_where(date_from=month_start, date_to=min(d_to, month_end))
+        mtd_kpi   = get_kpis(mtd_where, sfx)
+        if not mtd_kpi.empty:
+            mtd_act = _f(mtd_kpi.iloc[0].get("SALES_ACT"))
+            mtd_bud = _f(kfm.get("SALES_BUD"))
+            fc_html = forecast_card(mtd_act, mtd_bud, days_elapsed, _total_days)
+            if fc_html:
+                fc1, fc2 = st.columns([2, 5])
+                with fc1:
+                    st.markdown(fc_html, unsafe_allow_html=True)
 
     # ── Top movers ──
     if not df.empty:
@@ -1202,8 +1357,11 @@ def render_subcategory():
             st.session_state.view = "overview"
             st.rerun()
     with c2:
+        render_breadcrumbs([
+            ("Overview", "overview", None, None),
+            (geo, "subcategory", geo, None),
+        ])
         st.markdown(
-            f'<div class="breadcrumb">Overview &rsaquo; {geo}</div>'
             f'<div class="page-title">Sub-Category Breakdown &mdash; {geo}</div>',
             unsafe_allow_html=True)
         st.markdown(
@@ -1311,8 +1469,12 @@ def render_asin():
             st.session_state.view = "subcategory"
             st.rerun()
     with c2:
+        render_breadcrumbs([
+            ("Overview",  "overview",    None, None),
+            (geo,         "subcategory", geo,  None),
+            (subcat,      "asin",        geo,  subcat),
+        ])
         st.markdown(
-            f'<div class="breadcrumb">Overview &rsaquo; {geo} &rsaquo; {subcat}</div>'
             f'<div class="page-title">ASIN View &mdash; {geo} / {subcat}</div>',
             unsafe_allow_html=True)
         st.markdown(
@@ -1358,7 +1520,38 @@ def render_asin():
 
     # ── Tab 1: P&L ──
     with tab_pnl:
-        st.caption("All budget figures from P&L table for the same date range. Actuals = total sales (organic + paid).")
+        # ── Cohort toggle (#8) ──
+        cc1, cc2, cc3 = st.columns([3, 2, 3])
+        with cc1:
+            cohort = st.radio("Sort by",
+                              ["Revenue (Actual)", "CM2 Margin %", "CM2 Profit (Abs)", "Rev % Achieved"],
+                              horizontal=True, key=f"asin_cohort_{geo}_{subcat}")
+        with cc2:
+            top_n = st.selectbox("Show",
+                                 ["All", "Top 10", "Top 20", "Top 50"],
+                                 index=0, key=f"asin_topn_{geo}_{subcat}")
+        with cc3:
+            st.markdown(
+                f'<div style="padding-top:32px;font-size:11.5px;color:#7a6a50;">'
+                f'<b>{len(df):,}</b> ASINs in {subcat} · {geo}</div>',
+                unsafe_allow_html=True)
+
+        sort_key_map = {
+            "Revenue (Actual)":   ("ACT_REVENUE",   False),
+            "CM2 Margin %":       ("ACT_CM2_PCT",   False),
+            "CM2 Profit (Abs)":   ("ACT_CM2_ABS",   False),
+            "Rev % Achieved":     ("REV_ACHVD_PCT", False),
+        }
+        sort_col, asc = sort_key_map[cohort]
+        if sort_col in df.columns:
+            df = df.sort_values(sort_col, ascending=asc, na_position="last").reset_index(drop=True)
+        if top_n != "All":
+            n = int(top_n.split()[1])
+            df = df.head(n).reset_index(drop=True)
+
+        st.caption(f"Sorted by **{cohort}** · "
+                   f"All budget figures from P&L table for the same date range. "
+                   f"Actuals = total sales (organic + paid).")
         pnl_cols = [
             ("ASIN",          "ASIN"),
             ("PRODUCT_NAME",  "Product"),
