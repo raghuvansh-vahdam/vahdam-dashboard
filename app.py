@@ -285,8 +285,29 @@ def _f(v):
     except (TypeError, ValueError):
         return None
 
-def fmt_lakhs(v):
-    v = _f(v); return "—" if v is None else f"{sym}{v/1e5:,.2f}L"
+def fmt_lakhs(v, signed=False):
+    """Auto-scale Indian currency: <1K → raw, <1L → K, <1Cr → L, ≥1Cr → Cr."""
+    n = _f(v)
+    if n is None: return "—"
+    a = abs(n)
+    if signed:
+        sign = "-" if n < 0 else ("+" if n > 0 else "")
+    else:
+        sign = "-" if n < 0 else ""
+    if a >= 1e7:
+        scaled, unit = a / 1e7, "Cr"
+    elif a >= 1e5:
+        scaled, unit = a / 1e5, "L"
+    elif a >= 1e3:
+        scaled, unit = a / 1e3, "K"
+    else:
+        return f"{sign}{sym}{a:,.0f}"
+    # 2 decimals when small in its unit, 1 decimal when ≥ 10, 0 when ≥ 100
+    if scaled >= 100:
+        return f"{sign}{sym}{scaled:,.0f}{unit}"
+    if scaled >= 10:
+        return f"{sign}{sym}{scaled:,.1f}{unit}"
+    return f"{sign}{sym}{scaled:,.2f}{unit}"
 
 def fmt_pct(v):
     v = _f(v); return "—" if v is None else f"{v:.1f}%"
@@ -734,7 +755,7 @@ def render_overview():
     disp["Rev % Achvd"]  = disp["REV_PCT"].apply(fmt_pct)
     disp["CM2 Abs %"]    = disp["CM2_ABS_ACHVD_PCT"].apply(fmt_pct)
     disp["CM2 Var"]      = disp["CM2_VAR"].apply(
-        lambda x: "—" if _f(x) is None else f"{sym}{_f(x)/1e5:+,.2f}L")
+        lambda x: fmt_lakhs(x, signed=True))
     disp["Rev vs Plan"]  = disp.apply(
         lambda r: prorata_str(r["SALES_ACT"], r["FM_SALES_BUD"]), axis=1)
 
@@ -845,7 +866,7 @@ def render_subcategory():
     disp["% Achieved"]   = disp["REV_PCT"].apply(fmt_pct)
     disp["CM2 Abs %"]    = disp["CM2_ABS_ACHVD_PCT"].apply(fmt_pct)
     disp["CM2 Var"]      = disp["CM2_VAR"].apply(
-        lambda x: "—" if _f(x) is None else f"{sym}{_f(x)/1e5:+,.2f}L")
+        lambda x: fmt_lakhs(x, signed=True))
     disp["Rev vs Plan"]  = disp.apply(
         lambda r: prorata_str(r["SALES_ACT"], r["FM_SALES_BUD"]), axis=1)
 
@@ -1264,17 +1285,34 @@ def render_pnl():
                     ("CM2_ACT",      "CM2 (Actual)",     "#2E7D32", "solid"),
                     ("PM_SPEND_ACT", "PM Spend (Actual)","#8b1a1a", "dash"),
                 ]
+                # Pick axis unit based on peak magnitude across all traces
+                _peak = 0.0
+                for col, *_ in trace_cfgs:
+                    if col in daily.columns:
+                        _peak = max(_peak, pd.to_numeric(daily[col],
+                                    errors="coerce").abs().max() or 0)
+                if _peak >= 1e7:
+                    _div, _unit = 1e7, "Cr"
+                elif _peak >= 1e5:
+                    _div, _unit = 1e5, "L"
+                elif _peak >= 1e3:
+                    _div, _unit = 1e3, "K"
+                else:
+                    _div, _unit = 1, ""
+
                 for col, name, color, dash in trace_cfgs:
                     if col in daily.columns:
-                        y = pd.to_numeric(daily[col], errors="coerce") / 1e5
+                        y = pd.to_numeric(daily[col], errors="coerce") / _div
                         fig.add_trace(go.Scatter(
                             x=daily["DAY"], y=y, mode="lines+markers", name=name,
                             line=dict(color=color, dash=dash, width=2.5),
                             marker=dict(size=5),
-                            hovertemplate=f"<b>{name}</b><br>%{{x|%d %b}}<br>₹%{{y:.2f}}L<extra></extra>",
+                            hovertemplate=(f"<b>{name}</b><br>%{{x|%d %b}}<br>"
+                                           f"{sym}%{{y:.2f}}{_unit}<extra></extra>"),
                         ))
+                _title_unit = f" (₹ {_unit})" if _unit else ""
                 fig.update_layout(
-                    title=dict(text="<b>Daily P&L Trend</b> (₹ Lakhs)",
+                    title=dict(text=f"<b>Daily P&L Trend</b>{_title_unit}",
                                font=dict(size=16, color="#004A2B")),
                     plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
                     font=dict(family="Arial", color="#171717"),
@@ -1284,7 +1322,8 @@ def render_pnl():
                     hovermode="x unified",
                 )
                 fig.update_xaxes(title_text="Date", showgrid=True, gridcolor="rgba(171,135,67,0.15)")
-                fig.update_yaxes(title_text="₹ Lakhs", showgrid=True, gridcolor="rgba(171,135,67,0.15)")
+                fig.update_yaxes(title_text=f"₹ {_unit}".strip(),
+                                  showgrid=True, gridcolor="rgba(171,135,67,0.15)")
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
             else:
                 st.info("Install plotly for the chart view.")
