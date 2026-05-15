@@ -241,6 +241,90 @@ st.markdown("""
         .narrative  { font-size: 12.5px; line-height: 1.45; }
     }
 
+    /* ── Tooltips (#5) — replaces native title= with a styled hover bubble ── */
+    [data-tip] { position: relative; cursor: help; }
+    [data-tip]:hover::after {
+        content: attr(data-tip);
+        position: absolute; top: calc(100% + 6px); left: 50%;
+        transform: translateX(-50%);
+        background: #1a1a1a; color: #FBF5EA;
+        padding: 8px 12px; border-radius: 6px;
+        font-size: 11.5px; font-weight: 500;
+        line-height: 1.4; letter-spacing: 0;
+        white-space: pre-wrap; min-width: 200px; max-width: 320px;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.18); z-index: 9999;
+        text-transform: none; text-align: left;
+        pointer-events: none;
+    }
+    [data-tip]:hover::before {
+        content: ""; position: absolute; top: 100%; left: 50%;
+        transform: translateX(-50%); margin-top: 1px;
+        border: 5px solid transparent; border-bottom-color: #1a1a1a;
+        z-index: 9999;
+    }
+
+    /* ── Hover row-highlight cursor (#14) ── */
+    div[data-testid="stDataFrame"] [data-testid="data-grid-canvas"] {
+        cursor: pointer !important;
+    }
+    div[data-testid="stDataFrame"] [data-testid="StyledFullScreenButton"] {
+        cursor: pointer !important;
+    }
+
+    /* ── Skeleton loader (#12) ── */
+    @keyframes shimmer {
+        0%   { background-position: -300px 0; }
+        100% { background-position: 300px 0; }
+    }
+    .skeleton {
+        background: linear-gradient(90deg, #ede4d0 0%, #faf5ea 50%, #ede4d0 100%);
+        background-size: 600px 100%;
+        animation: shimmer 1.4s infinite linear;
+        border-radius: 8px;
+    }
+    .skel-kpi    { height: 122px; }
+    .skel-strip  { height: 78px; }
+    .skel-hero   { height: 138px; }
+    .skel-row    { height: 36px; margin-bottom: 6px; }
+    .skel-chart  { height: 240px; }
+
+    /* ── Count-up animation hook (#13) ── */
+    .countup { font-variant-numeric: tabular-nums; }
+
+    /* ── Alert banners (#18) ── */
+    .alerts-row { display: flex; flex-direction: column; gap: 6px;
+                  margin: 8px 0 14px 0; }
+    .alert-banner {
+        display: flex; align-items: center; gap: 10px;
+        padding: 8px 14px; border-radius: 8px;
+        font-size: 13px; font-weight: 500;
+        border: 1px solid; line-height: 1.3;
+    }
+    .alert-danger { background: #fbeaea; color: #8b1a1a; border-color: #f0c5c5; }
+    .alert-warn   { background: #fef3d6; color: #7a5c00; border-color: #f0dca0; }
+    .alert-info   { background: #eaf3fb; color: #0b4a6b; border-color: #c5dcef; }
+
+    /* ── Gauges container ── */
+    .gauge-grid { display: grid; gap: 14px; }
+
+    /* ── Print stylesheet (#10) ── */
+    @media print {
+        section[data-testid="stSidebar"] { display: none !important; }
+        section[data-testid="stMain"] { padding: 0 !important; }
+        button, div[data-testid="stButton"], .stDownloadButton { display: none !important; }
+        div[data-baseweb="tab-list"] { display: none !important; }
+        div[data-testid="stToolbar"] { display: none !important; }
+        .kpi-card, .hero-card, .pnl-strip, .forecast-card, .narrative {
+            page-break-inside: avoid;
+            box-shadow: none !important;
+            border: 1px solid #888 !important;
+        }
+        .page-title { font-size: 22px !important; }
+        body { background: white !important; }
+        section[data-testid="stMain"] > div { background: white !important; }
+        div[data-testid="stDataFrame"] { page-break-inside: avoid; }
+    }
+
     /* ── Misc ── */
     hr { border-color: #d6ccba; }
     .small-muted { font-size: 11px; color: #7a6a50; }
@@ -273,6 +357,22 @@ def run_query(sql: str) -> pd.DataFrame:
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None)]:
     if k not in st.session_state: st.session_state[k] = v
+
+# Hydrate from URL on first load (#19)
+if "_url_synced" not in st.session_state:
+    try:
+        qp = st.query_params
+        if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","pnl"}:
+            st.session_state.view = qp["view"]
+        if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
+        if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
+        if "preset" in qp and "date_preset" not in st.session_state:
+            st.session_state.date_preset = qp["preset"]
+        if "sku" in qp and "sku_search" not in st.session_state:
+            st.session_state.sku_search = qp["sku"]
+    except Exception:
+        pass
+    st.session_state._url_synced = True
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -862,6 +962,24 @@ def render_breadcrumbs(segments):
             cidx += 1
 
 
+## ── Metric definitions (#5) ──
+METRIC_DEFS = {
+    "SALES":          "Sales = SUM(Sales Actual). Total gross revenue for the period.",
+    "REV_BUDGET":     "Revenue Budget = SUM(Sales Budget) for the period.",
+    "REV_PCT":        "Rev % = Sales Actual ÷ Sales Budget × 100. >100% = above plan.",
+    "CM1":            "CM1 = Contribution Margin 1 = Sales − COGS − Additional Duty.\n"
+                      "CM1% = CM1 ÷ Sales × 100.",
+    "ACOS":           "ACoS = Advertising Cost of Sales = PM Spend ÷ Sales × 100.\n"
+                      "Lower is better (ad efficiency). <20% = efficient, >35% = unhealthy.",
+    "CM2":            "CM2 = CM1 − Outbound − 3PL − Storage − Last Mile − Commission − PM Spend.\n"
+                      "CM2% = CM2 ÷ Sales × 100. The bottom-line margin after all marketplace costs.",
+    "CM2_ABS":        "CM2 Absolute = CM2 in rupee terms. The actual profit contribution.",
+    "FORECAST_EOM":   "Forecast EOM = (Sales-to-date ÷ days elapsed) × total days in month.\n"
+                      "Linear extrapolation of current pace to month-end.",
+    "PACE":           "Pace = Sales Actual ÷ days elapsed (per day average for the period).",
+}
+
+
 def hero_card(label, value, sub=None, delta_pct=None):
     """Big hero KPI card for CEO landing."""
     parts = [f'<div class="hero-card">'
@@ -966,6 +1084,220 @@ def strip_card(label, value, sub=None, delta=None):
             f'{sub_html}{delta_html}</div>')
 
 
+# ── Goal-achievement gauges (#4) ──
+def build_gauge(pct, title, target_pct=100, height=180):
+    """Half-doughnut gauge in Vahdam brand colors. pct can be None."""
+    if not HAS_PLOTLY: return None
+    v = _f(pct)
+    if v is None: v = 0
+    v_clamp = max(0, min(v, 150))
+    # threshold color
+    if v >= target_pct:        bar = "#1a7a3e"
+    elif v >= target_pct * 0.9: bar = "#AB8743"
+    else:                       bar = "#8b1a1a"
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=v_clamp,
+        number={"suffix": "%", "font": {"size": 28, "color": "#004A2B"}},
+        gauge={
+            "shape": "angular",
+            "axis": {"range": [0, 150], "tickwidth": 0,
+                     "tickfont": {"size": 9, "color": "#7a6a50"}},
+            "bar":  {"color": bar, "thickness": 0.32},
+            "bgcolor": "#FBF5EA",
+            "borderwidth": 0,
+            "steps": [
+                {"range": [0, target_pct*0.9], "color": "rgba(139,26,26,0.10)"},
+                {"range": [target_pct*0.9, target_pct], "color": "rgba(171,135,67,0.15)"},
+                {"range": [target_pct, 150], "color": "rgba(26,122,62,0.12)"},
+            ],
+            "threshold": {
+                "line": {"color": "#004A2B", "width": 3},
+                "thickness": 0.85, "value": target_pct,
+            },
+        },
+        domain={"x": [0, 1], "y": [0, 1]},
+    ))
+    fig.update_layout(
+        title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center",
+                   font=dict(size=12, color="#004A2B")),
+        paper_bgcolor="#FBF5EA",
+        height=height, margin=dict(l=20, r=20, t=40, b=20),
+    )
+    return fig
+
+
+# ── Count-up number animation (#13) ──
+def countup_number(target_value, fmt_str="{}", duration_ms=900, html_id=None):
+    """Returns HTML with embedded JS that animates from 0 to target_value.
+    fmt_str example: '₹{}Cr' (one {} placeholder for the number)."""
+    import time as _t
+    if html_id is None:
+        html_id = f"cu_{int(_t.time() * 1000) % 1_000_000}_{abs(hash(target_value)) % 100000}"
+    safe_target = _f(target_value) or 0
+    return (f'<span class="countup" id="{html_id}">'
+            f'{fmt_str.replace("{}", f"{safe_target:.2f}")}</span>'
+            f'<script>(function(){{'
+            f'var el=document.getElementById("{html_id}");'
+            f'if(!el)return;'
+            f'var t={safe_target},s=Date.now(),d={duration_ms};'
+            f'function tick(){{'
+            f'var p=Math.min(1,(Date.now()-s)/d);'
+            f'var e=1-Math.pow(1-p,3);'
+            f'el.textContent={repr(fmt_str)}.replace("{{}}",(t*e).toFixed(2));'
+            f'if(p<1)requestAnimationFrame(tick);'
+            f'}}tick();'
+            f'}})();</script>')
+
+
+# ── In-app alert banners (#18) ──
+def render_alerts(view1_df, kpi_row, agg_label="GEO"):
+    """Render alert banners based on data conditions."""
+    alerts = []
+    if view1_df is not None and not view1_df.empty:
+        totals = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
+        totals["REV_PCT_n"] = pd.to_numeric(totals["REV_PCT"], errors="coerce")
+        totals = totals.dropna(subset=["REV_PCT_n"])
+        critical = totals[totals["REV_PCT_n"] < 80]
+        if not critical.empty:
+            geos = ", ".join(critical["GEO"].head(3).tolist())
+            alerts.append(("danger", f"🚨 Critical: {len(critical)} {agg_label}"
+                                       f"{'s' if len(critical) != 1 else ''} below 80% of "
+                                       f"budget — {geos}"))
+        warn = totals[(totals["REV_PCT_n"] >= 80) & (totals["REV_PCT_n"] < 90)]
+        if not warn.empty:
+            geos = ", ".join(warn["GEO"].head(3).tolist())
+            alerts.append(("warn", f"⚠️ Watch: {len(warn)} {agg_label}"
+                                    f"{'s' if len(warn) != 1 else ''} between "
+                                    f"80–90% of budget — {geos}"))
+    if kpi_row is not None:
+        acos_delta = _f(kpi_row.get("ACOS_DELTA"))
+        if acos_delta is not None and acos_delta > 3:
+            alerts.append(("warn", f"📈 ACoS is {acos_delta:+.1f}pp above budget — "
+                                    "review ad spend efficiency."))
+        cm2_delta = _f(kpi_row.get("CM2_DELTA"))
+        if cm2_delta is not None and cm2_delta < -2:
+            alerts.append(("danger", f"💸 CM2 margin is {cm2_delta:+.1f}pp below budget — "
+                                      "profitability under pressure."))
+    if not alerts: return ""
+    html_parts = ['<div class="alerts-row">']
+    for kind, msg in alerts:
+        html_parts.append(f'<div class="alert-banner alert-{kind}">{msg}</div>')
+    html_parts.append('</div>')
+    return "".join(html_parts)
+
+
+# ── Variance attribution (#20) ──
+def build_variance_chart(view1_df):
+    """Stacked horizontal bar showing each GEO's contribution to sales variance vs budget."""
+    if not HAS_PLOTLY or view1_df is None or view1_df.empty: return None
+    totals = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
+    totals["ACT_n"] = pd.to_numeric(totals["SALES_ACT"], errors="coerce")
+    totals["BUD_n"] = pd.to_numeric(totals["SALES_BUD"], errors="coerce")
+    totals = totals.dropna(subset=["ACT_n"])
+    if totals.empty: return None
+    totals["VAR_n"] = totals["ACT_n"].fillna(0) - totals["BUD_n"].fillna(0)
+    totals = totals[totals["VAR_n"].abs() > 0].copy()
+    if totals.empty: return None
+    totals = totals.sort_values("VAR_n", ascending=True)
+    # Auto-scale unit
+    peak = totals["VAR_n"].abs().max()
+    if   peak >= 1e7: div, unit = 1e7, "Cr"
+    elif peak >= 1e5: div, unit = 1e5, "L"
+    elif peak >= 1e3: div, unit = 1e3, "K"
+    else:             div, unit = 1, ""
+    totals["VAR_scaled"] = totals["VAR_n"] / div
+    colors = ["#1a7a3e" if v >= 0 else "#8b1a1a" for v in totals["VAR_n"]]
+    fig = go.Figure(go.Bar(
+        x=totals["VAR_scaled"], y=totals["GEO"],
+        orientation="h",
+        marker=dict(color=colors, line=dict(color="rgba(0,74,43,0.4)", width=1)),
+        text=[fmt_lakhs(v, signed=True) for v in totals["VAR_n"]],
+        textposition="outside",
+        hovertemplate=("<b>%{y}</b><br>"
+                       f"Variance: %{{text}}<br>"
+                       f"Actual: %{{customdata[0]}}<br>"
+                       f"Budget: %{{customdata[1]}}<extra></extra>"),
+        customdata=list(zip(totals["ACT_n"].apply(fmt_lakhs),
+                            totals["BUD_n"].apply(fmt_lakhs))),
+    ))
+    fig.update_layout(
+        title=dict(text=f"<b>Sales Variance vs Budget by Country</b> (₹ {unit})",
+                   font=dict(size=14, color="#004A2B")),
+        plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+        font=dict(family="Arial", color="#171717"),
+        height=max(220, 60 + len(totals) * 32),
+        margin=dict(l=60, r=80, t=50, b=40),
+        showlegend=False,
+    )
+    fig.update_xaxes(title_text=f"Variance (₹ {unit})",
+                      gridcolor="rgba(171,135,67,0.18)",
+                      zerolinecolor="rgba(0,74,43,0.5)", zerolinewidth=2)
+    fig.update_yaxes(title_text="", gridcolor="rgba(171,135,67,0.18)")
+    return fig
+
+
+# ── URL params persistence (#19) ──
+def sync_state_from_url():
+    """Read URL params on initial load and seed session_state."""
+    qp = st.query_params
+    if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","pnl"}:
+        st.session_state.view = qp["view"]
+    if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
+    if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
+    if "preset" in qp and "date_preset" not in st.session_state:
+        st.session_state.date_preset = qp["preset"]
+    if "sku" in qp and "sku_search" not in st.session_state:
+        st.session_state.sku_search = qp["sku"]
+
+
+def write_state_to_url(view, geo, subcat, preset, sku):
+    """Mirror current session state to URL query params (so the URL can be shared)."""
+    qp = {}
+    if view:                       qp["view"]   = view
+    if geo:                        qp["geo"]    = geo
+    if subcat:                     qp["subcat"] = subcat
+    if preset and preset != "MTD": qp["preset"] = preset
+    if sku and sku.strip():        qp["sku"]    = sku.strip()
+    st.query_params.update(qp)
+
+
+# ── AI insights (#17, optional) ──
+def ai_available():
+    try:
+        return "anthropic" in st.secrets and bool(st.secrets["anthropic"].get("api_key"))
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def ask_ai(question, context_str):
+    """Send question + KPI context to Claude. Returns markdown string."""
+    if not ai_available(): return None
+    try:
+        import urllib.request, urllib.error, json
+        api_key = st.secrets["anthropic"]["api_key"]
+        prompt = (f"You are a senior P&L analyst for Vahdam India, a tea brand "
+                  f"selling on Amazon globally. Answer in 2-4 short sentences with "
+                  f"specific numbers from the data. Be direct and actionable.\n\n"
+                  f"DATA:\n{context_str}\n\nQUESTION: {question}\n\nANSWER:")
+        body = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 400,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body, method="POST",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return data["content"][0]["text"]
+    except Exception as e:
+        return f"_AI error: {e}_"
+
+
 def fmt_indian(v, signed=False):
     """Indian number format: 1,04,09,835"""
     n = _f(v)
@@ -1037,6 +1369,11 @@ def render_ceo():
     kp = kpi_prev.iloc[0] if not kpi_prev.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
 
+    # ── Alert banners (#18) ──
+    alerts_html = render_alerts(df, k, agg_label="GEO")
+    if alerts_html:
+        st.markdown(alerts_html, unsafe_allow_html=True)
+
     # Narrative
     narrative = build_narrative(k, df if not df.empty else None)
     if narrative:
@@ -1064,19 +1401,38 @@ def render_ceo():
                                 f"Δ: {fmt_lakhs((_f(k.get('SALES_ACT')) or 0) - (_f(k.get('SALES_BUD')) or 0), signed=True)}",
                                 None), unsafe_allow_html=True)
 
-    # ── Forecast EOM (#9) ──
+    # ── Forecast EOM (#9) + Goal gauges (#4) ──
     if kfm is not None and days_elapsed > 0:
-        # Use MTD slice for pace calc — if current period spans full month already, no forecast needed
         mtd_where = build_where(date_from=month_start, date_to=min(d_to, month_end))
         mtd_kpi   = get_kpis(mtd_where, sfx)
         if not mtd_kpi.empty:
             mtd_act = _f(mtd_kpi.iloc[0].get("SALES_ACT"))
             mtd_bud = _f(kfm.get("SALES_BUD"))
             fc_html = forecast_card(mtd_act, mtd_bud, days_elapsed, _total_days)
-            if fc_html:
-                fc1, fc2 = st.columns([2, 5])
-                with fc1:
-                    st.markdown(fc_html, unsafe_allow_html=True)
+            # 4 columns: forecast card + 3 gauges
+            g_cols = st.columns([2, 1, 1, 1])
+            with g_cols[0]:
+                if fc_html: st.markdown(fc_html, unsafe_allow_html=True)
+            with g_cols[1]:
+                g1 = build_gauge(_f(k.get("REV_PCT")), "Revenue vs Budget", target_pct=100)
+                if g1: st.plotly_chart(g1, use_container_width=True,
+                                       config={"displayModeBar": False})
+            with g_cols[2]:
+                cm2_act = _f(k.get("CM2_ACT")); cm2_bud = _f(k.get("CM2_BUD"))
+                cm2_pct = (cm2_act / cm2_bud * 100) if (cm2_act and cm2_bud) else None
+                g2 = build_gauge(cm2_pct, "CM2% vs Budget", target_pct=100)
+                if g2: st.plotly_chart(g2, use_container_width=True,
+                                       config={"displayModeBar": False})
+            with g_cols[3]:
+                acos_act = _f(k.get("ACOS_ACT")); acos_bud = _f(k.get("ACOS_BUD"))
+                # Lower ACoS is better — invert: 100% means at or below budget
+                if acos_act and acos_bud:
+                    acos_pct = (acos_bud / acos_act * 100) if acos_act else None
+                else:
+                    acos_pct = None
+                g3 = build_gauge(acos_pct, "Ad Efficiency", target_pct=100)
+                if g3: st.plotly_chart(g3, use_container_width=True,
+                                       config={"displayModeBar": False})
 
     # ── Top movers ──
     if not df.empty:
@@ -1142,6 +1498,79 @@ def render_ceo():
                           title_text=f"₹ {unit}".strip())
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+    # ── AI Insights (#17) ──
+    if ai_available():
+        st.markdown('<div class="section-hdr" style="margin-top:24px;">'
+                    '🤖 Ask the data <span style="font-size:12px;color:#7a6a50;'
+                    'font-weight:500;">— ask a question about this period</span></div>',
+                    unsafe_allow_html=True)
+        q = st.text_input("Question", placeholder="e.g., Why is CA underperforming? "
+                          "Which GEO has the best margins?",
+                          key="ai_question", label_visibility="collapsed")
+        if q and q.strip():
+            context = (f"Period: {d_from} to {d_to} ({_period_len} days)\n"
+                       f"Sales Actual: {fmt_lakhs(k.get('SALES_ACT'))} "
+                       f"(Budget: {fmt_lakhs(k.get('SALES_BUD'))}, "
+                       f"Rev%: {fmt_pct(k.get('REV_PCT'))})\n"
+                       f"CM1: {fmt_pct(k.get('CM1_ACT'))} (Bud: {fmt_pct(k.get('CM1_BUD'))})\n"
+                       f"CM2: {fmt_pct(k.get('CM2_ACT'))} (Bud: {fmt_pct(k.get('CM2_BUD'))})\n"
+                       f"CM2 Absolute: {fmt_lakhs(k.get('CM2_ABS_ACT'))}\n"
+                       f"ACoS: {fmt_pct(k.get('ACOS_ACT'))} (Bud: {fmt_pct(k.get('ACOS_BUD'))})\n")
+            if not df.empty:
+                totals = df[df["CHANNEL"] == "TOTAL"].copy()
+                context += "\nGEO Breakdown:\n"
+                for _, r in totals.iterrows():
+                    context += (f"- {r['GEO']}: Sales {fmt_lakhs(r['SALES_ACT'])} "
+                                f"(Bud {fmt_lakhs(r['SALES_BUD'])}, "
+                                f"{fmt_pct(r['REV_PCT'])})\n")
+            with st.spinner("Asking Claude…"):
+                answer = ask_ai(q.strip(), context)
+            if answer:
+                st.markdown(f'<div class="narrative" style="border-left-color:#4a6bb8;">'
+                            f'🤖 {answer.replace(chr(10), "<br>")}</div>',
+                            unsafe_allow_html=True)
+
+    # ── Share + print toolbar (#10, #19) ──
+    st.markdown("---")
+    write_state_to_url(st.session_state.view,
+                       st.session_state.selected_geo,
+                       st.session_state.selected_subcat,
+                       st.session_state.get("date_preset", "MTD"),
+                       st.session_state.get("sku_search", ""))
+    s1, s2, s3 = st.columns([3, 3, 3])
+    with s1:
+        share_html = (f'<a href="#" onclick="navigator.clipboard.writeText('
+                      f"window.location.href);this.innerText='✓ Copied!';"
+                      f'return false;" style="display:inline-block;'
+                      f'padding:8px 16px;background:#004A2B;color:#FBF5EA;'
+                      f'border-radius:6px;text-decoration:none;font-weight:600;'
+                      f'font-size:14px;">🔗 Copy share link</a>')
+        st.markdown(share_html, unsafe_allow_html=True)
+    with s2:
+        st.markdown(
+            '<a href="javascript:window.print()" style="display:inline-block;'
+            'padding:8px 16px;background:#AB8743;color:#171717;'
+            'border-radius:6px;text-decoration:none;font-weight:600;'
+            'font-size:14px;">🖨️ Print / Save PDF</a>',
+            unsafe_allow_html=True)
+    with s3:
+        _sales_txt   = fmt_lakhs(k.get("SALES_ACT"))
+        _cm2pct_txt  = fmt_pct(k.get("CM2_ACT"))
+        _rev_pct_txt = fmt_pct(k.get("REV_PCT"))
+        mail_subject = f"Vahdam Amazon P%26L — {d_from} to {d_to}"
+        mail_body    = (f"Period: {d_from} to {d_to}%0D%0A"
+                        f"Sales: {_sales_txt} ({_rev_pct_txt} of Bud)%0D%0A"
+                        f"CM2 Margin: {_cm2pct_txt}%0D%0A"
+                        f"CM2 Absolute: {fmt_lakhs(k.get('CM2_ABS_ACT'))}%0D%0A%0D%0A"
+                        f"Full dashboard: ")
+        st.markdown(
+            f'<a href="mailto:?subject={mail_subject}&body={mail_body}" '
+            'style="display:inline-block;padding:8px 16px;background:#ffffff;'
+            'color:#004A2B;border:1px solid #004A2B;border-radius:6px;'
+            'text-decoration:none;font-weight:600;font-size:14px;">'
+            '✉️ Email summary</a>',
+            unsafe_allow_html=True)
+
     # ── Drill into full dashboard ──
     st.markdown("---")
     d1, d2, d3 = st.columns(3)
@@ -1188,6 +1617,11 @@ def render_overview():
     df    = get_view1(where, sfx)
     fm_df = get_fm_budget_v1(where_fm, sfx)
 
+    # ── Alert banners (#18) ──
+    alerts_html = render_alerts(df, k, agg_label="GEO")
+    if alerts_html:
+        st.markdown(alerts_html, unsafe_allow_html=True)
+
     # ── Auto-narrative (#1) ──
     narrative = build_narrative(k, df if not df.empty else None)
     if narrative:
@@ -1209,18 +1643,18 @@ def render_overview():
 
     cols = st.columns(5)
     cards = [
-        ("Revenue vs Budget",  fmt_lakhs(k["SALES_ACT"]), f"Bud: {fmt_lakhs(k['SALES_BUD'])}", k["REV_PCT"],
+        ("Revenue vs Budget", "REV_BUDGET", fmt_lakhs(k["SALES_ACT"]), f"Bud: {fmt_lakhs(k['SALES_BUD'])}", k["REV_PCT"],
          kpi_delta(k["REV_DELTA"]),     _pop_delta("SALES_ACT")),
-        ("CM1% vs Budget",     fmt_pct(k["CM1_ACT"]),    f"Bud: {fmt_pct(k['CM1_BUD'])}",     None,
+        ("CM1% vs Budget", "CM1", fmt_pct(k["CM1_ACT"]),    f"Bud: {fmt_pct(k['CM1_BUD'])}",     None,
          kpi_delta(k["CM1_DELTA"], unit="pp"),     _pop_delta("CM1_ACT", "pp")),
-        ("ACoS%",              fmt_pct(k["ACOS_ACT"]),   f"Bud: {fmt_pct(k['ACOS_BUD'])}",    None,
+        ("ACoS%", "ACOS",              fmt_pct(k["ACOS_ACT"]),   f"Bud: {fmt_pct(k['ACOS_BUD'])}",    None,
          kpi_delta(k["ACOS_DELTA"], unit="pp", invert=True), _pop_delta("ACOS_ACT", "pp")),
-        ("CM2%",               fmt_pct(k["CM2_ACT"]),    f"Bud: {fmt_pct(k['CM2_BUD'])}",     None,
+        ("CM2%", "CM2",               fmt_pct(k["CM2_ACT"]),    f"Bud: {fmt_pct(k['CM2_BUD'])}",     None,
          kpi_delta(k["CM2_DELTA"], unit="pp"),     _pop_delta("CM2_ACT", "pp")),
-        ("CM2 Absolute",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", None,
+        ("CM2 Absolute", "CM2_ABS",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", None,
          kpi_delta(k["CM2_ABS_DELTA"]), _pop_delta("CM2_ABS_ACT")),
     ]
-    for col, (label, actual, budget, pct, delta, pop) in zip(cols, cards):
+    for col, (label, def_key, actual, budget, pct, delta, pop) in zip(cols, cards):
         badge = pct_badge(pct) if pct is not None else ""
         pop_html = ""
         if pop is not None:
@@ -1231,17 +1665,18 @@ def render_overview():
                         f'margin-top:3px;border-top:1px dashed #d6ccba;padding-top:4px;">'
                         f'<span class="{cls}">{arrow} {abs(pop):.1f}{unit}</span> '
                         f'<span class="small-muted">vs prev period</span></div>')
+        tip = METRIC_DEFS.get(def_key, "")
+        label_html = (f'<div class="kpi-label" data-tip="{tip}">{label} ⓘ</div>'
+                      if tip else f'<div class="kpi-label">{label}</div>')
         inner = "".join([
-            f'<div class="kpi-label">{label}</div>',
+            label_html,
             f'<div class="kpi-actual">{actual}</div>',
             f'<div class="kpi-budget">{budget}</div>',
             delta or "",
             badge or "",
             pop_html or "",
         ])
-        title_attr = (f"Prior period: {prev_d_from.strftime('%d %b')} – "
-                      f"{prev_d_to.strftime('%d %b %Y')}")
-        col.markdown(f'<div class="kpi-card" title="{title_attr}">{inner}</div>',
+        col.markdown(f'<div class="kpi-card">{inner}</div>',
                      unsafe_allow_html=True)
     st.caption(f"📅 Period comparison: prior {_period_len} days ({prev_d_from.strftime('%d %b %Y')} – "
                f"{prev_d_to.strftime('%d %b %Y')})")
@@ -1258,6 +1693,17 @@ def render_overview():
     if df.empty:
         st.info("📭 No data available for the current selection.")
         return
+
+    # ── Variance attribution chart (#20) ──
+    with st.expander("📐 Variance attribution by Country", expanded=False):
+        st.caption("Each bar shows the contribution of one country to the overall "
+                   "sales variance vs budget. Sum of all bars ≈ total variance.")
+        vfig = build_variance_chart(df)
+        if vfig is not None:
+            st.plotly_chart(vfig, use_container_width=True,
+                            config={"displayModeBar": False})
+        else:
+            st.info("Not enough data to compute variance attribution.")
 
     df = df.merge(fm_df[["GEO","CHANNEL","FM_SALES_BUD","FM_CM2_BUD"]],
                   on=["GEO","CHANNEL"], how="left")
