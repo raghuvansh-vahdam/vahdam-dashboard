@@ -559,12 +559,22 @@ with st.sidebar:
     # ── Quick Date Presets ──
     st.markdown("#### Quick Presets")
     today  = date.today()
-    PRESET_OPTS = ["MTD", "Last 30 Days", "Last 60 Days", "Last 90 Days", "Custom Range"]
+    PRESET_OPTS = ["MTD", "QTD", "YTD",
+                   "Last 30 Days", "Last 60 Days", "Last 90 Days",
+                   "Custom Range"]
     preset = st.selectbox("Date Preset", PRESET_OPTS, index=0, key="date_preset")
 
     _preset_days = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90}
     if preset == "MTD":
         d_from, d_to = today.replace(day=1), today
+    elif preset == "QTD":
+        # Quarter-to-date: first day of current quarter
+        q_start_month = ((today.month - 1) // 3) * 3 + 1
+        d_from = date(today.year, q_start_month, 1)
+        d_to   = today
+    elif preset == "YTD":
+        d_from = date(today.year, 1, 1)
+        d_to   = today
     elif preset in _preset_days:
         d_from, d_to = today - timedelta(days=_preset_days[preset] - 1), today
     else:
@@ -627,6 +637,17 @@ with st.sidebar:
     if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
         st.session_state.view = "pnl"
         st.rerun()
+
+    # ── Refresh data ──
+    st.markdown("---")
+    if st.button("🔄 Refresh data", use_container_width=True, key="refresh_data",
+                 help="Clear cache and refetch from Snowflake"):
+        st.cache_data.clear()
+        st.rerun()
+    from datetime import datetime as _dt
+    st.markdown(f"<div style='font-size:10.5px;color:#AB8743;text-align:center;"
+                f"margin-top:4px;'>Last loaded · {_dt.now().strftime('%H:%M:%S')}"
+                f"</div>", unsafe_allow_html=True)
 
 # ── Month / pro-rata helpers ──────────────────────────────────────────────────
 month_start       = d_from.replace(day=1)
@@ -892,8 +913,14 @@ def get_view2(where, sfx):
             ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS REV_PCT,
             ROUND(SUM(CM1_BUDGET_{sfx}),0)    AS CM1_BUD,
             ROUND(SUM(CM1_ACTUAL_{sfx}),0)    AS CM1_ACT,
+            ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS CM1_PCT_ACT,
+            ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS CM1_PCT_BUD,
+            ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS ACOS_PCT_ACT,
+            ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS ACOS_PCT_BUD,
             ROUND(SUM(CM2_BUDGET_{sfx}),0)    AS CM2_BUD,
             ROUND(SUM(CM2_ACTUAL_{sfx}),0)    AS CM2_ACT,
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS CM2_PCT_ACT,
+            ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS CM2_PCT_BUD,
             ROUND(SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}),0) AS CM2_VAR,
             ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1) AS CM2_ABS_ACHVD_PCT
         FROM {TABLE} WHERE {where}
@@ -905,8 +932,14 @@ def get_view2(where, sfx):
             ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
             ROUND(SUM(CM1_BUDGET_{sfx}),0),
             ROUND(SUM(CM1_ACTUAL_{sfx}),0),
+            ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
+            ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
             ROUND(SUM(CM2_BUDGET_{sfx}),0),
             ROUND(SUM(CM2_ACTUAL_{sfx}),0),
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
             ROUND(SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}),0),
             ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1)
         FROM {TABLE} WHERE {where}
@@ -1459,40 +1492,79 @@ def countup_number(target_value, fmt_str="{}", duration_ms=900, html_id=None):
 
 
 # ── In-app alert banners (#18) ──
-def render_alerts(view1_df, kpi_row, agg_label="GEO"):
-    """Render alert banners based on data conditions."""
-    alerts = []
+def render_alerts(view1_df, kpi_row, agg_label="GEO", key_prefix="alert"):
+    """Render a collapsible alerts banner with clickable GEO chips that drill
+    into the Sub-Category view. Renders Streamlit widgets directly (no return)."""
+    critical_rows, warn_rows = [], []
     if view1_df is not None and not view1_df.empty:
         totals = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
         totals["REV_PCT_n"] = pd.to_numeric(totals["REV_PCT"], errors="coerce")
         totals = totals.dropna(subset=["REV_PCT_n"])
-        critical = totals[totals["REV_PCT_n"] < 80]
-        if not critical.empty:
-            geos = ", ".join(critical["GEO"].head(3).tolist())
-            alerts.append(("danger", f"🚨 Critical: {len(critical)} {agg_label}"
-                                       f"{'s' if len(critical) != 1 else ''} below 80% of "
-                                       f"budget — {geos}"))
-        warn = totals[(totals["REV_PCT_n"] >= 80) & (totals["REV_PCT_n"] < 90)]
-        if not warn.empty:
-            geos = ", ".join(warn["GEO"].head(3).tolist())
-            alerts.append(("warn", f"⚠️ Watch: {len(warn)} {agg_label}"
-                                    f"{'s' if len(warn) != 1 else ''} between "
-                                    f"80–90% of budget — {geos}"))
+        critical_rows = totals[totals["REV_PCT_n"] < 80][["GEO", "REV_PCT_n"]] \
+                            .values.tolist()
+        warn_rows = totals[(totals["REV_PCT_n"] >= 80) & (totals["REV_PCT_n"] < 90)] \
+                        [["GEO", "REV_PCT_n"]].values.tolist()
+
+    margin_msgs = []
     if kpi_row is not None:
         acos_delta = _f(kpi_row.get("ACOS_DELTA"))
         if acos_delta is not None and acos_delta > 3:
-            alerts.append(("warn", f"📈 ACoS is {acos_delta:+.1f}pp above budget — "
-                                    "review ad spend efficiency."))
+            margin_msgs.append(("warn",
+                f"📈 ACoS is {acos_delta:+.1f}pp above budget — "
+                "review ad spend efficiency."))
         cm2_delta = _f(kpi_row.get("CM2_DELTA"))
         if cm2_delta is not None and cm2_delta < -2:
-            alerts.append(("danger", f"💸 CM2 margin is {cm2_delta:+.1f}pp below budget — "
-                                      "profitability under pressure."))
-    if not alerts: return ""
-    html_parts = ['<div class="alerts-row">']
-    for kind, msg in alerts:
-        html_parts.append(f'<div class="alert-banner alert-{kind}">{msg}</div>')
-    html_parts.append('</div>')
-    return "".join(html_parts)
+            margin_msgs.append(("danger",
+                f"💸 CM2 margin is {cm2_delta:+.1f}pp below budget — "
+                "profitability under pressure."))
+
+    n_crit = len(critical_rows)
+    n_warn = len(warn_rows)
+    n_other = len(margin_msgs)
+    if not (n_crit or n_warn or n_other):
+        return
+
+    # Single-line summary used as the expander title
+    summary_bits = []
+    if n_crit:  summary_bits.append(f"🚨 {n_crit} critical")
+    if n_warn:  summary_bits.append(f"⚠️ {n_warn} watch")
+    if n_other: summary_bits.append(
+        f"📊 {n_other} margin alert{'s' if n_other != 1 else ''}")
+    summary = "  ·  ".join(summary_bits)
+
+    # Default open if any critical, otherwise collapsed
+    with st.expander(f"{summary} — ⓘ details", expanded=bool(n_crit)):
+        def _chip_row(label_html, rows, kind, key_kind):
+            if not rows: return
+            st.markdown(f'<div style="font-size:12.5px;color:{"#8b1a1a" if kind=="danger" else "#7a5c00"};'
+                        f'font-weight:700;margin-bottom:6px;">{label_html}</div>',
+                        unsafe_allow_html=True)
+            # Up to 6 chips per row
+            n_cols = min(len(rows), 6)
+            cols = st.columns(n_cols + 1)  # extra spacer at the end
+            for i, (geo, pct) in enumerate(rows[:n_cols]):
+                with cols[i]:
+                    if st.button(f"{geo}  {pct:.0f}%",
+                                 key=f"{key_prefix}_{key_kind}_{geo}",
+                                 use_container_width=True,
+                                 help=f"Open {geo} sub-category breakdown"):
+                        st.session_state.selected_geo    = geo
+                        st.session_state.selected_subcat = None
+                        st.session_state.view            = "subcategory"
+                        st.rerun()
+            # If more than 6, mention the rest
+            if len(rows) > n_cols:
+                extra = ", ".join(r[0] for r in rows[n_cols:])
+                st.caption(f"… and {extra}")
+
+        if n_crit:
+            _chip_row("Below 80% of budget — click to investigate",
+                      critical_rows, "danger", "crit")
+        if n_warn:
+            _chip_row("Between 80–90% of budget — keep watching",
+                      warn_rows, "warn", "warn")
+        for kind, msg in margin_msgs:
+            (st.error if kind == "danger" else st.warning)(msg)
 
 
 # ── Country performance bar with rich hover (Exec Summary) ──
@@ -1602,6 +1674,119 @@ def build_country_perf_chart(view1_df):
                         font=dict(size=12, color="#171717", family="Arial"),
                         bordercolor="#004A2B", align="left"),
         xaxis=dict(title="", range=[0, 150],
+                   gridcolor="rgba(171,135,67,0.15)",
+                   zerolinecolor="rgba(171,135,67,0.4)",
+                   ticksuffix="%"),
+        yaxis=dict(title="", autorange="reversed",
+                   gridcolor="rgba(0,0,0,0)",
+                   tickfont=dict(size=13, color="#004A2B", family="Arial")),
+        bargap=0.45,
+    )
+    return fig
+
+
+# ── Sub-Category performance bar with rich hover ──
+def build_subcat_perf_chart(view2_df):
+    """Horizontal bar chart of Revenue % vs Budget per sub-category, with a rich
+    hover tooltip showing all 5 KPIs (Rev, CM1%, ACoS%, CM2%, CM2 Abs).
+    Mirrors build_country_perf_chart for visual consistency."""
+    if not HAS_PLOTLY or view2_df is None or view2_df.empty:
+        return None
+    t = view2_df[view2_df["SUB_CATEGORY"] != "GRAND TOTAL"].copy()
+    t["REV_PCT_n"] = pd.to_numeric(t["REV_PCT"], errors="coerce")
+    t = t.dropna(subset=["REV_PCT_n"]).copy()
+    if t.empty: return None
+    t = t.sort_values("REV_PCT_n", ascending=True).reset_index(drop=True)
+
+    def _num(col): return pd.to_numeric(t[col], errors="coerce") if col in t.columns else pd.Series([None]*len(t))
+
+    sales_act = _num("SALES_ACT");   sales_bud = _num("SALES_BUD")
+    cm1_act_p = _num("CM1_PCT_ACT"); cm1_bud_p = _num("CM1_PCT_BUD")
+    acos_act_p= _num("ACOS_PCT_ACT");acos_bud_p= _num("ACOS_PCT_BUD")
+    cm2_act_p = _num("CM2_PCT_ACT"); cm2_bud_p = _num("CM2_PCT_BUD")
+    cm2a      = _num("CM2_ACT");     cm2a_bud  = _num("CM2_BUD")
+
+    def _pp_str(a, b):
+        if pd.isna(a) or pd.isna(b): return "—"
+        v = float(a) - float(b)
+        return f"{'+' if v >= 0 else ''}{v:.1f}pp"
+    def _pct_str(v):
+        return "—" if pd.isna(v) else f"{float(v):.1f}%"
+    def _ratio_str(a, b):
+        if pd.isna(a) or pd.isna(b) or float(b) == 0: return "—"
+        return f"{float(a)/float(b)*100:.1f}%"
+
+    customdata = []
+    for i, row in t.iterrows():
+        cd = [
+            fmt_lakhs(sales_act.iloc[i]), fmt_lakhs(sales_bud.iloc[i]),
+            f"{_f(t['REV_PCT_n'].iloc[i]):.1f}%",
+            _pct_str(cm1_act_p.iloc[i]),  _pct_str(cm1_bud_p.iloc[i]),
+            _pp_str(cm1_act_p.iloc[i], cm1_bud_p.iloc[i]),
+            _pct_str(acos_act_p.iloc[i]), _pct_str(acos_bud_p.iloc[i]),
+            _pp_str(acos_act_p.iloc[i], acos_bud_p.iloc[i]),
+            _pct_str(cm2_act_p.iloc[i]),  _pct_str(cm2_bud_p.iloc[i]),
+            _pp_str(cm2_act_p.iloc[i], cm2_bud_p.iloc[i]),
+            fmt_lakhs(cm2a.iloc[i]),      fmt_lakhs(cm2a_bud.iloc[i]),
+            _ratio_str(cm2a.iloc[i], cm2a_bud.iloc[i]),
+        ]
+        customdata.append(cd)
+
+    def _bar_color(v):
+        if v is None: return "#7a6a50"
+        if v >= 100: return "#1a7a3e"
+        if v >= 90:  return "#AB8743"
+        return "#8b1a1a"
+    colors = [_bar_color(_f(v)) for v in t["REV_PCT_n"]]
+
+    rev_x = [min(max(_f(v) or 0, 0), 200) for v in t["REV_PCT_n"]]
+    labels = [f"{_f(v):.1f}%" if _f(v) is not None else "—" for v in t["REV_PCT_n"]]
+
+    fig = go.Figure(go.Bar(
+        x=rev_x,
+        y=t["SUB_CATEGORY"],
+        orientation="h",
+        marker=dict(color=colors,
+                    line=dict(color="rgba(0,74,43,0.45)", width=1)),
+        text=labels, textposition="outside",
+        textfont=dict(size=12, color="#171717", family="Arial"),
+        customdata=customdata,
+        hovertemplate=(
+            "<b style='font-size:13px;'>%{y}</b>  "
+            "<span style='color:#7a6a50;'>· Rev vs Budget</span><br>"
+            "──────────────────<br>"
+            "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
+            "<b>(%{customdata[2]})</b><br>"
+            "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
+            "<b>(%{customdata[5]} vs B)</b><br>"
+            "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
+            "<b>(%{customdata[8]} vs B)</b><br>"
+            "<b>CM2%</b>         %{customdata[9]}  /  %{customdata[10]}  "
+            "<b>(%{customdata[11]} vs B)</b><br>"
+            "<b>CM2 Abs</b>      %{customdata[12]} /  %{customdata[13]}  "
+            "<b>(%{customdata[14]})</b><br>"
+            "<span style='color:#7a6a50;font-size:10px;'>"
+            "Actual / Budget · click bar to drill into ASINs</span>"
+            "<extra></extra>"
+        ),
+    ))
+    fig.add_vline(x=100, line_dash="dash", line_color="rgba(0,74,43,0.55)",
+                  line_width=2,
+                  annotation_text="100% target",
+                  annotation_position="top",
+                  annotation_font=dict(size=10, color="#004A2B"))
+
+    n = len(t)
+    fig.update_layout(
+        plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+        font=dict(family="Arial", color="#171717"),
+        height=max(220, 44 + n * 36),
+        margin=dict(l=50, r=90, t=30, b=30),
+        showlegend=False,
+        hoverlabel=dict(bgcolor="#ffffff",
+                        font=dict(size=12, color="#171717", family="Arial"),
+                        bordercolor="#004A2B", align="left"),
+        xaxis=dict(title="", range=[0, max(160, (max(rev_x) if rev_x else 100) + 25)],
                    gridcolor="rgba(171,135,67,0.15)",
                    zerolinecolor="rgba(171,135,67,0.4)",
                    ticksuffix="%"),
@@ -1795,10 +1980,8 @@ def render_ceo():
     klm = kpi_lm.iloc[0] if not kpi_lm.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
 
-    # ── Alert banners (#18) ──
-    alerts_html = render_alerts(df, k, agg_label="GEO")
-    if alerts_html:
-        st.markdown(alerts_html, unsafe_allow_html=True)
+    # ── Alert banners (#18) — collapsible + clickable GEO chips ──
+    render_alerts(df, k, agg_label="GEO", key_prefix="ceo_alert")
 
     # Narrative
     narrative = build_narrative(k, df if not df.empty else None)
@@ -2042,10 +2225,8 @@ def render_overview():
     df    = get_view1(where, sfx)
     fm_df = get_fm_budget_v1(where_fm, sfx)
 
-    # ── Alert banners (#18) ──
-    alerts_html = render_alerts(df, k, agg_label="GEO")
-    if alerts_html:
-        st.markdown(alerts_html, unsafe_allow_html=True)
+    # ── Alert banners (#18) — collapsible + clickable GEO chips ──
+    render_alerts(df, k, agg_label="GEO", key_prefix="ov_alert")
 
     # ── Auto-narrative (#1) ──
     narrative = build_narrative(k, df if not df.empty else None)
@@ -2332,7 +2513,35 @@ def render_subcategory():
                          unsafe_allow_html=True)
         st.markdown("")
 
-    st.markdown('<div class="section-hdr">Sub-Category P&amp;L · '
+    # ── Sub-Category interactive performance chart ──
+    st.markdown(
+        '<div class="section-hdr">Sub-Category Performance · Revenue vs Budget '
+        '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+        '— hover for full P&amp;L · click any bar to drill into ASINs</span>'
+        '</div>', unsafe_allow_html=True)
+    scfig = build_subcat_perf_chart(df)
+    if scfig is not None:
+        sc_evt = st.plotly_chart(
+            scfig, use_container_width=True,
+            config={"displayModeBar": False},
+            on_select="rerun",
+            selection_mode=("points",),
+            key=f"subcat_chart_{geo}",
+        )
+        try:
+            sc_points = sc_evt.selection.points if sc_evt else []
+        except Exception:
+            sc_points = []
+        if sc_points:
+            clicked_sc = sc_points[0].get("y") or sc_points[0].get("label")
+            if clicked_sc:
+                st.session_state.selected_subcat = clicked_sc
+                st.session_state.view = "asin"
+                st.rerun()
+        st.caption("Bars: Revenue % vs Budget. 🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
+                   "**Click a bar** to open that sub-category's ASIN view.")
+
+    st.markdown('<div class="section-hdr">Sub-Category P&amp;L Table · '
                 '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
                 'click a row to drill into ASINs</span></div>', unsafe_allow_html=True)
 
