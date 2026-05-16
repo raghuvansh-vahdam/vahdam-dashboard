@@ -463,6 +463,37 @@ st.markdown("""
         div[data-testid="stDataFrame"] { page-break-inside: avoid; }
     }
 
+    /* ── Compact action toolbar (top-right icons) ── */
+    .action-toolbar {
+        display: flex; justify-content: flex-end; align-items: center;
+        gap: 8px; margin-top: 12px;
+    }
+    .ico-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 36px; height: 36px; border-radius: 8px;
+        background: #ffffff; border: 1px solid #d6ccba;
+        text-decoration: none !important; font-size: 16px;
+        box-shadow: 0 1px 3px rgba(0,74,43,0.06);
+        transition: transform .12s ease, box-shadow .12s ease,
+                    border-color .12s ease, background .12s ease;
+        cursor: pointer; user-select: none;
+    }
+    .ico-btn:hover {
+        transform: translateY(-1px);
+        background: #faf5ea; border-color: #AB8743;
+        box-shadow: 0 3px 8px rgba(0,74,43,0.12);
+    }
+    .ico-btn-done {
+        background: #d6ece1 !important; border-color: #1a7a3e !important;
+    }
+
+    /* ── Sidebar credit footer ── */
+    .sb-credit {
+        text-align: center; font-size: 10.5px; color: #AB8743;
+        margin-top: 16px; letter-spacing: 0.3px;
+    }
+    .sb-credit .heart { color: #d35a4a; }
+
     /* ── Misc ── */
     hr { border-color: #d6ccba; }
     .small-muted { font-size: 11px; color: #7a6a50; }
@@ -598,14 +629,13 @@ with st.sidebar:
         return run_query(f"SELECT DISTINCT BRAND,CATEGORY,CHANNEL,GEO,SUB_CATEGORY FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
 
-    _fc1, _fc2 = st.columns([3, 2])
-    with _fc1: st.markdown("#### Filters")
-    with _fc2:
-        if st.button("⟲ Clear", use_container_width=True, key="clear_filters",
-                     help="Clear all filters"):
-            for k in ["flt_brand","flt_cat","flt_channel","flt_geo","flt_subcat","sku_search"]:
-                if k in st.session_state: st.session_state[k] = [] if k != "sku_search" else ""
-            st.rerun()
+    st.markdown("#### Filters")
+    if st.button("⟲ Clear all filters", use_container_width=True,
+                 key="clear_filters",
+                 help="Reset Brand / Category / Channel / GEO / Sub-Category / SKU search"):
+        for k in ["flt_brand","flt_cat","flt_channel","flt_geo","flt_subcat","sku_search"]:
+            st.session_state.pop(k, None)
+        st.rerun()
 
     f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
                                key="flt_brand")
@@ -648,6 +678,12 @@ with st.sidebar:
     st.markdown(f"<div style='font-size:10.5px;color:#AB8743;text-align:center;"
                 f"margin-top:4px;'>Last loaded · {_dt.now().strftime('%H:%M:%S')}"
                 f"</div>", unsafe_allow_html=True)
+
+    # ── Credit footer ──
+    st.markdown(
+        '<div class="sb-credit">Created with '
+        '<span class="heart">❤</span> by <b>Raghuvansh</b></div>',
+        unsafe_allow_html=True)
 
 # ── Month / pro-rata helpers ──────────────────────────────────────────────────
 month_start       = d_from.replace(day=1)
@@ -1955,15 +1991,34 @@ def _build_waterfall(row):
 # ═══════════════════════════════════════════════════════════════════════════════
 def render_ceo():
     """Single-screen executive summary — high signal, no scrolling required."""
-    st.markdown('<div class="page-title">Executive Summary</div>',
-                unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} &rarr; {d_to.strftime("%d %b %Y")}'
-        f' &nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"}'
-        f' &nbsp;&bull;&nbsp; {_period_len} days  &nbsp;&bull;&nbsp; '
-        f'<span style="color:#7a6a50">vs prior {_period_len}d: '
-        f'{prev_d_from.strftime("%d %b")}–{prev_d_to.strftime("%d %b")}</span></div>',
-        unsafe_allow_html=True)
+    # Header row: title + page-sub on the left, compact action icons on the right
+    _ht_col, _ha_col = st.columns([9, 3])
+    with _ht_col:
+        st.markdown('<div class="page-title">Executive Summary</div>',
+                    unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="page-sub">{d_from.strftime("%d %b %Y")} &rarr; {d_to.strftime("%d %b %Y")}'
+            f' &nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"}'
+            f' &nbsp;&bull;&nbsp; {_period_len} days  &nbsp;&bull;&nbsp; '
+            f'<span style="color:#7a6a50">vs prior {_period_len}d: '
+            f'{prev_d_from.strftime("%d %b")}–{prev_d_to.strftime("%d %b")}</span></div>',
+            unsafe_allow_html=True)
+    with _ha_col:
+        # Compact icon-only action toolbar (top-right)
+        mail_subject = f"Vahdam Amazon P%26L — {d_from} to {d_to}"
+        _toolbar = (
+            f'<div class="action-toolbar">'
+            f'<a href="#" class="ico-btn" title="Copy share link" '
+            f"onclick=\"navigator.clipboard.writeText(window.location.href);"
+            f"this.classList.add('ico-btn-done');setTimeout(()=>this.classList.remove('ico-btn-done'),1500);"
+            f'return false;">🔗</a>'
+            f'<a href="javascript:window.print()" class="ico-btn" '
+            f'title="Print / Save PDF">🖨️</a>'
+            f'<a href="mailto:?subject={mail_subject}" class="ico-btn" '
+            f'title="Email summary">✉️</a>'
+            f'</div>'
+        )
+        st.markdown(_toolbar, unsafe_allow_html=True)
 
     where      = build_where()
     where_lm   = build_where(date_from=lm_d_from, date_to=lm_d_to)
@@ -1979,9 +2034,6 @@ def render_ceo():
     k = kpi.iloc[0]
     klm = kpi_lm.iloc[0] if not kpi_lm.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
-
-    # ── Alert banners (#18) — collapsible + clickable GEO chips ──
-    render_alerts(df, k, agg_label="GEO", key_prefix="ceo_alert")
 
     # Narrative
     narrative = build_narrative(k, df if not df.empty else None)
@@ -2144,46 +2196,12 @@ def render_ceo():
                             f'🤖 {answer.replace(chr(10), "<br>")}</div>',
                             unsafe_allow_html=True)
 
-    # ── Share + print toolbar (#10, #19) ──
-    st.markdown("---")
+    # Mirror current state to URL params (for share link)
     write_state_to_url(st.session_state.view,
                        st.session_state.selected_geo,
                        st.session_state.selected_subcat,
                        st.session_state.get("date_preset", "MTD"),
                        st.session_state.get("sku_search", ""))
-    s1, s2, s3 = st.columns([3, 3, 3])
-    with s1:
-        share_html = (f'<a href="#" onclick="navigator.clipboard.writeText('
-                      f"window.location.href);this.innerText='✓ Copied!';"
-                      f'return false;" style="display:inline-block;'
-                      f'padding:8px 16px;background:#004A2B;color:#FBF5EA;'
-                      f'border-radius:6px;text-decoration:none;font-weight:600;'
-                      f'font-size:14px;">🔗 Copy share link</a>')
-        st.markdown(share_html, unsafe_allow_html=True)
-    with s2:
-        st.markdown(
-            '<a href="javascript:window.print()" style="display:inline-block;'
-            'padding:8px 16px;background:#AB8743;color:#171717;'
-            'border-radius:6px;text-decoration:none;font-weight:600;'
-            'font-size:14px;">🖨️ Print / Save PDF</a>',
-            unsafe_allow_html=True)
-    with s3:
-        _sales_txt   = fmt_lakhs(k.get("SALES_ACT"))
-        _cm2pct_txt  = fmt_pct(k.get("CM2_ACT"))
-        _rev_pct_txt = fmt_pct(k.get("REV_PCT"))
-        mail_subject = f"Vahdam Amazon P%26L — {d_from} to {d_to}"
-        mail_body    = (f"Period: {d_from} to {d_to}%0D%0A"
-                        f"Sales: {_sales_txt} ({_rev_pct_txt} of Bud)%0D%0A"
-                        f"CM2 Margin: {_cm2pct_txt}%0D%0A"
-                        f"CM2 Absolute: {fmt_lakhs(k.get('CM2_ABS_ACT'))}%0D%0A%0D%0A"
-                        f"Full dashboard: ")
-        st.markdown(
-            f'<a href="mailto:?subject={mail_subject}&body={mail_body}" '
-            'style="display:inline-block;padding:8px 16px;background:#ffffff;'
-            'color:#004A2B;border:1px solid #004A2B;border-radius:6px;'
-            'text-decoration:none;font-weight:600;font-size:14px;">'
-            '✉️ Email summary</a>',
-            unsafe_allow_html=True)
 
     # ── Drill into full dashboard ──
     # Country-level drill is handled by clicking the bar chart above.
@@ -2224,9 +2242,6 @@ def render_overview():
     # Pre-fetch GEO breakdown so we can build narrative + movers above KPIs
     df    = get_view1(where, sfx)
     fm_df = get_fm_budget_v1(where_fm, sfx)
-
-    # ── Alert banners (#18) — collapsible + clickable GEO chips ──
-    render_alerts(df, k, agg_label="GEO", key_prefix="ov_alert")
 
     # ── Auto-narrative (#1) ──
     narrative = build_narrative(k, df if not df.empty else None)
