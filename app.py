@@ -15,7 +15,7 @@ except ImportError:
 st.set_page_config(
     page_title="Vahdam Amazon P&L Dashboard",
     layout="wide",
-    page_icon="🍵",
+    page_icon="https://www.vahdam.com/cdn/shop/files/favicon.png",
     initial_sidebar_state="expanded",
 )
 
@@ -2006,8 +2006,9 @@ def render_ceo():
             unsafe_allow_html=True)
 
     # ── Drill into full dashboard ──
+    # Country-level drill is handled by clicking the bar chart above.
     st.markdown("---")
-    d1, d2, d3 = st.columns(3)
+    d1, d2 = st.columns(2)
     with d1:
         if st.button("Full Overview →", use_container_width=True,
                      key="ceo_to_overview"):
@@ -2015,20 +2016,6 @@ def render_ceo():
     with d2:
         if st.button("P&L Statement →", use_container_width=True, key="ceo_to_pnl"):
             st.session_state.view = "pnl"; st.rerun()
-    with d3:
-        # Picker — user chooses which GEO to drill into (no hardcoded country)
-        if not df.empty:
-            geo_opts = [g for g in GEO_ORDER if g in df["GEO"].unique()]
-            sel = st.selectbox("Drill into Sub-Categories",
-                               ["— pick a country —"] + geo_opts,
-                               key="ceo_geo_drill",
-                               label_visibility="collapsed",
-                               placeholder="Drill into Sub-Categories…")
-            if sel and sel != "— pick a country —":
-                st.session_state.selected_geo    = sel
-                st.session_state.selected_subcat = None
-                st.session_state.view            = "subcategory"
-                st.rerun()
 
 
 def render_overview():
