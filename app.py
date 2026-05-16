@@ -2122,6 +2122,7 @@ def render_subcategory():
 
     where    = build_where(geo_override=geo)
     where_fm = build_where(geo_override=geo, date_from=month_start, date_to=month_end)
+    where_lm = build_where(geo_override=geo, date_from=lm_d_from, date_to=lm_d_to)
     df       = get_view2(where, sfx)
     fm_df    = get_fm_budget_v2(where_fm, sfx)
 
@@ -2131,23 +2132,56 @@ def render_subcategory():
 
     df = df.merge(fm_df[["SUB_CATEGORY","FM_SALES_BUD"]], on="SUB_CATEGORY", how="left")
 
-    # ── Mini KPIs ──
-    tot = df[df["SUB_CATEGORY"] == "GRAND TOTAL"]
-    if not tot.empty:
-        t = tot.iloc[0]
-        fm_bud = _f(t.get("FM_SALES_BUD"))
-        rev_vs_plan = (prorata_str(t["SALES_ACT"], fm_bud)
-                       if fm_bud else fmt_pct(t["REV_PCT"]))
+    # ── KPI cards: Revenue · CM1% · ACoS% · CM2% · CM2 Abs ──
+    # Use get_kpis for the GEO slice — same metrics as Overview, scoped to this GEO.
+    k_now = get_kpis(where, sfx)
+    k_lm  = get_kpis(where_lm, sfx)
+    if not k_now.empty:
+        k  = k_now.iloc[0]
+        kl = k_lm.iloc[0] if not k_lm.empty else None
+
+        def _ratio(act, bud):
+            a, b = _f(act), _f(bud)
+            if a is None or b is None or b == 0: return None
+            return a / b * 100
+
+        def _pct_change(cur, prev):
+            c, p = _f(cur), _f(prev)
+            if c is None or p is None or p == 0: return None
+            return (c - p) / abs(p) * 100
+
         cards = [
-            ("Revenue Actual", fmt_lakhs(t["SALES_ACT"]),     f"Bud: {fmt_lakhs(t['SALES_BUD'])}"),
-            ("Rev vs Plan",    rev_vs_plan,                    f"Achvd: {fmt_pct(t['REV_PCT'])}"),
-            ("CM1 Actual",     fmt_lakhs(t["CM1_ACT"]),        f"Bud: {fmt_lakhs(t['CM1_BUD'])}"),
-            ("CM2 Actual",     fmt_lakhs(t["CM2_ACT"]),        f"Bud: {fmt_lakhs(t['CM2_BUD'])}"),
-            ("CM2 % Achieved", fmt_pct(t["CM2_ABS_ACHVD_PCT"]), None),
+            ("Revenue", fmt_lakhs(k.get("SALES_ACT")),
+                f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
+                _pct_change(k.get("SALES_ACT"),
+                            kl["SALES_ACT"] if kl is not None else None),
+                _ratio(k.get("SALES_ACT"), k.get("SALES_BUD")), False),
+            ("CM1%",    fmt_pct(k.get("CM1_ACT")),
+                f"Bud: {fmt_pct(k.get('CM1_BUD'))}",
+                _pct_change(k.get("CM1_ACT"),
+                            kl["CM1_ACT"] if kl is not None else None),
+                _ratio(k.get("CM1_ACT"), k.get("CM1_BUD")), False),
+            ("ACoS%",   fmt_pct(k.get("ACOS_ACT")),
+                f"Bud: {fmt_pct(k.get('ACOS_BUD'))}",
+                _pct_change(k.get("ACOS_ACT"),
+                            kl["ACOS_ACT"] if kl is not None else None),
+                _ratio(k.get("ACOS_ACT"), k.get("ACOS_BUD")), True),  # lower = better
+            ("CM2%",    fmt_pct(k.get("CM2_ACT")),
+                f"Bud: {fmt_pct(k.get('CM2_BUD'))}",
+                _pct_change(k.get("CM2_ACT"),
+                            kl["CM2_ACT"] if kl is not None else None),
+                _ratio(k.get("CM2_ACT"), k.get("CM2_BUD")), False),
+            ("CM2 Abs", fmt_lakhs(k.get("CM2_ABS_ACT")),
+                f"Bud: {fmt_lakhs(k.get('CM2_ABS_BUD'))}",
+                _pct_change(k.get("CM2_ABS_ACT"),
+                            kl["CM2_ABS_ACT"] if kl is not None else None),
+                _ratio(k.get("CM2_ABS_ACT"), k.get("CM2_ABS_BUD")), False),
         ]
         cols = st.columns(5, gap="medium")
-        for col, (lbl, val, sub) in zip(cols, cards):
-            col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
+        for col, (lbl, val, sub, delta, ach, lb) in zip(cols, cards):
+            col.markdown(strip_card(lbl, val, sub, delta=delta,
+                                    vs_b_pct=ach, vs_b_lower_better=lb),
+                         unsafe_allow_html=True)
         st.markdown("")
 
     st.markdown('<div class="section-hdr">Sub-Category P&amp;L · '
