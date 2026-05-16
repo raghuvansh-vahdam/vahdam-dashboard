@@ -136,14 +136,22 @@ st.markdown("""
     .pnl-strip {
         background: linear-gradient(180deg, #ffffff 0%, #faf5ea 100%);
         border: 1px solid #d6ccba; border-radius: 10px;
-        padding: 10px 16px; text-align: center;
+        padding: 14px 16px; text-align: center;
         box-shadow: 0 1px 4px rgba(0,74,43,0.05);
-        min-height: 78px; display: flex; flex-direction: column; justify-content: center;
+        height: 168px; display: flex; flex-direction: column;
+        justify-content: flex-start; gap: 4px;
     }
     .pnl-strip-label { font-size: 10px; color: #AB8743; text-transform: uppercase;
-                       letter-spacing: 1px; font-weight: 700; margin-bottom: 2px; }
-    .pnl-strip-val   { font-size: 18px; font-weight: 700; color: #004A2B; line-height: 1.1; }
+                       letter-spacing: 1px; font-weight: 700; }
+    .pnl-strip-val   { font-size: 22px; font-weight: 700; color: #004A2B; line-height: 1.1;
+                       margin-top: 2px; }
     .pnl-strip-sub   { font-size: 10.5px; color: #7a6a50; margin-top: 2px; }
+    .pnl-strip .kpi-delta { margin-top: auto; }
+    .vs-b-pill {
+        display: inline-block; border-radius: 12px; padding: 2px 10px;
+        font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px;
+        margin: 4px auto 0 auto;
+    }
 
     /* ── Typography ── */
     .page-title { font-size: 28px; font-weight: 700; color: #004A2B;
@@ -1299,8 +1307,30 @@ def top_movers_chips(view1_df, n=3):
     return f'<div class="movers-row">{"".join(chips)}</div>'
 
 
-def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM"):
-    """Compact KPI card matching the P&L summary strip style. Reusable across views."""
+def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
+               vs_b_pct=None, vs_b_lower_better=False):
+    """Compact KPI card matching the P&L summary strip style. Reusable across views.
+
+    vs_b_pct: optional achievement % vs budget (e.g. 101.2 means 1.2% above plan).
+              Renders a small pill between the sub line and the delta line.
+    vs_b_lower_better: when True (e.g. for ad spend), <100% is good (green).
+    """
+    # ── vs Budget pill ──
+    vs_b_html = ""
+    if vs_b_pct is not None:
+        v = _f(vs_b_pct)
+        if v is not None:
+            if vs_b_lower_better:
+                if v <= 100:    klass = "badge-green"
+                elif v <= 110:  klass = "badge-amber"
+                else:           klass = "badge-red"
+            else:
+                if v >= 100:    klass = "badge-green"
+                elif v >= 90:   klass = "badge-amber"
+                else:           klass = "badge-red"
+            vs_b_html = (f'<div class="vs-b-pill {klass}">{v:.1f}% vs B</div>')
+
+    # ── vs LM delta ──
     delta_html = ""
     if delta is not None:
         d = _f(delta)
@@ -1312,11 +1342,12 @@ def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM"):
                            if delta_suffix else "")
             delta_html = (f'<div class="kpi-delta {cls}">'
                           f'{arrow} {abs(d):.1f}%{suffix_html}</div>')
+
     sub_html = f'<div class="pnl-strip-sub">{sub}</div>' if sub else ""
     return (f'<div class="pnl-strip">'
             f'<div class="pnl-strip-label">{label}</div>'
             f'<div class="pnl-strip-val">{value}</div>'
-            f'{sub_html}{delta_html}</div>')
+            f'{sub_html}{vs_b_html}{delta_html}</div>')
 
 
 # ── Goal-achievement gauges (#4) ──
@@ -1880,7 +1911,13 @@ def render_overview():
     lm_label = "LMTD" if is_mtd else "LM"
     ly_label = "LYMTD" if is_mtd else "LY"
 
-    cols = st.columns(5)
+    # CM2 Abs achievement % for the badge
+    _cm2_abs_ach = None
+    _cm2_abs_act_v, _cm2_abs_bud_v = _f(k.get("CM2_ABS_ACT")), _f(k.get("CM2_ABS_BUD"))
+    if _cm2_abs_act_v is not None and _cm2_abs_bud_v not in (None, 0):
+        _cm2_abs_ach = _cm2_abs_act_v / _cm2_abs_bud_v * 100
+
+    cols = st.columns(5, gap="medium")
     cards = [
         ("Revenue vs Budget", "REV_BUDGET", fmt_lakhs(k["SALES_ACT"]), f"Bud: {fmt_lakhs(k['SALES_BUD'])}", k["REV_PCT"],
          kpi_delta(k["REV_DELTA"]),
@@ -1894,7 +1931,7 @@ def render_overview():
         ("CM2%", "CM2",               fmt_pct(k["CM2_ACT"]),    f"Bud: {fmt_pct(k['CM2_BUD'])}",     None,
          kpi_delta(k["CM2_DELTA"], unit="pp"),
          _delta_vs(klm, "CM2_ACT", "pp"),  _delta_vs(kly, "CM2_ACT", "pp")),
-        ("CM2 Absolute", "CM2_ABS",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", None,
+        ("CM2 Absolute", "CM2_ABS",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", _cm2_abs_ach,
          kpi_delta(k["CM2_ABS_DELTA"]),
          _delta_vs(klm, "CM2_ABS_ACT"),    _delta_vs(kly, "CM2_ABS_ACT")),
     ]
@@ -2100,7 +2137,7 @@ def render_subcategory():
             ("CM2 Actual",     fmt_lakhs(t["CM2_ACT"]),        f"Bud: {fmt_lakhs(t['CM2_BUD'])}"),
             ("CM2 % Achieved", fmt_pct(t["CM2_ABS_ACHVD_PCT"]), None),
         ]
-        cols = st.columns(5)
+        cols = st.columns(5, gap="medium")
         for col, (lbl, val, sub) in zip(cols, cards):
             col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
         st.markdown("")
@@ -2238,31 +2275,44 @@ def render_asin():
     # CTR = Clicks ÷ Impressions × 100
     ctr_pct = (clicks / impressions * 100) if (clicks and impressions) else None
 
-    # Top row — enhanced KPI cards with budget + % growth vs LM
+    # Helpers for achievement % vs budget (None when budget is missing/zero)
+    def _ach(act, bud):
+        a, b = _f(act), _f(bud)
+        if a is None or b is None or b == 0: return None
+        return a / b * 100
+
+    # Top row — enhanced KPI cards with budget + achievement vs B + % vs LM
     cards = [
         ("Total Revenue",  fmt_lakhs(act_rev),
             f"Bud: {fmt_lakhs(bud_rev)}" if bud_rev else None,
-            _pct_change(act_rev, lm_row["ACT_REVENUE"] if lm_row is not None else None)),
+            _pct_change(act_rev, lm_row["ACT_REVENUE"] if lm_row is not None else None),
+            _ach(act_rev, bud_rev), False),
         ("CM2 Absolute",   fmt_lakhs(act_cm2),
             f"Bud: {fmt_lakhs(bud_cm2)}" if bud_cm2 else None,
-            _pct_change(act_cm2, lm_row["ACT_CM2_ABS"] if lm_row is not None else None)),
+            _pct_change(act_cm2, lm_row["ACT_CM2_ABS"] if lm_row is not None else None),
+            _ach(act_cm2, bud_cm2), False),
         ("Total Ad Spend", fmt_lakhs(ad_spd),
             f"Bud: {fmt_lakhs(ad_bud)}" if ad_bud else None,
-            _pct_change(ad_spd, lm_row["AD_SPEND_ACT"] if lm_row is not None else None)),
+            _pct_change(ad_spd, lm_row["AD_SPEND_ACT"] if lm_row is not None else None),
+            _ach(ad_spd, ad_bud), True),  # lower = better for spend
         ("Paid Revenue",   fmt_lakhs(paid_rev),
             f"PACoS: {fmt_pct(pacos_pct)}" if pacos_pct is not None else None,
-            _pct_change(paid_rev, lm_row["PAID_REVENUE"] if lm_row is not None else None)),
+            _pct_change(paid_rev, lm_row["PAID_REVENUE"] if lm_row is not None else None),
+            None, False),
         ("Impressions",
             f"{impressions/1e6:.2f}M" if impressions else "—",
             f"ASINs: {len(df):,}",
-            _pct_change(impressions, lm_row["IMPRESSIONS"] if lm_row is not None else None)),
+            _pct_change(impressions, lm_row["IMPRESSIONS"] if lm_row is not None else None),
+            None, False),
     ]
-    cols = st.columns(5)
-    for col, (lbl, val, sub, delta) in zip(cols, cards):
-        col.markdown(strip_card(lbl, val, sub, delta=delta),
+    cols = st.columns(5, gap="medium")
+    for col, (lbl, val, sub, delta, ach, lb) in zip(cols, cards):
+        col.markdown(strip_card(lbl, val, sub, delta=delta,
+                                vs_b_pct=ach, vs_b_lower_better=lb),
                      unsafe_allow_html=True)
 
-    # Bottom row — ad efficiency KPIs (CVR, CPC, CTR, PACoS, TACoS)
+    # Bottom row — ad efficiency KPIs (CVR, CPC, CTR, PACoS, TACoS).
+    # No formulas — labels are self-explanatory.
     def _cpc_fmt(v):
         if v is None: return "—"
         return f"{sym}{v:,.2f}" if v >= 1 else f"{sym}{v:.2f}"
@@ -2274,25 +2324,20 @@ def render_asin():
         return n / d * mult
 
     ads_cards = [
-        ("CVR",     fmt_pct(cvr_pct),
-            "Conversions ÷ Clicks",
-            _pct_change(cvr_pct, _lm_ratio("CONVERSIONS", "CLICKS", 100))),
-        ("CPC",     _cpc_fmt(cpc_val),
-            "Spend ÷ Clicks",
-            _pct_change(cpc_val, _lm_ratio("PAID_SPEND", "CLICKS", 1))),
-        ("CTR",     fmt_pct(ctr_pct),
-            "Clicks ÷ Impressions",
-            _pct_change(ctr_pct, _lm_ratio("CLICKS", "IMPRESSIONS", 100))),
-        ("PACoS%",  fmt_pct(pacos_pct),
-            "Spend ÷ Paid Revenue",
+        ("CVR",    fmt_pct(cvr_pct),
+            _pct_change(cvr_pct,   _lm_ratio("CONVERSIONS", "CLICKS", 100))),
+        ("CPC",    _cpc_fmt(cpc_val),
+            _pct_change(cpc_val,   _lm_ratio("PAID_SPEND", "CLICKS", 1))),
+        ("CTR",    fmt_pct(ctr_pct),
+            _pct_change(ctr_pct,   _lm_ratio("CLICKS", "IMPRESSIONS", 100))),
+        ("PACoS%", fmt_pct(pacos_pct),
             _pct_change(pacos_pct, _lm_ratio("PAID_SPEND", "PAID_REVENUE", 100))),
-        ("TACoS%",  fmt_pct(tacos_pct),
-            "Spend ÷ Total Revenue",
+        ("TACoS%", fmt_pct(tacos_pct),
             _pct_change(tacos_pct, _lm_ratio("PAID_SPEND", "ACT_REVENUE", 100))),
     ]
-    cols2 = st.columns(5)
-    for col, (lbl, val, sub, delta) in zip(cols2, ads_cards):
-        col.markdown(strip_card(lbl, val, sub, delta=delta),
+    cols2 = st.columns(5, gap="medium")
+    for col, (lbl, val, delta) in zip(cols2, ads_cards):
+        col.markdown(strip_card(lbl, val, sub=None, delta=delta),
                      unsafe_allow_html=True)
     st.markdown("")
 
@@ -2634,7 +2679,7 @@ def render_pnl():
                     f'<div class="pnl-strip-val">{val}</div>'
                     f'<div class="pnl-strip-sub">{sub}</div></div>')
 
-        scols = st.columns(5)
+        scols = st.columns(5, gap="medium")
         scols[0].markdown(_strip_card("Sales", fmt_lakhs(sales_act),
             f"Bud: {fmt_lakhs(_r.get('SALES_BUD'))}"), unsafe_allow_html=True)
         scols[1].markdown(_strip_card("CM1 Margin", fmt_pct(cm1_pct),
