@@ -1873,15 +1873,34 @@ def render_ceo():
         st.markdown('<div class="section-hdr" style="margin-top:18px;">'
                     'Country Performance · Revenue vs Budget '
                     '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
-                    '— hover for the full P&amp;L view of each country</span>'
+                    '— hover for full P&amp;L · click any bar to drill in</span>'
                     '</div>', unsafe_allow_html=True)
         cfig = build_country_perf_chart(df)
         if cfig is not None:
-            st.plotly_chart(cfig, use_container_width=True,
-                            config={"displayModeBar": False})
+            cevent = st.plotly_chart(
+                cfig, use_container_width=True,
+                config={"displayModeBar": False},
+                on_select="rerun",
+                selection_mode=("points",),
+                key="ceo_country_chart",
+            )
             st.caption("Bars: Revenue % vs Budget. "
                        "🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
-                       "100% target line shown.")
+                       "100% target line shown. "
+                       "**Click a bar** to drill into that country's sub-categories.")
+
+            # Click-to-drill: navigate to Sub-Category view for the clicked GEO
+            try:
+                points = cevent.selection.points if cevent else []
+            except Exception:
+                points = []
+            if points:
+                clicked_geo = points[0].get("y") or points[0].get("label")
+                if clicked_geo:
+                    st.session_state.selected_geo    = clicked_geo
+                    st.session_state.selected_subcat = None
+                    st.session_state.view            = "subcategory"
+                    st.rerun()
 
     # ── Daily Sales sparkline ──
     spark = get_view1_spark(where, sfx)
