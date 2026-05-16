@@ -135,23 +135,31 @@ st.markdown("""
     /* ── Compact KPI strip (P&L) ── */
     .pnl-strip {
         background: linear-gradient(180deg, #ffffff 0%, #faf5ea 100%);
-        border: 1px solid #d6ccba; border-radius: 10px;
-        padding: 14px 16px; text-align: center;
+        border: 1px solid #d6ccba; border-top: 3px solid #004A2B; border-radius: 10px;
+        padding: 12px 14px; text-align: center;
         box-shadow: 0 1px 4px rgba(0,74,43,0.05);
-        height: 168px; display: flex; flex-direction: column;
-        justify-content: flex-start; gap: 4px;
+        height: 138px; display: flex; flex-direction: column;
+        justify-content: flex-start; gap: 3px;
+        transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+    }
+    .pnl-strip:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 14px rgba(0,74,43,0.12);
+        border-top-color: #AB8743;
     }
     .pnl-strip-label { font-size: 10px; color: #AB8743; text-transform: uppercase;
                        letter-spacing: 1px; font-weight: 700; }
-    .pnl-strip-val   { font-size: 22px; font-weight: 700; color: #004A2B; line-height: 1.1;
-                       margin-top: 2px; }
-    .pnl-strip-sub   { font-size: 10.5px; color: #7a6a50; margin-top: 2px; }
-    .pnl-strip .kpi-delta { margin-top: auto; }
+    .pnl-strip-val   { font-size: 20px; font-weight: 700; color: #004A2B; line-height: 1.1;
+                       margin-top: 1px; }
+    .pnl-strip-sub   { font-size: 10.5px; color: #7a6a50; margin-top: 1px; }
+    .pnl-strip .kpi-delta { margin-top: auto; font-size: 11px; }
     .vs-b-pill {
-        display: inline-block; border-radius: 12px; padding: 2px 10px;
+        display: inline-block; border-radius: 12px; padding: 1px 10px;
         font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px;
-        margin: 4px auto 0 auto;
+        margin: 2px auto 0 auto;
     }
+    /* Adds vertical breathing room between successive KPI rows */
+    .kpi-row-gap { height: 14px; }
 
     /* ── Typography ── */
     .page-title { font-size: 28px; font-weight: 700; color: #004A2B;
@@ -2310,6 +2318,9 @@ def render_asin():
         col.markdown(strip_card(lbl, val, sub, delta=delta,
                                 vs_b_pct=ach, vs_b_lower_better=lb),
                      unsafe_allow_html=True)
+
+    # Spacer between the two KPI rows
+    st.markdown('<div class="kpi-row-gap"></div>', unsafe_allow_html=True)
 
     # Bottom row — ad efficiency KPIs (CVR, CPC, CTR, PACoS, TACoS).
     # No formulas — labels are self-explanatory.
