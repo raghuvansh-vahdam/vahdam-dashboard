@@ -1498,6 +1498,124 @@ def render_alerts(view1_df, kpi_row, agg_label="GEO"):
     return "".join(html_parts)
 
 
+# ── Country performance bar with rich hover (Exec Summary) ──
+def build_country_perf_chart(view1_df):
+    """Horizontal bar chart of Revenue % vs Budget per country, with a rich
+    hover tooltip showing all 5 KPIs (Rev, CM1%, ACoS%, CM2%, CM2 Abs)."""
+    if not HAS_PLOTLY or view1_df is None or view1_df.empty:
+        return None
+    t = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
+    t["REV_PCT_n"] = pd.to_numeric(t["REV_PCT"], errors="coerce")
+    t = t.dropna(subset=["REV_PCT_n"]).copy()
+    if t.empty: return None
+    t = t.sort_values("REV_PCT_n", ascending=True).reset_index(drop=True)
+
+    def _num(col): return pd.to_numeric(t[col], errors="coerce") if col in t.columns else pd.Series([None]*len(t))
+
+    cm1_act = _num("CM1_PCT_ACT"); cm1_bud = _num("CM1_PCT_BUD")
+    acos_act= _num("ACOS_ACT");    acos_bud= _num("ACOS_BUD")
+    cm2_act = _num("CM2_PCT_ACT"); cm2_bud = _num("CM2_PCT_BUD")
+    cm2a    = _num("CM2_ABS_ACT"); cm2a_bud= _num("CM2_ABS_BUD")
+    sales_act = _num("SALES_ACT"); sales_bud = _num("SALES_BUD")
+
+    def _ppdiff(a, b):
+        return [None if (pd.isna(x) or pd.isna(y)) else float(x) - float(y)
+                for x, y in zip(a, b)]
+    def _ratio(a, b):
+        return [None if (pd.isna(x) or pd.isna(y) or float(y) == 0)
+                else float(x) / float(y) * 100
+                for x, y in zip(a, b)]
+
+    def _pp_str(v):  return ("—" if v is None
+                              else f"{'+' if v >= 0 else ''}{v:.1f}pp")
+    def _pct_str(v): return ("—" if v is None
+                              else f"{v:.1f}%")
+
+    customdata = []
+    for i, row in t.iterrows():
+        cd = [
+            fmt_lakhs(sales_act.iloc[i]),     fmt_lakhs(sales_bud.iloc[i]),
+            f"{_f(t['REV_PCT_n'].iloc[i]):.1f}%",
+            _pct_str(_f(cm1_act.iloc[i])),    _pct_str(_f(cm1_bud.iloc[i])),
+            _pp_str(_ppdiff([cm1_act.iloc[i]], [cm1_bud.iloc[i]])[0]),
+            _pct_str(_f(acos_act.iloc[i])),   _pct_str(_f(acos_bud.iloc[i])),
+            _pp_str(_ppdiff([acos_act.iloc[i]], [acos_bud.iloc[i]])[0]),
+            _pct_str(_f(cm2_act.iloc[i])),    _pct_str(_f(cm2_bud.iloc[i])),
+            _pp_str(_ppdiff([cm2_act.iloc[i]], [cm2_bud.iloc[i]])[0]),
+            fmt_lakhs(cm2a.iloc[i]),          fmt_lakhs(cm2a_bud.iloc[i]),
+            (f"{_ratio([cm2a.iloc[i]],[cm2a_bud.iloc[i]])[0]:.1f}%"
+              if _ratio([cm2a.iloc[i]],[cm2a_bud.iloc[i]])[0] is not None else "—"),
+        ]
+        customdata.append(cd)
+
+    # Color per row: green ≥100, amber 90-99, red <90
+    def _bar_color(v):
+        if v is None: return "#7a6a50"
+        if v >= 100: return "#1a7a3e"
+        if v >= 90:  return "#AB8743"
+        return "#8b1a1a"
+    colors = [_bar_color(_f(v)) for v in t["REV_PCT_n"]]
+
+    rev_x = [min(max(_f(v) or 0, 0), 150) for v in t["REV_PCT_n"]]
+    labels = [f"{_f(v):.1f}%" if _f(v) is not None else "—" for v in t["REV_PCT_n"]]
+
+    fig = go.Figure(go.Bar(
+        x=rev_x,
+        y=t["GEO"],
+        orientation="h",
+        marker=dict(color=colors,
+                    line=dict(color="rgba(0,74,43,0.45)", width=1)),
+        text=labels, textposition="outside",
+        textfont=dict(size=12, color="#171717", family="Arial"),
+        customdata=customdata,
+        hovertemplate=(
+            "<b style='font-size:13px;'>%{y}</b>  "
+            "<span style='color:#7a6a50;'>· Rev vs Budget</span><br>"
+            "──────────────────<br>"
+            "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
+            "<b>(%{customdata[2]})</b><br>"
+            "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
+            "<b>(%{customdata[5]} vs B)</b><br>"
+            "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
+            "<b>(%{customdata[8]} vs B)</b><br>"
+            "<b>CM2%</b>         %{customdata[9]}  /  %{customdata[10]}  "
+            "<b>(%{customdata[11]} vs B)</b><br>"
+            "<b>CM2 Abs</b>      %{customdata[12]} /  %{customdata[13]}  "
+            "<b>(%{customdata[14]})</b><br>"
+            "<span style='color:#7a6a50;font-size:10px;'>"
+            "Actual / Budget · click row to drill</span>"
+            "<extra></extra>"
+        ),
+    ))
+    # 100% target marker line
+    fig.add_vline(x=100, line_dash="dash", line_color="rgba(0,74,43,0.55)",
+                  line_width=2,
+                  annotation_text="100% target",
+                  annotation_position="top",
+                  annotation_font=dict(size=10, color="#004A2B"))
+
+    n = len(t)
+    fig.update_layout(
+        plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+        font=dict(family="Arial", color="#171717"),
+        height=max(220, 44 + n * 36),
+        margin=dict(l=50, r=80, t=30, b=30),
+        showlegend=False,
+        hoverlabel=dict(bgcolor="#ffffff",
+                        font=dict(size=12, color="#171717", family="Arial"),
+                        bordercolor="#004A2B", align="left"),
+        xaxis=dict(title="", range=[0, 150],
+                   gridcolor="rgba(171,135,67,0.15)",
+                   zerolinecolor="rgba(171,135,67,0.4)",
+                   ticksuffix="%"),
+        yaxis=dict(title="", autorange="reversed",
+                   gridcolor="rgba(0,0,0,0)",
+                   tickfont=dict(size=13, color="#004A2B", family="Arial")),
+        bargap=0.45,
+    )
+    return fig
+
+
 # ── Variance attribution (#20) ──
 def build_variance_chart(view1_df):
     """Stacked horizontal bar showing each GEO's contribution to sales variance vs budget."""
@@ -1750,43 +1868,20 @@ def render_ceo():
                 with fc1:
                     st.markdown(fc_html, unsafe_allow_html=True)
 
-    # ── GEO Performance — all countries at a glance ──
+    # ── Country Performance · interactive (Plotly, hover for full KPIs) ──
     if not df.empty:
-        totals = df[df["CHANNEL"] == "TOTAL"].copy()
-        totals["REV_PCT_n"]   = pd.to_numeric(totals["REV_PCT"],  errors="coerce")
-        totals["SALES_ACT_n"] = pd.to_numeric(totals["SALES_ACT"], errors="coerce")
-        totals["SALES_BUD_n"] = pd.to_numeric(totals["SALES_BUD"], errors="coerce")
-        totals = totals.dropna(subset=["REV_PCT_n"])
-        totals = totals.sort_values("REV_PCT_n", ascending=False).reset_index(drop=True)
-
-        if not totals.empty:
-            st.markdown('<div class="section-hdr" style="margin-top:18px;">'
-                        'Country Performance · Revenue vs Budget</div>',
-                        unsafe_allow_html=True)
-
-            rows_html = ['<div class="geo-perf">']
-            for _, r in totals.iterrows():
-                pct = _f(r["REV_PCT_n"]) or 0
-                if   pct >= 100: bar_cls, txt_cls = "geo-bar-up",   "geo-pct-up"
-                elif pct >= 90:  bar_cls, txt_cls = "geo-bar-warn", "geo-pct-warn"
-                else:            bar_cls, txt_cls = "geo-bar-down", "geo-pct-down"
-                width = max(0, min(pct, 150)) / 150 * 100
-                _act = fmt_lakhs(r["SALES_ACT_n"])
-                _bud = fmt_lakhs(r["SALES_BUD_n"])
-                rows_html.append(
-                    f'<div class="geo-perf-row">'
-                    f'<div class="geo-name">{r["GEO"]}</div>'
-                    f'<div class="geo-bar-track">'
-                    f'<div class="geo-bar-fill {bar_cls}" style="width:{width}%"></div>'
-                    f'<div class="geo-bar-mark"></div>'
-                    f'</div>'
-                    f'<div class="geo-pct {txt_cls}">{pct:.1f}%</div>'
-                    f'<div class="geo-vals">{_act} / {_bud}</div>'
-                    f'</div>')
-            rows_html.append('</div>')
-            st.markdown("".join(rows_html), unsafe_allow_html=True)
-            st.caption("Bar fill = Revenue % vs Budget (100% mark shown). "
-                       "Green ≥100%, amber 90–100%, red <90%.")
+        st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                    'Country Performance · Revenue vs Budget '
+                    '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                    '— hover for the full P&amp;L view of each country</span>'
+                    '</div>', unsafe_allow_html=True)
+        cfig = build_country_perf_chart(df)
+        if cfig is not None:
+            st.plotly_chart(cfig, use_container_width=True,
+                            config={"displayModeBar": False})
+            st.caption("Bars: Revenue % vs Budget. "
+                       "🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
+                       "100% target line shown.")
 
     # ── Daily Sales sparkline ──
     spark = get_view1_spark(where, sfx)
