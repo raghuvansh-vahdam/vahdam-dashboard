@@ -879,6 +879,76 @@ def get_fm_budget_v2(where_fm, sfx):
     """)
 
 @st.cache_data(ttl=300, show_spinner=False)
+def get_asin_totals(geo, sub_cat, d1, d2, sfx):
+    """One-row totals for a (geo, sub_cat, date range).
+
+    Aggregates P&L (table) and marketing (table) separately to avoid the JOIN
+    duplicating P&L rows when one (day, asin) has multiple campaign rows.
+    """
+    esc = sub_cat.replace("'","''")
+    if sub_cat == "(untagged)":
+        pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+    else:
+        pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+
+    pnl = run_query(f"""
+        SELECT
+            COALESCE(ROUND(SUM(SALES_ACTUAL_{sfx}),0),0)     AS ACT_REVENUE,
+            COALESCE(ROUND(SUM(SALES_BUDGET_{sfx}),0),0)     AS BUD_REVENUE,
+            COALESCE(ROUND(SUM(CM2_ACTUAL_{sfx}),0),0)       AS ACT_CM2_ABS,
+            COALESCE(ROUND(SUM(CM2_BUDGET_{sfx}),0),0)       AS BUD_CM2_ABS,
+            COALESCE(ROUND(SUM(PM_SPEND_ACTUAL_{sfx}),0),0)  AS PM_SPEND_ACT,
+            COALESCE(ROUND(SUM(PM_SPEND_BUDGET_{sfx}),0),0)  AS PM_SPEND_BUD
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d1}' AND '{d2}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND {pnl_subcat}
+          AND ASIN IS NOT NULL AND ASIN != ''
+    """)
+
+    # ASINs present in this slice (so marketing totals stay scoped to the sub-cat)
+    asins = run_query(f"""
+        SELECT DISTINCT SPLIT_PART(ASIN,' ',1) AS A
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d1}' AND '{d2}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND {pnl_subcat}
+          AND ASIN IS NOT NULL AND ASIN != ''
+    """)
+    asin_list = ", ".join(repr(a) for a in asins["A"].dropna().tolist())
+    if asin_list:
+        mkt = run_query(f"""
+            SELECT
+                COALESCE(ROUND(SUM(SPEND),0),0)        AS PAID_SPEND,
+                COALESCE(ROUND(SUM(AD_SALES),0),0)     AS PAID_REVENUE,
+                COALESCE(ROUND(SUM(IMPRESSIONS),0),0)  AS IMPRESSIONS,
+                COALESCE(ROUND(SUM(CLICKS),0),0)       AS CLICKS,
+                COALESCE(ROUND(SUM(CONVERSIONS),0),0)  AS CONVERSIONS
+            FROM {MKTG}
+            WHERE DAY BETWEEN '{d1}' AND '{d2}'
+              AND GEO = '{geo}'
+              AND ASIN IN ({asin_list})
+        """)
+    else:
+        mkt = pd.DataFrame([{"PAID_SPEND":0, "PAID_REVENUE":0, "IMPRESSIONS":0,
+                             "CLICKS":0, "CONVERSIONS":0}])
+
+    combined = pd.concat([pnl.reset_index(drop=True),
+                          mkt.reset_index(drop=True)], axis=1)
+    # Choose ad-spend source: prefer P&L's PM_SPEND_ACTUAL when present
+    # (broader marketing spend), else fall back to marketing table SPEND.
+    pm_act = _f(combined.iloc[0].get("PM_SPEND_ACT"))
+    pm_bud = _f(combined.iloc[0].get("PM_SPEND_BUD"))
+    if pm_act and pm_act > 0:
+        combined["AD_SPEND_ACT"] = pm_act
+        combined["AD_SPEND_BUD"] = pm_bud
+    else:
+        combined["AD_SPEND_ACT"] = _f(combined.iloc[0].get("PAID_SPEND")) or 0
+        combined["AD_SPEND_BUD"] = pm_bud
+    return combined
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_asin_data(where, geo, sub_cat, sfx):
     esc = sub_cat.replace("'","''")
     if sub_cat == "(untagged)":
@@ -1229,7 +1299,7 @@ def top_movers_chips(view1_df, n=3):
     return f'<div class="movers-row">{"".join(chips)}</div>'
 
 
-def strip_card(label, value, sub=None, delta=None):
+def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM"):
     """Compact KPI card matching the P&L summary strip style. Reusable across views."""
     delta_html = ""
     if delta is not None:
@@ -1237,7 +1307,11 @@ def strip_card(label, value, sub=None, delta=None):
         if d is not None:
             cls = "delta-up" if d >= 0 else "delta-dn"
             arrow = "▲" if d >= 0 else "▼"
-            delta_html = f'<div class="kpi-delta {cls}">{arrow} {abs(d):.1f}%</div>'
+            suffix_html = (f' <span class="small-muted" '
+                           f'style="font-weight:500;">{delta_suffix}</span>'
+                           if delta_suffix else "")
+            delta_html = (f'<div class="kpi-delta {cls}">'
+                          f'{arrow} {abs(d):.1f}%{suffix_html}</div>')
     sub_html = f'<div class="pnl-strip-sub">{sub}</div>' if sub else ""
     return (f'<div class="pnl-strip">'
             f'<div class="pnl-strip-label">{label}</div>'
@@ -2121,28 +2195,105 @@ def render_asin():
         return
 
     # ── Summary KPIs ──
-    act_rev  = _f(df["ACT_REVENUE"].sum())
-    bud_rev  = _f(df["BUD_REVENUE"].sum())
-    act_cm2  = _f(df["ACT_CM2_ABS"].sum())
-    bud_cm2  = _f(df["CM2_BUD"].sum()) if "CM2_BUD" in df.columns else None
-    paid_spd = _f(df["PAID_SPEND"].sum())
-    paid_rev = _f(df["PAID_REVENUE"].sum())
-    impressions = _f(df["IMPRESSIONS"].sum())
+    # Period totals (current) — query aggregates P&L and marketing separately
+    # so the JOIN doesn't multiply P&L budgets by campaign-row count.
+    _totals = get_asin_totals(geo, subcat, d_from, d_to, sfx)
+    if not _totals.empty:
+        t = _totals.iloc[0]
+        act_rev  = _f(t["ACT_REVENUE"])
+        bud_rev  = _f(t["BUD_REVENUE"])
+        act_cm2  = _f(t["ACT_CM2_ABS"])
+        bud_cm2  = _f(t["BUD_CM2_ABS"])
+        ad_spd   = _f(t["AD_SPEND_ACT"])
+        ad_bud   = _f(t["AD_SPEND_BUD"])
+        paid_spd = _f(t["PAID_SPEND"])      # marketing-table only (for CTR/CVR/etc)
+        paid_rev = _f(t["PAID_REVENUE"])
+        impressions = _f(t["IMPRESSIONS"])
+        clicks      = _f(t["CLICKS"])
+        conversions = _f(t["CONVERSIONS"])
+    else:
+        act_rev = bud_rev = act_cm2 = bud_cm2 = ad_spd = ad_bud = None
+        paid_spd = paid_rev = impressions = clicks = conversions = None
 
-    pacos = (paid_rev / paid_spd * 100) if (paid_spd and paid_rev) else None
+    # Prior-period totals (LM and LY) — for growth/loss deltas
+    _lm = get_asin_totals(geo, subcat, lm_d_from, lm_d_to, sfx)
+    _ly = get_asin_totals(geo, subcat, ly_d_from, ly_d_to, sfx)
+    lm_row = _lm.iloc[0] if not _lm.empty else None
+    ly_row = _ly.iloc[0] if not _ly.empty else None
+
+    def _pct_change(cur, prev):
+        if cur is None or prev is None or _f(prev) in (None, 0): return None
+        return (_f(cur) - _f(prev)) / abs(_f(prev)) * 100
+
+    # Ad efficiency uses ONLY marketing-table data (paid_spd, paid_rev) since
+    # CTR/CVR/PACoS/CPC are paid-ads metrics by definition.
+    # PACoS = Spend ÷ Paid Revenue × 100 (corrected: was inverted)
+    pacos_pct = (paid_spd / paid_rev * 100) if (paid_spd and paid_rev) else None
+    # TACoS = Spend ÷ Total Revenue × 100
+    tacos_pct = (paid_spd / act_rev * 100) if (paid_spd and act_rev) else None
+    # CVR = Conversions ÷ Clicks × 100
+    cvr_pct = (conversions / clicks * 100) if (conversions and clicks) else None
+    # CPC = Spend ÷ Clicks
+    cpc_val = (paid_spd / clicks) if (paid_spd and clicks) else None
+    # CTR = Clicks ÷ Impressions × 100
+    ctr_pct = (clicks / impressions * 100) if (clicks and impressions) else None
+
+    # Top row — enhanced KPI cards with budget + % growth vs LM
     cards = [
-        ("Total Revenue",  fmt_lakhs(act_rev),  f"Bud: {fmt_lakhs(bud_rev)}"),
-        ("CM2 Absolute",   fmt_lakhs(act_cm2),  f"Bud: {fmt_lakhs(bud_cm2)}" if bud_cm2 else None),
-        ("Total Ad Spend", fmt_lakhs(paid_spd), None),
+        ("Total Revenue",  fmt_lakhs(act_rev),
+            f"Bud: {fmt_lakhs(bud_rev)}" if bud_rev else None,
+            _pct_change(act_rev, lm_row["ACT_REVENUE"] if lm_row is not None else None)),
+        ("CM2 Absolute",   fmt_lakhs(act_cm2),
+            f"Bud: {fmt_lakhs(bud_cm2)}" if bud_cm2 else None,
+            _pct_change(act_cm2, lm_row["ACT_CM2_ABS"] if lm_row is not None else None)),
+        ("Total Ad Spend", fmt_lakhs(ad_spd),
+            f"Bud: {fmt_lakhs(ad_bud)}" if ad_bud else None,
+            _pct_change(ad_spd, lm_row["AD_SPEND_ACT"] if lm_row is not None else None)),
         ("Paid Revenue",   fmt_lakhs(paid_rev),
-            f"PACoS: {fmt_pct(pacos)}" if pacos else None),
+            f"PACoS: {fmt_pct(pacos_pct)}" if pacos_pct is not None else None,
+            _pct_change(paid_rev, lm_row["PAID_REVENUE"] if lm_row is not None else None)),
         ("Impressions",
             f"{impressions/1e6:.2f}M" if impressions else "—",
-            f"ASINs: {len(df):,}"),
+            f"ASINs: {len(df):,}",
+            _pct_change(impressions, lm_row["IMPRESSIONS"] if lm_row is not None else None)),
     ]
     cols = st.columns(5)
-    for col, (lbl, val, sub) in zip(cols, cards):
-        col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
+    for col, (lbl, val, sub, delta) in zip(cols, cards):
+        col.markdown(strip_card(lbl, val, sub, delta=delta),
+                     unsafe_allow_html=True)
+
+    # Bottom row — ad efficiency KPIs (CVR, CPC, CTR, PACoS, TACoS)
+    def _cpc_fmt(v):
+        if v is None: return "—"
+        return f"{sym}{v:,.2f}" if v >= 1 else f"{sym}{v:.2f}"
+
+    def _lm_ratio(num_key, den_key, mult=1):
+        if lm_row is None: return None
+        n, d = _f(lm_row.get(num_key)), _f(lm_row.get(den_key))
+        if not n or not d: return None
+        return n / d * mult
+
+    ads_cards = [
+        ("CVR",     fmt_pct(cvr_pct),
+            "Conversions ÷ Clicks",
+            _pct_change(cvr_pct, _lm_ratio("CONVERSIONS", "CLICKS", 100))),
+        ("CPC",     _cpc_fmt(cpc_val),
+            "Spend ÷ Clicks",
+            _pct_change(cpc_val, _lm_ratio("PAID_SPEND", "CLICKS", 1))),
+        ("CTR",     fmt_pct(ctr_pct),
+            "Clicks ÷ Impressions",
+            _pct_change(ctr_pct, _lm_ratio("CLICKS", "IMPRESSIONS", 100))),
+        ("PACoS%",  fmt_pct(pacos_pct),
+            "Spend ÷ Paid Revenue",
+            _pct_change(pacos_pct, _lm_ratio("PAID_SPEND", "PAID_REVENUE", 100))),
+        ("TACoS%",  fmt_pct(tacos_pct),
+            "Spend ÷ Total Revenue",
+            _pct_change(tacos_pct, _lm_ratio("PAID_SPEND", "ACT_REVENUE", 100))),
+    ]
+    cols2 = st.columns(5)
+    for col, (lbl, val, sub, delta) in zip(cols2, ads_cards):
+        col.markdown(strip_card(lbl, val, sub, delta=delta),
+                     unsafe_allow_html=True)
     st.markdown("")
 
     # ── Brand filter (applies to all 3 tabs) ──
