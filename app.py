@@ -161,6 +161,43 @@ st.markdown("""
     /* Adds vertical breathing room between successive KPI rows */
     .kpi-row-gap { height: 14px; }
 
+    /* ── GEO performance bar list (Exec Summary) ── */
+    .geo-perf {
+        background: #ffffff; border: 1px solid #d6ccba; border-radius: 10px;
+        padding: 14px 18px; box-shadow: 0 1px 4px rgba(0,74,43,0.05);
+    }
+    .geo-perf-row {
+        display: grid; align-items: center;
+        grid-template-columns: 60px 1fr 70px 180px;
+        gap: 14px; padding: 6px 0;
+        border-bottom: 1px dashed #ede4d0;
+    }
+    .geo-perf-row:last-child { border-bottom: none; }
+    .geo-name { font-weight: 700; color: #004A2B; font-size: 14px;
+                letter-spacing: 0.4px; }
+    .geo-bar-track {
+        position: relative; height: 14px; background: #f2eadb;
+        border-radius: 7px; overflow: hidden;
+    }
+    .geo-bar-fill {
+        position: absolute; top: 0; left: 0; height: 100%;
+        border-radius: 7px;
+        transition: width .3s ease;
+    }
+    .geo-bar-up   { background: linear-gradient(90deg, #6dba8d 0%, #1a7a3e 100%); }
+    .geo-bar-warn { background: linear-gradient(90deg, #e8c87b 0%, #AB8743 100%); }
+    .geo-bar-down { background: linear-gradient(90deg, #d35a4a 0%, #8b1a1a 100%); }
+    /* 100% target marker (since track caps at 150%, marker sits at ⅔ width) */
+    .geo-bar-mark {
+        position: absolute; top: -3px; bottom: -3px; left: 66.66%;
+        width: 2px; background: rgba(0,74,43,0.55); border-radius: 1px;
+    }
+    .geo-pct      { font-weight: 700; font-size: 13px; text-align: right; }
+    .geo-pct-up   { color: #1a7a3e; }
+    .geo-pct-warn { color: #AB8743; }
+    .geo-pct-down { color: #8b1a1a; }
+    .geo-vals     { font-size: 11.5px; color: #7a6a50; text-align: right; }
+
     /* ── Typography ── */
     .page-title { font-size: 28px; font-weight: 700; color: #004A2B;
                   margin-bottom: 2px; letter-spacing: -0.4px; }
@@ -581,7 +618,7 @@ with st.sidebar:
 
     # ── Navigation ──
     st.markdown("---")
-    if st.button("⭐ CEO Summary", use_container_width=True, key="nav_ceo"):
+    if st.button("Executive Summary", use_container_width=True, key="nav_ceo"):
         st.session_state.view = "ceo"
         st.rerun()
     _nc1, _nc2 = st.columns(2)
@@ -1618,7 +1655,7 @@ def _build_waterfall(row):
 # ═══════════════════════════════════════════════════════════════════════════════
 def render_ceo():
     """Single-screen executive summary — high signal, no scrolling required."""
-    st.markdown('<div class="page-title">⭐ Executive Summary</div>',
+    st.markdown('<div class="page-title">Executive Summary</div>',
                 unsafe_allow_html=True)
     st.markdown(
         f'<div class="page-sub">{d_from.strftime("%d %b %Y")} &rarr; {d_to.strftime("%d %b %Y")}'
@@ -1629,10 +1666,10 @@ def render_ceo():
         unsafe_allow_html=True)
 
     where      = build_where()
-    where_prev = build_where(date_from=prev_d_from, date_to=prev_d_to)
+    where_lm   = build_where(date_from=lm_d_from, date_to=lm_d_to)
     where_fm   = build_where(date_from=month_start, date_to=month_end)
     kpi        = get_kpis(where, sfx)
-    kpi_prev   = get_kpis(where_prev, sfx)
+    kpi_lm     = get_kpis(where_lm, sfx)
     kpi_fm     = get_kpis(where_fm, sfx)  # full-month budget for forecast
     df         = get_view1(where, sfx)
 
@@ -1640,7 +1677,7 @@ def render_ceo():
         st.warning("📭 No data found for the selected filters.")
         return
     k = kpi.iloc[0]
-    kp = kpi_prev.iloc[0] if not kpi_prev.empty else None
+    klm = kpi_lm.iloc[0] if not kpi_lm.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
 
     # ── Alert banners (#18) ──
@@ -1654,28 +1691,51 @@ def render_ceo():
         st.markdown(f'<div class="narrative">📊 {narrative}</div>',
                     unsafe_allow_html=True)
 
-    # ── 4 hero KPIs ──
-    def _pop(key, mode="ratio"):
-        if kp is None: return None
-        cur, prev = _f(k.get(key)), _f(kp.get(key))
-        if cur is None or prev is None or (mode == "ratio" and prev == 0): return None
-        return (cur - prev) if mode == "pp" else (cur - prev) / abs(prev) * 100
+    # ── 5 KPI cards: Revenue · CM1% · ACoS% · CM2% · CM2 Abs ──
+    def _ratio(act, bud):
+        a, b = _f(act), _f(bud)
+        if a is None or b is None or b == 0: return None
+        return a / b * 100
 
-    cols = st.columns(4)
-    cols[0].markdown(hero_card("Sales", fmt_lakhs(k.get("SALES_ACT")),
-                                f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
-                                _pop("SALES_ACT")), unsafe_allow_html=True)
-    cols[1].markdown(hero_card("CM2 Absolute", fmt_lakhs(k.get("CM2_ABS_ACT")),
-                                f"Bud: {fmt_lakhs(k.get('CM2_ABS_BUD'))}",
-                                _pop("CM2_ABS_ACT")), unsafe_allow_html=True)
-    cols[2].markdown(hero_card("CM2 Margin", fmt_pct(k.get("CM2_ACT")),
-                                f"Bud: {fmt_pct(k.get('CM2_BUD'))}",
-                                _pop("CM2_ACT", "pp")), unsafe_allow_html=True)
-    cols[3].markdown(hero_card("Revenue vs Budget", fmt_pct(k.get("REV_PCT")),
-                                f"Δ: {fmt_lakhs((_f(k.get('SALES_ACT')) or 0) - (_f(k.get('SALES_BUD')) or 0), signed=True)}",
-                                None), unsafe_allow_html=True)
+    def _pct_change(cur, prev):
+        c, p = _f(cur), _f(prev)
+        if c is None or p is None or p == 0: return None
+        return (c - p) / abs(p) * 100
 
-    # ── Forecast EOM (#9) + Goal gauges (#4) ──
+    cards = [
+        ("Revenue", fmt_lakhs(k.get("SALES_ACT")),
+            f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
+            _pct_change(k.get("SALES_ACT"),
+                        klm["SALES_ACT"] if klm is not None else None),
+            _ratio(k.get("SALES_ACT"), k.get("SALES_BUD")), False),
+        ("CM1%",    fmt_pct(k.get("CM1_ACT")),
+            f"Bud: {fmt_pct(k.get('CM1_BUD'))}",
+            _pct_change(k.get("CM1_ACT"),
+                        klm["CM1_ACT"] if klm is not None else None),
+            _ratio(k.get("CM1_ACT"), k.get("CM1_BUD")), False),
+        ("ACoS%",   fmt_pct(k.get("ACOS_ACT")),
+            f"Bud: {fmt_pct(k.get('ACOS_BUD'))}",
+            _pct_change(k.get("ACOS_ACT"),
+                        klm["ACOS_ACT"] if klm is not None else None),
+            _ratio(k.get("ACOS_ACT"), k.get("ACOS_BUD")), True),
+        ("CM2%",    fmt_pct(k.get("CM2_ACT")),
+            f"Bud: {fmt_pct(k.get('CM2_BUD'))}",
+            _pct_change(k.get("CM2_ACT"),
+                        klm["CM2_ACT"] if klm is not None else None),
+            _ratio(k.get("CM2_ACT"), k.get("CM2_BUD")), False),
+        ("CM2 Abs", fmt_lakhs(k.get("CM2_ABS_ACT")),
+            f"Bud: {fmt_lakhs(k.get('CM2_ABS_BUD'))}",
+            _pct_change(k.get("CM2_ABS_ACT"),
+                        klm["CM2_ABS_ACT"] if klm is not None else None),
+            _ratio(k.get("CM2_ABS_ACT"), k.get("CM2_ABS_BUD")), False),
+    ]
+    cols = st.columns(5, gap="medium")
+    for col, (lbl, val, sub, delta, ach, lb) in zip(cols, cards):
+        col.markdown(strip_card(lbl, val, sub, delta=delta,
+                                vs_b_pct=ach, vs_b_lower_better=lb),
+                     unsafe_allow_html=True)
+
+    # ── Forecast EOM (left) — gauges removed (redundant with vs-B pills above) ──
     if kfm is not None and days_elapsed > 0:
         mtd_where = build_where(date_from=month_start, date_to=min(d_to, month_end))
         mtd_kpi   = get_kpis(mtd_where, sfx)
@@ -1683,64 +1743,50 @@ def render_ceo():
             mtd_act = _f(mtd_kpi.iloc[0].get("SALES_ACT"))
             mtd_bud = _f(kfm.get("SALES_BUD"))
             fc_html = forecast_card(mtd_act, mtd_bud, days_elapsed, _total_days)
-            # 4 columns: forecast card + 3 gauges
-            g_cols = st.columns([2, 1, 1, 1])
-            with g_cols[0]:
-                if fc_html: st.markdown(fc_html, unsafe_allow_html=True)
-            with g_cols[1]:
-                g1 = build_gauge(_f(k.get("REV_PCT")), "Revenue vs Budget", target_pct=100)
-                if g1: st.plotly_chart(g1, use_container_width=True,
-                                       config={"displayModeBar": False})
-            with g_cols[2]:
-                cm2_act = _f(k.get("CM2_ACT")); cm2_bud = _f(k.get("CM2_BUD"))
-                cm2_pct = (cm2_act / cm2_bud * 100) if (cm2_act and cm2_bud) else None
-                g2 = build_gauge(cm2_pct, "CM2% vs Budget", target_pct=100)
-                if g2: st.plotly_chart(g2, use_container_width=True,
-                                       config={"displayModeBar": False})
-            with g_cols[3]:
-                acos_act = _f(k.get("ACOS_ACT")); acos_bud = _f(k.get("ACOS_BUD"))
-                # Lower ACoS is better — invert: 100% means at or below budget
-                if acos_act and acos_bud:
-                    acos_pct = (acos_bud / acos_act * 100) if acos_act else None
-                else:
-                    acos_pct = None
-                g3 = build_gauge(acos_pct, "Ad Efficiency", target_pct=100)
-                if g3: st.plotly_chart(g3, use_container_width=True,
-                                       config={"displayModeBar": False})
+            if fc_html:
+                st.markdown('<div class="kpi-row-gap"></div>',
+                            unsafe_allow_html=True)
+                fc1, _ = st.columns([2, 5])
+                with fc1:
+                    st.markdown(fc_html, unsafe_allow_html=True)
 
-    # ── Top movers ──
-    if not df.empty:
-        movers_html = top_movers_chips(df, n=3)
-        if movers_html:
-            st.markdown('<div class="section-hdr" style="margin-top:18px;">'
-                        'Top movers</div>', unsafe_allow_html=True)
-            st.markdown(movers_html, unsafe_allow_html=True)
-
-    # ── Best / Worst GEO callouts ──
+    # ── GEO Performance — all countries at a glance ──
     if not df.empty:
         totals = df[df["CHANNEL"] == "TOTAL"].copy()
-        totals["REV_PCT_n"] = pd.to_numeric(totals["REV_PCT"], errors="coerce")
+        totals["REV_PCT_n"]   = pd.to_numeric(totals["REV_PCT"],  errors="coerce")
+        totals["SALES_ACT_n"] = pd.to_numeric(totals["SALES_ACT"], errors="coerce")
+        totals["SALES_BUD_n"] = pd.to_numeric(totals["SALES_BUD"], errors="coerce")
         totals = totals.dropna(subset=["REV_PCT_n"])
+        totals = totals.sort_values("REV_PCT_n", ascending=False).reset_index(drop=True)
+
         if not totals.empty:
-            best  = totals.nlargest(1,  "REV_PCT_n").iloc[0]
-            worst = totals.nsmallest(1, "REV_PCT_n").iloc[0]
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown(f"""
-                <div class="hero-card" style="border-top-color:#1a7a3e;">
-                    <div class="hero-label" style="color:#1a7a3e;">🏆 Best-performing GEO</div>
-                    <div class="hero-value">{best['GEO']}</div>
-                    <div class="hero-sub">Revenue: {fmt_lakhs(best['SALES_ACT'])}
-                        &nbsp;·&nbsp; <b style="color:#1a7a3e;">{_f(best['REV_PCT_n']):.1f}% vs Bud</b></div>
-                </div>""", unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"""
-                <div class="hero-card" style="border-top-color:#8b1a1a;">
-                    <div class="hero-label" style="color:#8b1a1a;">⚠️ Needs attention</div>
-                    <div class="hero-value">{worst['GEO']}</div>
-                    <div class="hero-sub">Revenue: {fmt_lakhs(worst['SALES_ACT'])}
-                        &nbsp;·&nbsp; <b style="color:#8b1a1a;">{_f(worst['REV_PCT_n']):.1f}% vs Bud</b></div>
-                </div>""", unsafe_allow_html=True)
+            st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                        'Country Performance · Revenue vs Budget</div>',
+                        unsafe_allow_html=True)
+
+            rows_html = ['<div class="geo-perf">']
+            for _, r in totals.iterrows():
+                pct = _f(r["REV_PCT_n"]) or 0
+                if   pct >= 100: bar_cls, txt_cls = "geo-bar-up",   "geo-pct-up"
+                elif pct >= 90:  bar_cls, txt_cls = "geo-bar-warn", "geo-pct-warn"
+                else:            bar_cls, txt_cls = "geo-bar-down", "geo-pct-down"
+                width = max(0, min(pct, 150)) / 150 * 100
+                _act = fmt_lakhs(r["SALES_ACT_n"])
+                _bud = fmt_lakhs(r["SALES_BUD_n"])
+                rows_html.append(
+                    f'<div class="geo-perf-row">'
+                    f'<div class="geo-name">{r["GEO"]}</div>'
+                    f'<div class="geo-bar-track">'
+                    f'<div class="geo-bar-fill {bar_cls}" style="width:{width}%"></div>'
+                    f'<div class="geo-bar-mark"></div>'
+                    f'</div>'
+                    f'<div class="geo-pct {txt_cls}">{pct:.1f}%</div>'
+                    f'<div class="geo-vals">{_act} / {_bud}</div>'
+                    f'</div>')
+            rows_html.append('</div>')
+            st.markdown("".join(rows_html), unsafe_allow_html=True)
+            st.caption("Bar fill = Revenue % vs Budget (100% mark shown). "
+                       "Green ≥100%, amber 90–100%, red <90%.")
 
     # ── Daily Sales sparkline ──
     spark = get_view1_spark(where, sfx)
@@ -1849,22 +1895,26 @@ def render_ceo():
     st.markdown("---")
     d1, d2, d3 = st.columns(3)
     with d1:
-        if st.button("📊 Full Overview →", use_container_width=True, key="ceo_to_overview"):
+        if st.button("Full Overview →", use_container_width=True,
+                     key="ceo_to_overview"):
             st.session_state.view = "overview"; st.rerun()
     with d2:
-        if st.button("📋 P&L Statement →", use_container_width=True, key="ceo_to_pnl"):
+        if st.button("P&L Statement →", use_container_width=True, key="ceo_to_pnl"):
             st.session_state.view = "pnl"; st.rerun()
     with d3:
+        # Picker — user chooses which GEO to drill into (no hardcoded country)
         if not df.empty:
-            totals = df[df["CHANNEL"] == "TOTAL"]
-            if not totals.empty:
-                top_geo = totals.iloc[0]["GEO"]
-                if st.button(f"🌍 {top_geo} Sub-Categories →",
-                             use_container_width=True, key="ceo_to_subcat"):
-                    st.session_state.selected_geo    = top_geo
-                    st.session_state.selected_subcat = None
-                    st.session_state.view            = "subcategory"
-                    st.rerun()
+            geo_opts = [g for g in GEO_ORDER if g in df["GEO"].unique()]
+            sel = st.selectbox("Drill into Sub-Categories",
+                               ["— pick a country —"] + geo_opts,
+                               key="ceo_geo_drill",
+                               label_visibility="collapsed",
+                               placeholder="Drill into Sub-Categories…")
+            if sel and sel != "— pick a country —":
+                st.session_state.selected_geo    = sel
+                st.session_state.selected_subcat = None
+                st.session_state.view            = "subcategory"
+                st.rerun()
 
 
 def render_overview():
