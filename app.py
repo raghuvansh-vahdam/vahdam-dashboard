@@ -92,8 +92,27 @@ st.markdown("""
         padding: 14px 18px 12px 18px; text-align: center;
         box-shadow: 0 2px 8px rgba(0,74,43,0.06);
         transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
-        min-height: 122px; display: flex; flex-direction: column; justify-content: center;
+        height: 220px; display: flex; flex-direction: column;
+        justify-content: flex-start; gap: 4px;
     }
+    .kpi-card .kpi-actual { margin-top: 2px; }
+    .kpi-card .kpi-budget { flex: 0 0 auto; }
+    .kpi-card .kpi-delta { margin-top: 2px; }
+    /* Compare block (LMTD/LYMTD or LM/LY) — anchored at bottom of card */
+    .kpi-compare {
+        margin-top: auto; padding-top: 6px;
+        border-top: 1px dashed #d6ccba;
+        display: flex; flex-direction: column; gap: 2px;
+    }
+    .pop-line {
+        display: flex; justify-content: space-between; align-items: center;
+        font-size: 10.5px; font-weight: 600; letter-spacing: 0.3px;
+    }
+    .pop-tag {
+        color: #AB8743; text-transform: uppercase; letter-spacing: 0.6px;
+        font-size: 9.5px;
+    }
+    .pop-val { font-size: 11px; }
     .kpi-card:hover {
         transform: translateY(-2px);
         box-shadow: 0 6px 14px rgba(0,74,43,0.12);
@@ -141,6 +160,11 @@ st.markdown("""
     /* ── Sidebar ── */
     section[data-testid="stSidebar"] { background-color: #004A2B !important; }
     section[data-testid="stSidebar"] * { color: #FBF5EA !important; }
+    /* Make the dark Vahdam logo visible on dark green sidebar */
+    section[data-testid="stSidebar"] img {
+        filter: brightness(0) invert(1) opacity(0.95);
+        margin-bottom: 4px;
+    }
     section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
     section[data-testid="stSidebar"] h4 { color: #AB8743 !important; font-weight: 700;
                                           letter-spacing: 0.5px; font-size: 12px;
@@ -473,7 +497,9 @@ with st.sidebar:
         Amazon P&L Dashboard</div>""", unsafe_allow_html=True)
     st.markdown("---")
 
-    use_inr = st.radio("Currency", ["INR (₹)", "Local Currency"], index=0) == "INR (₹)"
+    use_inr = st.radio("Currency",
+                       ["INR (₹)", "Local ($, €, £, …)"],
+                       index=0) == "INR (₹)"
     sfx = "INR" if use_inr else "LOCAL"
     sym = "₹" if use_inr else ""
 
@@ -563,6 +589,27 @@ _period_len       = (d_to - d_from).days + 1
 prev_d_to         = d_from - timedelta(days=1)
 prev_d_from       = prev_d_to - timedelta(days=_period_len - 1)
 
+def _shift_month(d, months=-1):
+    """Shift a date by N months, clamping day to last day of new month."""
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    last = calendar.monthrange(y, m)[1]
+    return date(y, m, min(d.day, last))
+
+def _shift_year(d, years=-1):
+    """Shift a date by N years, Feb 29 → Feb 28 in non-leap years."""
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:
+        return d.replace(year=d.year + years, day=28)
+
+# Last Month same window (LM) — same dates shifted back 1 calendar month
+lm_d_from = _shift_month(d_from, -1)
+lm_d_to   = _shift_month(d_to,   -1)
+# Last Year same window (LY) — same dates shifted back 1 year
+ly_d_from = _shift_year(d_from, -1)
+ly_d_to   = _shift_year(d_to,   -1)
+
 # ── WHERE builder ─────────────────────────────────────────────────────────────
 def build_where(geo_override=None, subcat_override=None, date_from=None, date_to=None,
                 extra_filters=None, apply_sku=True):
@@ -600,6 +647,29 @@ def _f(v):
         return None if math.isnan(f) or math.isinf(f) else f
     except (TypeError, ValueError):
         return None
+
+GEO_SYMBOL = {
+    "USA": "$", "UK": "£", "DE": "€", "FR": "€", "IT": "€", "ES": "€",
+    "CA": "C$", "AUS": "A$", "UAE": "AED ",
+}
+
+def geo_sym(geo):
+    """Currency symbol for a GEO, or empty string if unknown.
+    Returns empty when global Local mode is off (so INR uses ₹ via sym)."""
+    if use_inr: return "₹"
+    return GEO_SYMBOL.get(geo, "")
+
+
+def fmt_lakhs_for(v, geo, signed=False):
+    """Format value with the country's local currency symbol (Local Currency mode)."""
+    g_sym = geo_sym(geo)
+    saved = globals().get("sym", "₹")
+    try:
+        globals()["sym"] = g_sym
+        return fmt_lakhs(v, signed=signed)
+    finally:
+        globals()["sym"] = saved
+
 
 def fmt_lakhs(v, signed=False):
     """Auto-scale Indian currency: <1K → raw, <1L → K, <1Cr → L, ≥1Cr → Cr."""
@@ -1693,16 +1763,19 @@ def render_overview():
         unsafe_allow_html=True)
 
     where      = build_where()
-    where_prev = build_where(date_from=prev_d_from, date_to=prev_d_to)
+    where_lm   = build_where(date_from=lm_d_from, date_to=lm_d_to)
+    where_ly   = build_where(date_from=ly_d_from, date_to=ly_d_to)
     where_fm   = build_where(date_from=month_start, date_to=month_end)
     kpi        = get_kpis(where, sfx)
-    kpi_prev   = get_kpis(where_prev, sfx)
+    kpi_lm     = get_kpis(where_lm, sfx)
+    kpi_ly     = get_kpis(where_ly, sfx)
 
     if kpi.empty:
         st.warning("📭 No data found for the selected filters. Try widening the date range or clearing some filters.")
         return
     k = kpi.iloc[0]
-    kp = kpi_prev.iloc[0] if not kpi_prev.empty else None
+    klm = kpi_lm.iloc[0] if not kpi_lm.empty else None
+    kly = kpi_ly.iloc[0] if not kpi_ly.empty else None
 
     # Pre-fetch GEO breakdown so we can build narrative + movers above KPIs
     df    = get_view1(where, sfx)
@@ -1719,43 +1792,57 @@ def render_overview():
         st.markdown(f'<div class="narrative">📊 {narrative}</div>',
                     unsafe_allow_html=True)
 
-    # ── KPI Cards with period-over-period delta (#2) ──
-    def _pop_delta(key_act, mode="ratio"):
-        """Return delta vs prior period: ratio = %change, pp = percentage-point diff."""
-        if kp is None: return None
-        cur, prev = _f(k.get(key_act)), _f(kp.get(key_act))
+    # ── KPI Cards with LM + LY comparisons (#2) ──
+    def _delta_vs(prev_row, key_act, mode="ratio"):
+        """Return delta vs the given prior-period row: ratio = %change, pp = pp diff."""
+        if prev_row is None: return None
+        cur, prev = _f(k.get(key_act)), _f(prev_row.get(key_act))
         if cur is None or prev is None: return None
         if mode == "pp":   return cur - prev
         if prev == 0:      return None
         return (cur - prev) / abs(prev) * 100
 
-    pop_label = (f"vs prior {_period_len}d "
-                 f"({prev_d_from.strftime('%d %b')}–{prev_d_to.strftime('%d %b')})")
+    is_mtd = st.session_state.get("date_preset") == "MTD"
+    lm_label = "LMTD" if is_mtd else "LM"
+    ly_label = "LYMTD" if is_mtd else "LY"
 
     cols = st.columns(5)
     cards = [
         ("Revenue vs Budget", "REV_BUDGET", fmt_lakhs(k["SALES_ACT"]), f"Bud: {fmt_lakhs(k['SALES_BUD'])}", k["REV_PCT"],
-         kpi_delta(k["REV_DELTA"]),     _pop_delta("SALES_ACT")),
+         kpi_delta(k["REV_DELTA"]),
+         _delta_vs(klm, "SALES_ACT"),     _delta_vs(kly, "SALES_ACT")),
         ("CM1% vs Budget", "CM1", fmt_pct(k["CM1_ACT"]),    f"Bud: {fmt_pct(k['CM1_BUD'])}",     None,
-         kpi_delta(k["CM1_DELTA"], unit="pp"),     _pop_delta("CM1_ACT", "pp")),
+         kpi_delta(k["CM1_DELTA"], unit="pp"),
+         _delta_vs(klm, "CM1_ACT", "pp"),  _delta_vs(kly, "CM1_ACT", "pp")),
         ("ACoS%", "ACOS",              fmt_pct(k["ACOS_ACT"]),   f"Bud: {fmt_pct(k['ACOS_BUD'])}",    None,
-         kpi_delta(k["ACOS_DELTA"], unit="pp", invert=True), _pop_delta("ACOS_ACT", "pp")),
+         kpi_delta(k["ACOS_DELTA"], unit="pp", invert=True),
+         _delta_vs(klm, "ACOS_ACT", "pp"), _delta_vs(kly, "ACOS_ACT", "pp")),
         ("CM2%", "CM2",               fmt_pct(k["CM2_ACT"]),    f"Bud: {fmt_pct(k['CM2_BUD'])}",     None,
-         kpi_delta(k["CM2_DELTA"], unit="pp"),     _pop_delta("CM2_ACT", "pp")),
+         kpi_delta(k["CM2_DELTA"], unit="pp"),
+         _delta_vs(klm, "CM2_ACT", "pp"),  _delta_vs(kly, "CM2_ACT", "pp")),
         ("CM2 Absolute", "CM2_ABS",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", None,
-         kpi_delta(k["CM2_ABS_DELTA"]), _pop_delta("CM2_ABS_ACT")),
+         kpi_delta(k["CM2_ABS_DELTA"]),
+         _delta_vs(klm, "CM2_ABS_ACT"),    _delta_vs(kly, "CM2_ABS_ACT")),
     ]
-    for col, (label, def_key, actual, budget, pct, delta, pop) in zip(cols, cards):
+    for col, (label, def_key, actual, budget, pct, delta, d_lm, d_ly) in zip(cols, cards):
         badge = pct_badge(pct) if pct is not None else ""
-        pop_html = ""
-        if pop is not None:
-            cls = "delta-up" if pop >= 0 else "delta-dn"
-            arrow = "▲" if pop >= 0 else "▼"
-            unit  = "pp" if "%" in label or label == "ACoS%" else "%"
-            pop_html = (f'<div style="font-size:10.5px;color:#7a6a50;'
-                        f'margin-top:3px;border-top:1px dashed #d6ccba;padding-top:4px;">'
-                        f'<span class="{cls}">{arrow} {abs(pop):.1f}{unit}</span> '
-                        f'<span class="small-muted">vs prev period</span></div>')
+
+        def _delta_line(lbl, val, is_pp):
+            if val is None:
+                return (f'<div class="pop-line"><span class="pop-tag">{lbl}</span>'
+                        f'<span class="pop-val small-muted">—</span></div>')
+            cls = "delta-up" if val >= 0 else "delta-dn"
+            arrow = "▲" if val >= 0 else "▼"
+            unit  = "pp" if is_pp else "%"
+            return (f'<div class="pop-line"><span class="pop-tag">{lbl}</span>'
+                    f'<span class="pop-val {cls}">{arrow} {abs(val):.1f}{unit}</span></div>')
+
+        is_pp = "%" in label
+        compare_block = (f'<div class="kpi-compare">'
+                         f'{_delta_line(lm_label, d_lm, is_pp)}'
+                         f'{_delta_line(ly_label, d_ly, is_pp)}'
+                         f'</div>')
+
         tip = METRIC_DEFS.get(def_key, "")
         label_html = (f'<div class="kpi-label" data-tip="{tip}">{label} ⓘ</div>'
                       if tip else f'<div class="kpi-label">{label}</div>')
@@ -1765,12 +1852,13 @@ def render_overview():
             f'<div class="kpi-budget">{budget}</div>',
             delta or "",
             badge or "",
-            pop_html or "",
+            compare_block,
         ])
         col.markdown(f'<div class="kpi-card">{inner}</div>',
                      unsafe_allow_html=True)
-    st.caption(f"📅 Period comparison: prior {_period_len} days ({prev_d_from.strftime('%d %b %Y')} – "
-               f"{prev_d_to.strftime('%d %b %Y')})")
+    st.caption(f"📅 **{lm_label}** = {lm_d_from.strftime('%d %b %Y')} – "
+               f"{lm_d_to.strftime('%d %b %Y')}  ·  **{ly_label}** = "
+               f"{ly_d_from.strftime('%d %b %Y')} – {ly_d_to.strftime('%d %b %Y')}")
 
     st.markdown('<div class="section-hdr">GEO &times; Channel Breakdown</div>', unsafe_allow_html=True)
     st.caption(f"Pro-rata pace: {days_elapsed} of {_total_days} days elapsed this month  "
@@ -1802,20 +1890,26 @@ def render_overview():
     disp = df.copy()
     disp["CHANNEL"]      = disp["CHANNEL"].astype(str).str.replace("_", " ", regex=False)
     disp["Qty"]          = disp["QTY"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "—")
-    disp["Revenue Act"]  = disp["SALES_ACT"].apply(fmt_lakhs)
-    disp["Revenue Bud"]  = disp["SALES_BUD"].apply(fmt_lakhs)
+
+    # Local-currency mode → use the country's own symbol per row
+    if use_inr:
+        _money = lambda v, geo, signed=False: fmt_lakhs(v, signed=signed)
+    else:
+        _money = lambda v, geo, signed=False: fmt_lakhs_for(v, geo, signed=signed)
+
+    disp["Revenue Act"]  = disp.apply(lambda r: _money(r["SALES_ACT"],     r["GEO"]), axis=1)
+    disp["Revenue Bud"]  = disp.apply(lambda r: _money(r["SALES_BUD"],     r["GEO"]), axis=1)
     disp["CM1% Act"]     = disp["CM1_PCT_ACT"].apply(fmt_pct)
     disp["CM1% Bud"]     = disp["CM1_PCT_BUD"].apply(fmt_pct)
     disp["ACoS% Act"]    = disp["ACOS_ACT"].apply(fmt_pct)
     disp["ACoS% Bud"]    = disp["ACOS_BUD"].apply(fmt_pct)
     disp["CM2% Act"]     = disp["CM2_PCT_ACT"].apply(fmt_pct)
     disp["CM2% Bud"]     = disp["CM2_PCT_BUD"].apply(fmt_pct)
-    disp["CM2 Abs Act"]  = disp["CM2_ABS_ACT"].apply(fmt_lakhs)
-    disp["CM2 Abs Bud"]  = disp["CM2_ABS_BUD"].apply(fmt_lakhs)
+    disp["CM2 Abs Act"]  = disp.apply(lambda r: _money(r["CM2_ABS_ACT"], r["GEO"]), axis=1)
+    disp["CM2 Abs Bud"]  = disp.apply(lambda r: _money(r["CM2_ABS_BUD"], r["GEO"]), axis=1)
     disp["Rev % Achvd"]  = disp["REV_PCT"].apply(fmt_pct)
     disp["CM2 Abs %"]    = disp["CM2_ABS_ACHVD_PCT"].apply(fmt_pct)
-    disp["CM2 Var"]      = disp["CM2_VAR"].apply(
-        lambda x: fmt_lakhs(x, signed=True))
+    disp["CM2 Var"]      = disp.apply(lambda r: _money(r["CM2_VAR"], r["GEO"], signed=True), axis=1)
     disp["Rev vs Plan"]  = disp.apply(
         lambda r: prorata_str(r["SALES_ACT"], r["FM_SALES_BUD"]), axis=1)
 
