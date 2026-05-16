@@ -621,15 +621,12 @@ with st.sidebar:
     if st.button("Executive Summary", use_container_width=True, key="nav_ceo"):
         st.session_state.view = "ceo"
         st.rerun()
-    _nc1, _nc2 = st.columns(2)
-    with _nc1:
-        if st.button("🏠 Overview", use_container_width=True, key="nav_overview"):
-            st.session_state.view = "overview"
-            st.rerun()
-    with _nc2:
-        if st.button("📋 P&L", use_container_width=True, key="nav_pnl"):
-            st.session_state.view = "pnl"
-            st.rerun()
+    if st.button("Overview", use_container_width=True, key="nav_overview"):
+        st.session_state.view = "overview"
+        st.rerun()
+    if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
+        st.session_state.view = "pnl"
+        st.rerun()
 
 # ── Month / pro-rata helpers ──────────────────────────────────────────────────
 month_start       = d_from.replace(day=1)
