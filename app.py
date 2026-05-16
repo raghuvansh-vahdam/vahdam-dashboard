@@ -407,13 +407,43 @@ def get_conn():
         account=cfg["account"], user=cfg["user"], password=cfg["password"],
         warehouse=cfg["warehouse"], role=cfg["role"],
         database=cfg["database"], schema=cfg["schema"],
+        client_session_keep_alive=True,
+        client_session_keep_alive_heartbeat_frequency=900,  # ping every 15 min
+        login_timeout=30,
+        network_timeout=60,
     )
+
+# Snowflake error codes that mean "auth token is stale, reconnect and retry"
+_SF_RETRY_CODES = {390114, 390112, 390111, 390104, 390195}
 
 @st.cache_data(ttl=300, show_spinner="Loading data…")
 def run_query(sql: str) -> pd.DataFrame:
-    cur = get_conn().cursor()
-    cur.execute(sql)
-    return cur.fetch_pandas_all()
+    for attempt in (1, 2):
+        try:
+            cur = get_conn().cursor()
+            cur.execute(sql)
+            return cur.fetch_pandas_all()
+        except snowflake.connector.errors.ProgrammingError as e:
+            code = getattr(e, "errno", None)
+            if attempt == 1 and (code in _SF_RETRY_CODES
+                                  or "token has expired" in str(e).lower()
+                                  or "authenticate again" in str(e).lower()):
+                # Drop the cached (stale) connection and try once more
+                try:
+                    get_conn.clear()
+                except Exception:
+                    pass
+                continue
+            raise
+        except snowflake.connector.errors.DatabaseError as e:
+            if attempt == 1 and ("expired" in str(e).lower()
+                                  or "authenticate again" in str(e).lower()):
+                try:
+                    get_conn.clear()
+                except Exception:
+                    pass
+                continue
+            raise
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None)]:
