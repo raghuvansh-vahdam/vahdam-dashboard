@@ -3069,45 +3069,75 @@ def render_pnl():
                 f'margin:4px 0 12px 0;">🔍 Filtered by: <b>{sku_search.strip()}</b></div>',
                 unsafe_allow_html=True)
 
-    where = build_where()
+    where    = build_where()
+    where_lm = build_where(date_from=lm_d_from, date_to=lm_d_to)
 
     # ── Summary KPI strip ──
     with st.spinner("Loading summary…"):
-        _agg = get_pnl_agg(where, sfx)
+        _agg    = get_pnl_agg(where,    sfx)
+        _agg_lm = get_pnl_agg(where_lm, sfx)
 
     if not _agg.empty:
-        _r = {k.upper(): v for k, v in _agg.iloc[0].items()}
-        def _safe(a, b):
-            an, bn = _f(a), _f(b)
-            if an is None or bn is None or bn == 0: return None
-            return (an / bn) * 100
+        _r  = {k.upper(): v for k, v in _agg.iloc[0].items()}
+        _rl = ({k.upper(): v for k, v in _agg_lm.iloc[0].items()}
+               if not _agg_lm.empty else None)
 
-        sales_act = _f(_r.get("SALES_ACT"))
-        cm1_act   = _f(_r.get("CM1_ACT"))
-        cm2_act   = _f(_r.get("CM2_ACT"))
-        pm_act    = _f(_r.get("PM_SPEND_ACT"))
-        cm1_pct   = _safe(cm1_act, sales_act)
-        cm2_pct   = _safe(cm2_act, sales_act)
-        rev_pct   = _safe(sales_act, _f(_r.get("SALES_BUD")))
+        sales_act = _f(_r.get("SALES_ACT"));  sales_bud = _f(_r.get("SALES_BUD"))
+        cm1_act   = _f(_r.get("CM1_ACT"));    cm1_bud   = _f(_r.get("CM1_BUD"))
+        cm2_act   = _f(_r.get("CM2_ACT"));    cm2_bud   = _f(_r.get("CM2_BUD"))
+        pm_act    = _f(_r.get("PM_SPEND_ACT"));pm_bud   = _f(_r.get("PM_SPEND_BUD"))
 
-        def _strip_card(label, val, sub):
-            return (f'<div class="pnl-strip">'
-                    f'<div class="pnl-strip-label">{label}</div>'
-                    f'<div class="pnl-strip-val">{val}</div>'
-                    f'<div class="pnl-strip-sub">{sub}</div></div>')
+        def _ratio(a, b):
+            a, b = _f(a), _f(b)
+            if a is None or b is None or b == 0: return None
+            return a / b * 100
+
+        def _pct_change(cur, prev_key):
+            if _rl is None: return None
+            c, p = _f(cur), _f(_rl.get(prev_key))
+            if c is None or p is None or p == 0: return None
+            return (c - p) / abs(p) * 100
+
+        # Sales — absolute Rev vs Bud
+        c0 = strip_card("Sales", fmt_lakhs(sales_act),
+                        f"Bud: {fmt_lakhs(sales_bud)}",
+                        delta=_pct_change(sales_act, "SALES_ACT"),
+                        vs_b_pct=_ratio(sales_act, sales_bud))
+        # CM1 Margin % — ratio of actual margin vs budget margin
+        cm1_pct = _ratio(cm1_act, sales_act)
+        cm1_bud_pct = _ratio(cm1_bud, sales_bud)
+        cm1_pct_lm = (_ratio(_f(_rl.get("CM1_ACT")) if _rl else None,
+                              _f(_rl.get("SALES_ACT")) if _rl else None))
+        c1 = strip_card("CM1 Margin", fmt_pct(cm1_pct),
+                        f"Bud: {fmt_pct(cm1_bud_pct)}",
+                        delta=(_pct_change(cm1_pct, "_dummy") if False else
+                               ((cm1_pct - cm1_pct_lm) / abs(cm1_pct_lm) * 100
+                                if (cm1_pct is not None and cm1_pct_lm not in (None, 0)) else None)),
+                        vs_b_pct=_ratio(cm1_pct, cm1_bud_pct))
+        # CM2 Margin %
+        cm2_pct = _ratio(cm2_act, sales_act)
+        cm2_bud_pct = _ratio(cm2_bud, sales_bud)
+        cm2_pct_lm = (_ratio(_f(_rl.get("CM2_ACT")) if _rl else None,
+                              _f(_rl.get("SALES_ACT")) if _rl else None))
+        c2 = strip_card("CM2 Margin", fmt_pct(cm2_pct),
+                        f"Bud: {fmt_pct(cm2_bud_pct)}",
+                        delta=((cm2_pct - cm2_pct_lm) / abs(cm2_pct_lm) * 100
+                               if (cm2_pct is not None and cm2_pct_lm not in (None, 0)) else None),
+                        vs_b_pct=_ratio(cm2_pct, cm2_bud_pct))
+        # PM Spend — absolute (lower vs budget = good)
+        c3 = strip_card("PM Spend", fmt_lakhs(pm_act),
+                        f"Bud: {fmt_lakhs(pm_bud)}",
+                        delta=_pct_change(pm_act, "PM_SPEND_ACT"),
+                        vs_b_pct=_ratio(pm_act, pm_bud), vs_b_lower_better=True)
+        # CM2 Absolute (replaces "Rev vs Bud" with a more useful metric)
+        c4 = strip_card("CM2 Absolute", fmt_lakhs(cm2_act),
+                        f"Bud: {fmt_lakhs(cm2_bud)}",
+                        delta=_pct_change(cm2_act, "CM2_ACT"),
+                        vs_b_pct=_ratio(cm2_act, cm2_bud))
 
         scols = st.columns(5, gap="medium")
-        scols[0].markdown(_strip_card("Sales", fmt_lakhs(sales_act),
-            f"Bud: {fmt_lakhs(_r.get('SALES_BUD'))}"), unsafe_allow_html=True)
-        scols[1].markdown(_strip_card("CM1 Margin", fmt_pct(cm1_pct),
-            f"Abs: {fmt_lakhs(cm1_act)}"), unsafe_allow_html=True)
-        scols[2].markdown(_strip_card("CM2 Margin", fmt_pct(cm2_pct),
-            f"Abs: {fmt_lakhs(cm2_act)}"), unsafe_allow_html=True)
-        scols[3].markdown(_strip_card("PM Spend", fmt_lakhs(pm_act),
-            f"Bud: {fmt_lakhs(_r.get('PM_SPEND_BUD'))}"), unsafe_allow_html=True)
-        scols[4].markdown(_strip_card("Rev vs Bud", fmt_pct(rev_pct),
-            f"Δ: {fmt_lakhs((sales_act or 0) - (_f(_r.get('SALES_BUD')) or 0))}"),
-            unsafe_allow_html=True)
+        for col, html in zip(scols, [c0, c1, c2, c3, c4]):
+            col.markdown(html, unsafe_allow_html=True)
         st.markdown("")
 
     t1, t2, t3, t4, t5 = st.tabs([
