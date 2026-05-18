@@ -1964,6 +1964,8 @@ def fmt_indian(v, signed=False):
 
 def _build_waterfall(row):
     rows = []
+    sales_act = _f(row.get("SALES_ACT"))
+    sales_bud = _f(row.get("SALES_BUD"))
     for label, row_type, pfx in _PNL_LINES:
         act = _f(row.get(f"{pfx}_ACT"))
         bud = _f(row.get(f"{pfx}_BUD"))
@@ -1972,10 +1974,19 @@ def _build_waterfall(row):
             var_pct = (var / abs(bud) * 100) if bud != 0 else None
         else:
             var, var_pct = None, None
+        # Common-size: each line as % of Sales
+        pct_act = (act / sales_act * 100) if (act is not None and sales_act not in (None, 0)) else None
+        pct_bud = (bud / sales_bud * 100) if (bud is not None and sales_bud not in (None, 0)) else None
+
+        def _pct_fmt(v):
+            return "—" if v is None else f"{v:.1f}%"
+
         rows.append({
             "P&L Line":       label,
             "Actual (INR)":   fmt_indian(act),
+            "% of Sales (A)": _pct_fmt(pct_act),
             "Budget (INR)":   fmt_indian(bud),
+            "% of Sales (B)": _pct_fmt(pct_bud),
             "Variance (INR)": fmt_indian(var, signed=True),
             "Var %":          (f"{'+'if (var_pct or 0)>=0 else ''}{var_pct:.1f}%"
                                if var_pct is not None else "—"),
