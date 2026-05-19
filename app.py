@@ -1079,8 +1079,9 @@ def get_asin_rolling(asin, geo, sfx):
     ASIN, regardless of the user-selected window. Used to build the
     rolling 7 / 30 / 90 day cards so they are always accurate even when
     the user picked a short window. Returns one row per day with columns
-    DAY, REVENUE, UNITS, SPEND, SESSIONS (SESSIONS = 0 if the sales-marketing
-    table or its sessions column is unavailable)."""
+    DAY, REVENUE, UNITS, SPEND, SESSIONS. Sessions come from
+    vahdam_amazon_sales_marketing — the sessions column name is discovered
+    dynamically and the column degrades gracefully to 0 if missing."""
     today_ = date.today()
     d_start = today_ - timedelta(days=89)
     a = asin.replace("'", "''")
@@ -1105,7 +1106,8 @@ def get_asin_rolling(asin, geo, sfx):
         GROUP BY DAY
     """)
 
-    # SESSIONS pull: try the most common column names; degrade gracefully.
+    # SESSIONS pull: probe likely column names so the dashboard works
+    # whether the column is SESSIONS, SESSIONS_TOTAL, BROWSER_SESSIONS, etc.
     sess_col = _sales_mkt_col(
         "SESSIONS", "SESSIONS_TOTAL", "BROWSER_SESSIONS",
         "TOTAL_SESSIONS", "SESSIONS_B2C", "ORDERED_SESSIONS",
@@ -3381,7 +3383,7 @@ def render_asin_detail():
     st.caption(
         "Rolling windows are computed from the last 90 days "
         "regardless of the period selector above. "
-        "CR% = Units ÷ Sessions (sessions pulled from "
+        "CR% = Units ÷ Sessions (sessions from "
         "`vahdam_amazon_sales_marketing`; “—” means the table or column "
         "isn't available for this GEO)."
     )
