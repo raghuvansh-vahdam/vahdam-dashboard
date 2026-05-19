@@ -3394,6 +3394,12 @@ KEEPA_DOMAIN = {"USA": 1, "UK": 2, "DE": 3, "FR": 4, "CA": 6,
 # Currency symbol per Keepa domain
 KEEPA_SYMBOL = {1: "$", 2: "£", 3: "€", 4: "€", 6: "C$", 8: "€",
                 9: "€", 10: "₹", 11: "$"}
+# Marketplace domain per GEO (shown in the tab caption)
+AMAZON_DOMAIN = {
+    "USA": "amazon.com", "UK": "amazon.co.uk", "DE": "amazon.de",
+    "FR": "amazon.fr",   "IT": "amazon.it",    "ES": "amazon.es",
+    "CA": "amazon.ca",
+}
 
 # ASINs to track per GEO. Add more here as the user grows the list.
 _UK_ASINS = [
@@ -3450,13 +3456,65 @@ _CA_ASINS = [
     "B0FVFVZVLX","B0FMY2XW2Y",
 ]
 
+_USA_ASINS = [
+    "B0B293XFM4","B096KXJFVP","B09Y9G1436","B0BT7H247Z","B07RGK5QKZ",
+    "B07MNSWD6D","B00R65SD4C","B0BB1LXSPN","B096KZ74F1","B0DPWQWZYX",
+    "B096KWR1PK","B09Y9DYSD6","B09Y9BGBTF","B017P6DS5A","B09YY7BCZ3",
+    "B00VFYPK82","B0C7N1F4Y1","B0BYHYKHG8","B09YY78NFQ","B00VBUY3SS",
+    "B097HLWC93","B09Y9DJ6DW","B096KTV5QP","B0BCKFGKFQ","B07MDCXFWQ",
+    "B00VFYPIDO","B01JAK7UAS","B0C9CJ8L3N","B00VFYPG1S","B09R784RYL",
+    "B0186XTAUI","B019FLGKZI","B08G8SDB6D","B09YXMVQTV","B0BT7FB4MC",
+    "B0F5VQN2NR","B0BYK1F7Q8","B01M0DB0Z3","B0757VW95S","B00Q6FM6GY",
+    "B074L4MZRY","B07RHN9TDF","B0F5W48J88","B0C7439B81","B0CJF7L293",
+    "B0BFHKDK88","B01K78VZE4","B09PV23QJQ","B0C7454VNB","B00S0NYCCG",
+    "B016IL75S4","B00VIDZ378","B09YXT3C1L","B097HLJLM2","B0B2928XNH",
+    "B016IJ0YY8","B09K45FNBH","B097HRWHZQ","B09PV2CV6Z","B00ZUTOATI",
+    "B07RJRJC7V","B0DPXK81SW","B09Y9CJZZH","B08G2J7HJ7","B00XL1E6QO",
+    "B01MG3L67M","B0C33Q1FSB","B07SRFW87H","B09PLDGY6J","B0C7N124LZ",
+    "B00MN668VY","B07M61PL9K","B0B5LPWSGH","B07RGK4H2B","B09Y9BJVJR",
+    "B096KWCHG2","B00VLOCBHE","B07QQQRPCL","B07R6MHNMB","B0BCKGS74K",
+    "B0BN7XPNNL","B096KWDSVD","B07SVNLZ97","B07RDK9WTN","B08G2J583H",
+    "B096KXXFY6","B013P6ZFHI","B09PV289KH","B096V4F6L5","B01J3F13O4",
+    "B093663R1Q","B07MNSZ61S","B09Y9DWNPZ","B09Y9D4WJQ","B07RFLKDTN",
+    "B09PV64FGX","B09K461LQL","B097HMDY2H","B013P9H1AY","B07K1WBH4K",
+    "B075XQXSLM","B019TVPHYO","B0BZCPMQ36","B09R1PSLYW","B07RHN6RRX",
+    "B08G1XMCKC","B00Q6UN3ZM","B07583WVRF","B0757M47FW","B01M7RQOE5",
+    "B07RLM88NM","B00VK0LF0S","B0757QHYVK","B016KQXYZA","B09KCFX4H3",
+    "B08G2J4MVZ","B01J3G9C5U","B00VIDY1GC","B00M59AHAC","B0B31QY94Q",
+    "B00M59HKMK","B01M01OIYT","B07RHN9RVP","B01NA9WRZF","B0757NZHK7",
+    "B01LZPUA82","B07K1XSGBK","B01DZOZJNA","B01M4MJ7FP","B08LVZV78R",
+    "B0C7N1DHBX","B01LZZZVKD","B08G2LFLCG","B08G2L3P89","B088LV4F48",
+    "B00N8JNFD4","B07RGK61WK","B01KCG2OP0","B07RKWCXMB","B08G1ZFC42",
+    "B0757N4D53","B0D54CSMKV","B0D54DF9WQ","B075XQDG97","B01B5Z1624",
+    "B00VIDYKKE","B09YXRHRGX","B08G1X8T6S","B09PV32JKR","B09PTZCM55",
+    "B09RZKP6DK","B00WSQU9DW","B00M56WWX0","B01KCH8O3K","B07RBN3ZMJ",
+    "B07MD4LB49","B075XR382W","B01M8LP7O3","B0DK5JHV4Q","B014WCN60M",
+    "B00VIDZ72Y","B08LVZ44TS","B0757QPXFR","B09PV47Z2Q","B096QC2CC7",
+    "B01M706JM3","B09K45YFYL","B00VIDXHTO","B075XRJB6S","B00VIDX8V6",
+    "B015J2V2NC","B015J3FXOU","B09K453RMM","B00Q8LVPOU","B00R4O1H0M",
+    "B06X6BB1JM","B08LVX5P5G","B06W5B8F5G","B00Q492AS6","B09PV4NDN3",
+    "B00VNWWV10","B00MN8CJME","B0D6BNFJFJ","B078J3C15N","B0DK5HKNTJ",
+    "B076HSFRQF","B0DK5JW2NK","B0DK5HF8RY","B0DK5GQ9FP","B0FSDLB9N4",
+    "B00PZRTIKQ","B0C23KF9RY","B0D9M7KFD2","B09HS7BMB5","B098XH87N9",
+    "B0B53RF2VB","B0FLDRSHZY","B0FLQGFHJ2","B0D9M8MZ5S","B09K44N7MK",
+    "B0C7MZSNHL","B0FLQK45YC","B09PV561PB","B0FLDXPTW1","B0FLQLMV1H",
+    "B0FLQHD86G","B0FLQJLCQP","B07ZB61GXF","B09SZGSWSZ","B0C7GZDBGV",
+    "B095PV3YYG","B0D676STMS","B0FFBDXQ5Y","B08Y5QJHB5","B0C8ST8KVL",
+    "B0C741NRPK","B0C8ZDBRGG","B08FXWK7LT","B09K45HC68","B01JAA4XB2",
+    "B0FLQJ354G","B0C1VCYM63","B0FCML85FV","B0FFBM89G7","B0FFBHMQV8",
+    "B0FLDWDHG8","B09SZF4X4Z","B0D675PBMK","B0FLDWW2HL","B0BZZHPXQN",
+    "B0D6GMGTF1","B0FFBGHWQF","B09SZDDSG9","B0BJKYBC83","B0BJ75PLV7",
+    "B0D5MQ8XQM","B0BJL42LJH","B09SZGG4S7",
+]
+
 PRICE_TRACKER_ASINS = {
-    "UK": _UK_ASINS,
-    "DE": _EU_ASINS,
-    "FR": _EU_ASINS,
-    "IT": _EU_ASINS,
-    "ES": _EU_ASINS,
-    "CA": _CA_ASINS,
+    "USA": _USA_ASINS,
+    "UK":  _UK_ASINS,
+    "DE":  _EU_ASINS,
+    "FR":  _EU_ASINS,
+    "IT":  _EU_ASINS,
+    "ES":  _EU_ASINS,
+    "CA":  _CA_ASINS,
 }
 
 
@@ -3611,7 +3669,9 @@ def fetch_keepa_products(asins_tuple, domain_code, chunk_size=50):
 
 
 def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0):
-    """Detect a price anomaly in the last `lookback_days`.
+    """Flag if the most recent price deviates > threshold_pct from the
+    average of the prior `lookback_days` (i.e. the 7 days immediately
+    before the latest point).
 
     Returns dict with 'flag': bool, 'change_pct': float, 'last': float,
     'baseline': float, 'direction': 'up'|'down'|None.
@@ -3619,20 +3679,19 @@ def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0):
     if not pts or len(pts) < 2:
         return {"flag": False}
     import datetime as _d
-    cutoff = _d.datetime.utcnow() - _d.timedelta(days=lookback_days)
-    recent = [p for d, p in pts if d >= cutoff]
-    older  = [p for d, p in pts if d <  cutoff]
-    if not recent or not older:
+    last_dt, last_price = pts[-1]
+    window_start = last_dt - _d.timedelta(days=lookback_days)
+    prior = [p for d, p in pts[:-1] if d >= window_start]
+    if not prior:
         return {"flag": False}
-    last = recent[-1]
-    baseline = sum(older[-min(len(older), 30):]) / min(len(older), 30)
+    baseline = sum(prior) / len(prior)
     if baseline == 0:
         return {"flag": False}
-    change = (last - baseline) / baseline * 100
+    change = (last_price - baseline) / baseline * 100
     return {
         "flag":       abs(change) >= threshold_pct,
         "change_pct": change,
-        "last":       last,
+        "last":       last_price,
         "baseline":   baseline,
         "direction":  "up" if change > 0 else "down",
     }
@@ -3667,9 +3726,9 @@ def render_price_tracker():
         with tab:
             asins = PRICE_TRACKER_ASINS[geo]
             domain = KEEPA_DOMAIN.get(geo, 1)
+            domain_str = AMAZON_DOMAIN.get(geo, "amazon.com")
             st.caption(f"{len(asins)} ASIN{'s' if len(asins) != 1 else ''} "
-                       f"on Amazon.{'co.uk' if geo=='UK' else 'com'} · "
-                       f"Keepa domain {domain}")
+                       f"on {domain_str} · Keepa domain {domain}")
 
             with st.spinner(f"Fetching Keepa data for {len(asins)} ASINs…"):
                 data = fetch_keepa_products(tuple(asins), domain)
@@ -3677,12 +3736,6 @@ def render_price_tracker():
             if "_error" in data:
                 st.error(data["_error"])
                 continue
-
-            # Token usage info
-            tl = data.get("_tokens_left")
-            if tl is not None:
-                st.caption(f"🪙 Keepa tokens left: **{tl}** "
-                           f"· refill rate: {data.get('_refill_rate', '?')}/min")
 
             # ── Buybox-missing summary at the very top ──
             missing_buybox = []
