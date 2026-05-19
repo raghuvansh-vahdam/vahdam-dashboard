@@ -3446,7 +3446,7 @@ def fetch_keepa_products(asins_tuple, domain_code):
     if not keepa_available():
         return {"_error": "Keepa API key not configured in secrets.toml"}
     try:
-        import urllib.request, urllib.error, urllib.parse, json
+        import urllib.request, urllib.error, urllib.parse, json, gzip, io
         api_key = st.secrets["keepa"]["api_key"]
         asins_csv = ",".join(asins_tuple)
         params = urllib.parse.urlencode({
@@ -3454,13 +3454,31 @@ def fetch_keepa_products(asins_tuple, domain_code):
             "asin": asins_csv, "stats": 90, "history": 1,
         })
         url = f"https://api.keepa.com/product?{params}"
-        req = urllib.request.Request(url, headers={"User-Agent": "vahdam-dashboard"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            payload = json.loads(r.read().decode("utf-8"))
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "vahdam-dashboard",
+            "Accept-Encoding": "gzip, deflate",
+        })
+        with urllib.request.urlopen(req, timeout=45) as r:
+            raw = r.read()
+            enc = (r.headers.get("Content-Encoding") or "").lower()
+        # Decompress if needed — Keepa often returns gzip
+        if enc == "gzip" or raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        elif enc == "deflate":
+            import zlib
+            try:
+                raw = zlib.decompress(raw)
+            except zlib.error:
+                raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+        payload = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as e:
-        return {"_error": f"Keepa HTTP {e.code}: {e.reason}"}
+        try:
+            body = e.read().decode("utf-8", errors="ignore")[:200]
+        except Exception:
+            body = ""
+        return {"_error": f"Keepa HTTP {e.code} {e.reason}: {body}"}
     except Exception as e:
-        return {"_error": f"Keepa request failed: {e}"}
+        return {"_error": f"Keepa request failed: {type(e).__name__}: {e}"}
 
     out = {
         "_tokens_left": payload.get("tokensLeft"),
