@@ -814,6 +814,30 @@ def fmt_pct(v):
 def fmt_num(v, dec=0):
     v = _f(v); return "—" if v is None else f"{v:,.{dec}f}"
 
+def fmt_units(v, signed=False):
+    """Auto-scale a unit count: <1K → raw int, <1L → K, <1Cr → L, ≥1Cr → Cr.
+    Same shape as fmt_lakhs but no currency symbol — for Units / Quantity."""
+    n = _f(v)
+    if n is None: return "—"
+    a = abs(n)
+    if signed:
+        sign = "-" if n < 0 else ("+" if n > 0 else "")
+    else:
+        sign = "-" if n < 0 else ""
+    if a >= 1e7:
+        scaled, unit = a / 1e7, "Cr"
+    elif a >= 1e5:
+        scaled, unit = a / 1e5, "L"
+    elif a >= 1e3:
+        scaled, unit = a / 1e3, "K"
+    else:
+        return f"{sign}{a:,.0f}"
+    if scaled >= 100:
+        return f"{sign}{scaled:,.0f}{unit}"
+    if scaled >= 10:
+        return f"{sign}{scaled:,.1f}{unit}"
+    return f"{sign}{scaled:,.2f}{unit}"
+
 def fmt_ccy(v, dec=2):
     v = _f(v); return "—" if v is None else f"{sym}{v:,.{dec}f}"
 
@@ -906,7 +930,10 @@ def get_kpis(where, sfx):
                  -SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)         AS CM2_DELTA,
             ROUND(SUM(CM2_ACTUAL_{sfx}),0)                                                AS CM2_ABS_ACT,
             ROUND(SUM(CM2_BUDGET_{sfx}),0)                                                AS CM2_ABS_BUD,
-            ROUND((SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}))/NULLIF(ABS(SUM(CM2_BUDGET_{sfx})),0)*100,1) AS CM2_ABS_DELTA
+            ROUND((SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}))/NULLIF(ABS(SUM(CM2_BUDGET_{sfx})),0)*100,1) AS CM2_ABS_DELTA,
+            COALESCE(SUM(QTY_ACTUAL),0)                                                   AS UNITS_ACT,
+            COALESCE(SUM(QTY_BUDGET),0)                                                   AS UNITS_BUD,
+            ROUND(SUM(QTY_ACTUAL)/NULLIF(SUM(QTY_BUDGET),0)*100,1)                        AS UNITS_PCT
         FROM {TABLE} WHERE {where}
     """)
 
@@ -2237,7 +2264,7 @@ def render_ceo():
         st.markdown(f'<div class="narrative">📊 {narrative}</div>',
                     unsafe_allow_html=True)
 
-    # ── 5 KPI cards: Revenue · CM1% · ACoS% · CM2% · CM2 Abs ──
+    # ── 6 KPI cards: Revenue · Quantity · CM1% · ACoS% · CM2% · CM2 Abs ──
     def _ratio(act, bud):
         a, b = _f(act), _f(bud)
         if a is None or b is None or b == 0: return None
@@ -2249,11 +2276,16 @@ def render_ceo():
         return (c - p) / abs(p) * 100
 
     cards = [
-        ("Revenue", fmt_lakhs(k.get("SALES_ACT")),
+        ("Revenue",  fmt_lakhs(k.get("SALES_ACT")),
             f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
             _pct_change(k.get("SALES_ACT"),
                         klm["SALES_ACT"] if klm is not None else None),
             _ratio(k.get("SALES_ACT"), k.get("SALES_BUD")), False),
+        ("Quantity", fmt_units(k.get("UNITS_ACT")),
+            f"Bud: {fmt_units(k.get('UNITS_BUD'))}",
+            _pct_change(k.get("UNITS_ACT"),
+                        klm["UNITS_ACT"] if klm is not None else None),
+            _ratio(k.get("UNITS_ACT"), k.get("UNITS_BUD")), False),
         ("CM1%",    fmt_pct(k.get("CM1_ACT")),
             f"Bud: {fmt_pct(k.get('CM1_BUD'))}",
             _pct_change(k.get("CM1_ACT"),
@@ -2275,7 +2307,7 @@ def render_ceo():
                         klm["CM2_ABS_ACT"] if klm is not None else None),
             _ratio(k.get("CM2_ABS_ACT"), k.get("CM2_ABS_BUD")), False),
     ]
-    cols = st.columns(5, gap="medium")
+    cols = st.columns(6, gap="medium")
     for col, (lbl, val, sub, delta, ach, lb) in zip(cols, cards):
         col.markdown(strip_card(lbl, val, sub, delta=delta,
                                 vs_b_pct=ach, vs_b_lower_better=lb),
