@@ -3495,7 +3495,7 @@ def _last_raw_value(csv_arr):
     return csv_arr[-1]
 
 
-@st.cache_data(ttl=43200, show_spinner=False)  # 12-hour cache
+@st.cache_data(ttl=86400, show_spinner=False)  # 24-hour cache
 def _fetch_keepa_chunk(asins_tuple, domain_code):
     """Internal: fetch ONE chunk (≤50 ASINs) from Keepa. Cached per chunk."""
     if not keepa_available():
@@ -3645,7 +3645,9 @@ def render_price_tracker():
     st.markdown(
         '<div class="page-sub">Keepa-tracked price history per ASIN '
         '&nbsp;&bull;&nbsp; flagged when last price deviates >15% from the '
-        'prior 30-day average</div>', unsafe_allow_html=True)
+        'prior 30-day average &nbsp;&bull;&nbsp; data refreshes every 24 h '
+        '(use sidebar Refresh to force-update)</div>',
+        unsafe_allow_html=True)
 
     if not keepa_available():
         st.warning(
