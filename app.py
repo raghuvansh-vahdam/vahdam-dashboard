@@ -1001,7 +1001,9 @@ def get_view2(where, sfx):
             ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS CM2_PCT_ACT,
             ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS CM2_PCT_BUD,
             ROUND(SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}),0) AS CM2_VAR,
-            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1) AS CM2_ABS_ACHVD_PCT
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1) AS CM2_ABS_ACHVD_PCT,
+            COALESCE(SUM(QTY_BUDGET),0)       AS UNITS_BUD,
+            COALESCE(SUM(QTY_ACTUAL),0)       AS UNITS_ACT
         FROM {TABLE} WHERE {where}
         GROUP BY COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)')
         UNION ALL
@@ -1020,7 +1022,9 @@ def get_view2(where, sfx):
             ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
             ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
             ROUND(SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}),0),
-            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1)
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1),
+            COALESCE(SUM(QTY_BUDGET),0),
+            COALESCE(SUM(QTY_ACTUAL),0)
         FROM {TABLE} WHERE {where}
         ORDER BY CASE SUB_CATEGORY WHEN 'GRAND TOTAL' THEN 9999 ELSE 1 END, SALES_BUD DESC NULLS LAST
     """)
@@ -2908,12 +2912,18 @@ def render_subcategory():
                 'click a row to drill into ASINs</span></div>', unsafe_allow_html=True)
 
     disp = df.copy()
-    # Lag = Budget Rev − Actual Rev (positive when we're behind plan)
-    disp["_LAG_REV"]     = pd.to_numeric(disp["SALES_BUD"], errors="coerce") - \
-                           pd.to_numeric(disp["SALES_ACT"], errors="coerce")
+    # Lag(R) = Budget Rev − Actual Rev (positive when we're behind plan)
+    # Lag(U) = Budget Units − Actual Units
+    disp["_LAG_REV"]   = pd.to_numeric(disp["SALES_BUD"], errors="coerce") - \
+                         pd.to_numeric(disp["SALES_ACT"], errors="coerce")
+    disp["_LAG_UNITS"] = pd.to_numeric(disp["UNITS_BUD"], errors="coerce") - \
+                         pd.to_numeric(disp["UNITS_ACT"], errors="coerce")
     disp["Budget Rev"]   = disp["SALES_BUD"].apply(fmt_lakhs)
     disp["Actual Rev"]   = disp["SALES_ACT"].apply(fmt_lakhs)
-    disp["Lag"]          = disp["_LAG_REV"].apply(lambda x: fmt_lakhs(x, signed=True))
+    # Lag(R) / Lag(U) are kept NUMERIC so the column header sort is
+    # numeric. Display formatting comes from st.column_config below.
+    disp["Lag(R)"]       = disp["_LAG_REV"]
+    disp["Lag(U)"]       = disp["_LAG_UNITS"]
     disp["Budget CM1"]   = disp["CM1_BUD"].apply(fmt_lakhs)
     disp["Actual CM1"]   = disp["CM1_ACT"].apply(fmt_lakhs)
     disp["Act ACoS%"]    = disp["ACOS_PCT_ACT"].apply(fmt_pct)
@@ -2930,17 +2940,24 @@ def render_subcategory():
     _rev_n2   = pd.to_numeric(df["REV_PCT"],          errors="coerce").reset_index(drop=True)
     _cm2a_n2  = pd.to_numeric(df["CM2_ABS_ACHVD_PCT"], errors="coerce").reset_index(drop=True)
     _var_n2   = pd.to_numeric(df["CM2_VAR"],           errors="coerce").reset_index(drop=True)
-    _lag_n2   = disp["_LAG_REV"].reset_index(drop=True)
+    _lag_r_n2 = disp["_LAG_REV"].reset_index(drop=True)
+    _lag_u_n2 = disp["_LAG_UNITS"].reset_index(drop=True)
     _acos_delta_sc = (pd.to_numeric(df["ACOS_PCT_ACT"], errors="coerce") -
                       pd.to_numeric(df["ACOS_PCT_BUD"], errors="coerce")).reset_index(drop=True)
     _cm2pct_delta_sc = (pd.to_numeric(df["CM2_PCT_ACT"], errors="coerce") -
                         pd.to_numeric(df["CM2_PCT_BUD"], errors="coerce")).reset_index(drop=True)
 
-    dcols2 = ["SUB_CATEGORY","Budget Rev","Actual Rev","Lag","% Achieved",
+    dcols2 = ["SUB_CATEGORY","Budget Rev","Actual Rev","Lag(R)","Lag(U)","% Achieved",
               "Budget CM1","Actual CM1","Act ACoS%","Bud ACoS%",
               "Budget CM2","Actual CM2","Act CM2%","Bud CM2%",
               "CM2 Abs %","CM2 Var"]
     table_df2 = disp[dcols2].rename(columns={"SUB_CATEGORY":"Sub-Category"}).reset_index(drop=True)
+
+    def _lag_style(v):
+        if v is None or pd.isna(v) or v == 0:
+            return ""
+        return ("color:#8b1a1a;font-weight:600" if v > 0
+                else "color:#004A2B;font-weight:600")
 
     def style_v2(row):
         s = [""] * len(row)
@@ -2948,12 +2965,9 @@ def render_subcategory():
         s[idx.index("% Achieved")]  = color_pct(_rev_n2.iloc[row.name])
         s[idx.index("CM2 Abs %")]   = color_pct(_cm2a_n2.iloc[row.name])
         s[idx.index("CM2 Var")]     = color_var(_var_n2.iloc[row.name])
-        # Lag: positive (behind plan) red, negative (ahead of plan) green
-        lv = _f(_lag_n2.iloc[row.name])
-        if lv is not None and lv != 0:
-            s[idx.index("Lag")] = (
-                "color:#8b1a1a;font-weight:600" if lv > 0
-                else "color:#004A2B;font-weight:600")
+        # Lag(R) / Lag(U): positive (behind plan) red, negative (ahead) green
+        s[idx.index("Lag(R)")] = _lag_style(_f(_lag_r_n2.iloc[row.name]))
+        s[idx.index("Lag(U)")] = _lag_style(_f(_lag_u_n2.iloc[row.name]))
         # Act ACoS% vs Bud: lower is better
         av = _f(_acos_delta_sc.iloc[row.name])
         if av is not None:
@@ -2973,6 +2987,21 @@ def render_subcategory():
     event = st.dataframe(
         table_df2.style.apply(style_v2, axis=1).hide(axis="index"),
         use_container_width=True, height=550,
+        column_config={
+            "Lag(R)": st.column_config.NumberColumn(
+                "Lag(R)",
+                help="Budget Revenue − Actual Revenue. "
+                     "Positive = behind plan, negative = ahead of plan. "
+                     "Sortable by clicking the column header.",
+                format=f"{sym}%+,.0f",
+            ),
+            "Lag(U)": st.column_config.NumberColumn(
+                "Lag(U)",
+                help="Budget Units − Actual Units. "
+                     "Positive = behind plan, negative = ahead of plan.",
+                format="%+,.0f",
+            ),
+        },
         on_select="rerun", selection_mode="single-row",
         key="subcat_table")
 
@@ -3209,9 +3238,12 @@ def render_asin():
                 ("COVER_DAYS", "Cover Days"),
             ]
 
-        # Lag = Bud Rev - Act Rev (positive = behind plan)
-        df["_LAG_REV"] = (pd.to_numeric(df["BUD_REVENUE"], errors="coerce") -
-                          pd.to_numeric(df["ACT_REVENUE"], errors="coerce"))
+        # Lag(R) = Bud Rev - Act Rev (positive = behind plan)
+        # Lag(U) = Bud Units - Act Units
+        df["_LAG_REV"]   = (pd.to_numeric(df["BUD_REVENUE"], errors="coerce") -
+                            pd.to_numeric(df["ACT_REVENUE"], errors="coerce"))
+        df["_LAG_UNITS"] = (pd.to_numeric(df["BUD_UNITS"],   errors="coerce") -
+                            pd.to_numeric(df["ACT_UNITS"],   errors="coerce"))
 
         pnl_cols = [
             ("ASIN",          "ASIN"),
@@ -3219,9 +3251,10 @@ def render_asin():
             ("BRAND",         "Brand"),
             ("ACT_UNITS",     "Act Units"),
             ("BUD_UNITS",     "Bud Units"),
+            ("_LAG_UNITS",    "Lag(U)"),
             ("ACT_REVENUE",   "Act Rev"),
             ("BUD_REVENUE",   "Bud Rev"),
-            ("_LAG_REV",      "Lag"),
+            ("_LAG_REV",      "Lag(R)"),
             ("REV_ACHVD_PCT", "Rev %"),
             ("ACT_ASP",       "Act ASP"),
             ("BUD_ASP",       "Bud ASP"),
@@ -3238,7 +3271,10 @@ def render_asin():
         p["Bud Units"] = p["Bud Units"].apply(fmt_num)
         p["Act Rev"]   = df["ACT_REVENUE"].apply(fmt_lakhs)
         p["Bud Rev"]   = df["BUD_REVENUE"].apply(fmt_lakhs)
-        p["Lag"]       = df["_LAG_REV"].apply(lambda x: fmt_lakhs(x, signed=True))
+        # Lag(R) / Lag(U) stay NUMERIC for correct sort. Display formatting
+        # comes from st.column_config.NumberColumn at the st.dataframe call.
+        p["Lag(R)"]    = pd.to_numeric(df["_LAG_REV"],   errors="coerce")
+        p["Lag(U)"]    = pd.to_numeric(df["_LAG_UNITS"], errors="coerce")
         p["CM2 Abs"]   = df["ACT_CM2_ABS"].apply(fmt_lakhs)
         p["Act ASP"]   = df["ACT_ASP"].apply(lambda v: fmt_ccy(v))
         p["Bud ASP"]   = df["BUD_ASP"].apply(lambda v: fmt_ccy(v))
@@ -3263,20 +3299,26 @@ def render_asin():
                         pd.to_numeric(df["BUD_CM2_PCT"], errors="coerce")).reset_index(drop=True)
         _cover_days  = pd.to_numeric(df["COVER_DAYS"], errors="coerce").reset_index(drop=True)
         _total_inv_n = pd.to_numeric(df["TOTAL_INV"],   errors="coerce").reset_index(drop=True)
-        _lag_n       = df["_LAG_REV"].reset_index(drop=True)
+        _lag_r_n     = pd.to_numeric(df["_LAG_REV"],   errors="coerce").reset_index(drop=True)
+        _lag_u_n     = pd.to_numeric(df["_LAG_UNITS"], errors="coerce").reset_index(drop=True)
 
         p = p.reset_index(drop=True)
+
+        def _lag_style(v):
+            if v is None or pd.isna(v) or v == 0:
+                return ""
+            return ("color:#8b1a1a;font-weight:600" if v > 0
+                    else "color:#004A2B;font-weight:600")
 
         def style_pnl(row):
             s = [""] * len(row)
             idx = row.index.tolist()
             if "Rev %" in idx:
                 s[idx.index("Rev %")]     = color_pct(_rev_achvd.iloc[row.name])
-            if "Lag" in idx:
-                lv = _f(_lag_n.iloc[row.name])
-                if lv is not None and lv != 0:
-                    s[idx.index("Lag")] = ("color:#8b1a1a;font-weight:600" if lv > 0
-                                            else "color:#004A2B;font-weight:600")
+            if "Lag(R)" in idx:
+                s[idx.index("Lag(R)")] = _lag_style(_f(_lag_r_n.iloc[row.name]))
+            if "Lag(U)" in idx:
+                s[idx.index("Lag(U)")] = _lag_style(_f(_lag_u_n.iloc[row.name]))
             if "Act ACoS%" in idx:
                 v = _f(_acos_delta.iloc[row.name])
                 if v is not None:
@@ -3308,6 +3350,22 @@ def render_asin():
         evt_pnl = st.dataframe(
             p.style.apply(style_pnl, axis=1).hide(axis="index"),
             use_container_width=True, height=500,
+            column_config={
+                # Numeric formatting + correct numeric sort on click.
+                "Lag(R)": st.column_config.NumberColumn(
+                    "Lag(R)",
+                    help="Budget Revenue − Actual Revenue. "
+                         "Positive = behind plan, negative = ahead of plan. "
+                         "Click the header to sort numerically.",
+                    format=f"{sym}%+,.0f",
+                ),
+                "Lag(U)": st.column_config.NumberColumn(
+                    "Lag(U)",
+                    help="Budget Units − Actual Units. "
+                         "Positive = behind plan, negative = ahead of plan.",
+                    format="%+,.0f",
+                ),
+            },
             on_select="rerun",
             selection_mode="single-row",
             key=f"asin_pnl_table_{geo}_{subcat}")
