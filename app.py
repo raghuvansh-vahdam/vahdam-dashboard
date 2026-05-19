@@ -138,7 +138,11 @@ st.markdown("""
         border: 1px solid #d6ccba; border-top: 3px solid #004A2B; border-radius: 10px;
         padding: 12px 14px; text-align: center;
         box-shadow: 0 1px 4px rgba(0,74,43,0.05);
-        height: 138px; display: flex; flex-direction: column;
+        /* `min-height` (not fixed height) — the Exec Summary cards now carry
+           two delta lines (vs LM + vs LY) each with a raw value in parens, so
+           the card must be free to grow. */
+        min-height: 138px; height: auto;
+        display: flex; flex-direction: column;
         justify-content: flex-start; gap: 3px;
         transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
     }
@@ -152,7 +156,12 @@ st.markdown("""
     .pnl-strip-val   { font-size: 20px; font-weight: 700; color: #004A2B; line-height: 1.1;
                        margin-top: 1px; }
     .pnl-strip-sub   { font-size: 10.5px; color: #7a6a50; margin-top: 1px; }
-    .pnl-strip .kpi-delta { margin-top: auto; font-size: 11px; }
+    /* Only the FIRST .kpi-delta acts as a flex spacer (pushes the comparison
+       block to the bottom). Any subsequent delta (e.g. "vs LY") then stacks
+       directly below it instead of being yanked back to the bottom too. */
+    .pnl-strip .kpi-delta { font-size: 11px; line-height: 1.3; }
+    .pnl-strip .kpi-delta:first-of-type { margin-top: auto; }
+    .pnl-strip .kpi-delta + .kpi-delta  { margin-top: 2px; }
     .vs-b-pill {
         display: inline-block; border-radius: 12px; padding: 1px 10px;
         font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px;
@@ -1755,7 +1764,8 @@ def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
                        f'style="font-weight:500;">{suffix}</span>'
                        if suffix else "")
         val_html = (f' <span class="small-muted" '
-                    f'style="font-weight:500;">({raw_value})</span>'
+                    f'style="font-weight:500;white-space:nowrap;">'
+                    f'({raw_value})</span>'
                     if raw_value else "")
         return (f'<div class="kpi-delta {cls}">'
                 f'{pct_html}{suffix_html}{val_html}</div>')
