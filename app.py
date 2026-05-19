@@ -504,6 +504,7 @@ st.markdown("""
 TABLE          = "vahdam_db.maplemonk.vahdam_amazon_pnl_overall_fy27_onwards"
 MKTG           = "vahdam_db.maplemonk.VAHDAM_AMAZON_MARKETING"
 SALES_MKT      = "vahdam_db.maplemonk.VAHDAM_AMAZON_SALES_MARKETING"
+INV_3P         = "vahdam_db.maplemonk.vahdam_amazon_3P_inv"
 GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
 GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
@@ -1251,12 +1252,34 @@ def get_asin_data(where, geo, sub_cat, sfx):
     by the number of campaign rows in the marketing table — which inflates
     revenue, units, CM1, CM2 and spend at the ASIN level (subcategory totals
     looked correct because get_asin_totals already aggregates separately).
+
+    Inventory + cover-days columns:
+      * FBA / ADW snapshot read from vahdam_amazon_3P_inv (latest day,
+        with the header-pollution row "DATE='Date'" filtered out).
+      * Total Inv = FBA only for non-USA marketplaces (UK, CA, DE, …).
+      * Total Inv = FBA + ADW for USA.
+      * Cover Days = Total Inv ÷ max daily run-rate across the 4 windows
+        (yesterday, last 7d, last 14d, last 30d). The max picks the most
+        aggressive recent velocity so cover days stay conservative.
     """
     esc = sub_cat.replace("'","''")
     if sub_cat == "(untagged)":
         pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
     else:
         pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+
+    today_ = date.today()
+    d_30 = today_ - timedelta(days=29)   # inclusive 30-day window
+    d_14 = today_ - timedelta(days=13)
+    d_7  = today_ - timedelta(days=6)
+    d_y  = today_ - timedelta(days=1)    # yesterday
+
+    is_usa = (geo or "").upper() == "USA"
+    total_inv_expr = (
+        "(COALESCE(i.FBA_INV,0) + COALESCE(i.ADW_INV,0))" if is_usa
+        else "COALESCE(i.FBA_INV,0)"
+    )
+
     return run_query(f"""
         WITH pnl AS (
             SELECT
@@ -1294,6 +1317,40 @@ def get_asin_data(where, geo, sub_cat, sfx):
               AND GEO = '{geo}'
               AND ASIN IS NOT NULL AND ASIN != ''
             GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        inv AS (
+            -- Latest inventory snapshot. The source table is a per-day
+            -- snapshot but only the most recent date is meaningful; we
+            -- MAX over date to pick the freshest reading per ASIN and
+            -- filter out the literal header-pollution row.
+            SELECT
+                UPPER(SPLIT_PART(ASIN, ' ', 1))  AS ASIN_KEY,
+                MAX(FBAINV)                      AS FBA_INV,
+                MAX(ADWINV)                      AS ADW_INV
+            FROM {INV_3P}
+            WHERE UPPER(GEO) = UPPER('{geo}')
+              AND ASIN IS NOT NULL
+              AND UPPER(ASIN) NOT IN ('ASIN', '')
+              AND DATE <> 'Date'
+            GROUP BY UPPER(SPLIT_PART(ASIN, ' ', 1))
+        ),
+        roll AS (
+            -- Rolling unit-velocity windows (yesterday, 7d, 14d, 30d).
+            -- We always pull the last 30 days here irrespective of the
+            -- user-selected period, so cover-days are correct even when
+            -- the page filter is shorter than 30 days.
+            SELECT
+                SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                SUM(CASE WHEN DAY = '{d_y}'                                  THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_1D,
+                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_7D,
+                SUM(CASE WHEN DAY BETWEEN '{d_14}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_14D,
+                SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d_30}' AND '{today_}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND {pnl_subcat}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
         )
         SELECT
             p.ASIN_KEY                                                              AS ASIN,
@@ -1328,9 +1385,37 @@ def get_asin_data(where, geo, sub_cat, sfx):
             ROUND(m.PAID_REVENUE_RAW / NULLIF(m.PAID_SPEND_RAW,  0),       2)       AS PACOS,
             ROUND(m.PAID_SPEND_RAW   / NULLIF(m.PAID_REVENUE_RAW,0) * 100, 1)       AS AD_ACOS_PCT,
             ROUND(m.PAID_REVENUE_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)       AS PCT_PAID_SALES,
-            ROUND(m.PAID_UNITS_RAW   / NULLIF(m.CLICKS_RAW,      0) * 100, 2)       AS CONV_RATE_PCT
+            ROUND(m.PAID_UNITS_RAW   / NULLIF(m.CLICKS_RAW,      0) * 100, 2)       AS CONV_RATE_PCT,
+            -- Inventory + cover days
+            COALESCE(i.FBA_INV, 0)                                                  AS FBA_INV,
+            COALESCE(i.ADW_INV, 0)                                                  AS ADW_INV,
+            {total_inv_expr}                                                        AS TOTAL_INV,
+            GREATEST(
+                COALESCE(r.U_1D,  0) / 1.0,
+                COALESCE(r.U_7D,  0) / 7.0,
+                COALESCE(r.U_14D, 0) / 14.0,
+                COALESCE(r.U_30D, 0) / 30.0
+            )                                                                       AS DAILY_RUN_RATE,
+            CASE
+                WHEN GREATEST(
+                    COALESCE(r.U_1D,  0) / 1.0,
+                    COALESCE(r.U_7D,  0) / 7.0,
+                    COALESCE(r.U_14D, 0) / 14.0,
+                    COALESCE(r.U_30D, 0) / 30.0
+                ) > 0
+                THEN ROUND({total_inv_expr}::FLOAT
+                    / GREATEST(
+                        COALESCE(r.U_1D,  0) / 1.0,
+                        COALESCE(r.U_7D,  0) / 7.0,
+                        COALESCE(r.U_14D, 0) / 14.0,
+                        COALESCE(r.U_30D, 0) / 30.0
+                    ), 1)
+                ELSE NULL
+            END                                                                     AS COVER_DAYS
         FROM pnl p
-        LEFT JOIN mkt m ON p.ASIN_KEY = m.ASIN_KEY
+        LEFT JOIN mkt  m ON p.ASIN_KEY = m.ASIN_KEY
+        LEFT JOIN inv  i ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
+        LEFT JOIN roll r ON p.ASIN_KEY = r.ASIN_KEY
         WHERE COALESCE(p.ACT_REVENUE_RAW, 0) > 0
            OR COALESCE(m.PAID_SPEND_RAW,   0) > 0
         ORDER BY p.ACT_REVENUE_RAW DESC NULLS LAST
@@ -3045,9 +3130,30 @@ def render_asin():
             n = int(top_n.split()[1])
             df = df.head(n).reset_index(drop=True)
 
-        st.caption(f"Sorted by **{cohort}** · "
-                   f"All budget figures from P&L table for the same date range. "
-                   f"Actuals = total sales (organic + paid).")
+        st.caption(
+            f"Sorted by **{cohort}** · "
+            f"All budget figures from P&L table for the same date range. "
+            f"Actuals = total sales (organic + paid). "
+            f"**Cover Days** = Total Inv ÷ max daily run-rate across "
+            f"(yesterday, 7d, 14d, 30d). 🔴 < 20 days "
+            f"(or out of stock) · 🟡 20–40 days."
+        )
+        # Conditional inventory columns: USA shows FBA + ADW + Total,
+        # other GEOs collapse to just Total (since Total = FBA).
+        is_usa_view = (geo or "").upper() == "USA"
+        if is_usa_view:
+            inv_cols = [
+                ("FBA_INV",    "FBA Inv"),
+                ("ADW_INV",    "ADW Inv"),
+                ("TOTAL_INV",  "Total Inv"),
+                ("COVER_DAYS", "Cover Days"),
+            ]
+        else:
+            inv_cols = [
+                ("TOTAL_INV",  "Total Inv"),
+                ("COVER_DAYS", "Cover Days"),
+            ]
+
         pnl_cols = [
             ("ASIN",          "ASIN"),
             ("PRODUCT_NAME",  "Product"),
@@ -3066,7 +3172,7 @@ def render_asin():
             ("ACT_CM2_PCT",   "Act CM2%"),
             ("BUD_CM2_PCT",   "Bud CM2%"),
             ("ACT_CM2_ABS",   "CM2 Abs"),
-        ]
+        ] + inv_cols
         p = df[[c for c,_ in pnl_cols]].rename(columns=dict(pnl_cols)).copy()
         p["Act Units"] = p["Act Units"].apply(fmt_num)
         p["Bud Units"] = p["Bud Units"].apply(fmt_num)
@@ -3078,12 +3184,24 @@ def render_asin():
         for col in ["Rev %","Act CM1%","Bud CM1%","Act ACoS%","Bud ACoS%","Act CM2%","Bud CM2%"]:
             src = [c for c,n in pnl_cols if n == col][0]
             p[col] = df[src].apply(fmt_pct)
+        # Inventory + cover-days formatting
+        if is_usa_view:
+            p["FBA Inv"] = df["FBA_INV"].apply(
+                lambda v: "—" if (_f(v) is None or _f(v) == 0) else f"{int(_f(v)):,}")
+            p["ADW Inv"] = df["ADW_INV"].apply(
+                lambda v: "—" if (_f(v) is None or _f(v) == 0) else f"{int(_f(v)):,}")
+        p["Total Inv"] = df["TOTAL_INV"].apply(
+            lambda v: "—" if (_f(v) is None or _f(v) == 0) else f"{int(_f(v)):,}")
+        p["Cover Days"] = df["COVER_DAYS"].apply(
+            lambda v: "—" if _f(v) is None else f"{_f(v):,.1f}")
 
         _rev_achvd   = pd.to_numeric(df["REV_ACHVD_PCT"], errors="coerce").reset_index(drop=True)
         _acos_delta  = (pd.to_numeric(df["ACT_ACOS_PCT"], errors="coerce") -
                         pd.to_numeric(df["BUD_ACOS_PCT"], errors="coerce")).reset_index(drop=True)
         _cm2_delta   = (pd.to_numeric(df["ACT_CM2_PCT"], errors="coerce") -
                         pd.to_numeric(df["BUD_CM2_PCT"], errors="coerce")).reset_index(drop=True)
+        _cover_days  = pd.to_numeric(df["COVER_DAYS"], errors="coerce").reset_index(drop=True)
+        _total_inv_n = pd.to_numeric(df["TOTAL_INV"],   errors="coerce").reset_index(drop=True)
 
         p = p.reset_index(drop=True)
 
@@ -3102,6 +3220,20 @@ def render_asin():
                 if v is not None:
                     s[idx.index("Act CM2%")] = ("color:#004A2B;font-weight:600" if v > 0
                                                  else "color:#8b1a1a;font-weight:600")
+            # Highlight low Cover Days (<20) red; medium (20-40) amber.
+            # Out-of-stock rows (Total Inv = 0) ALSO get the red treatment.
+            if "Cover Days" in idx:
+                cd = _f(_cover_days.iloc[row.name])
+                ti = _f(_total_inv_n.iloc[row.name])
+                if (ti is not None and ti == 0) or (cd is not None and cd < 20):
+                    style = ("background-color:#fde8e8;color:#8b1a1a;"
+                             "font-weight:700")
+                    s[idx.index("Cover Days")] = style
+                    if "Total Inv" in idx:
+                        s[idx.index("Total Inv")] = style
+                elif cd is not None and cd < 40:
+                    s[idx.index("Cover Days")] = (
+                        "background-color:#fef3d6;color:#7a5c00;font-weight:600")
             return s
 
         st.caption("💡 **Click any row** to open the ASIN's daily deep-dive "
