@@ -501,8 +501,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ────────────────────────────────────────────────────────────────
-TABLE     = "vahdam_db.maplemonk.vahdam_amazon_pnl_overall_fy27_onwards"
-MKTG      = "vahdam_db.maplemonk.VAHDAM_AMAZON_MARKETING"
+TABLE          = "vahdam_db.maplemonk.vahdam_amazon_pnl_overall_fy27_onwards"
+MKTG           = "vahdam_db.maplemonk.VAHDAM_AMAZON_MARKETING"
+SALES_MKT      = "vahdam_db.maplemonk.VAHDAM_AMAZON_SALES_MARKETING"
 GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
 GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
@@ -1005,7 +1006,9 @@ def get_fm_budget_v2(where_fm, sfx):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_asin_daily(asin, geo, d1, d2, sfx):
     """Daily revenue/units/spend for one ASIN. P&L and marketing aggregated
-    separately to avoid join row-multiplication, then merged in pandas."""
+    separately to avoid join row-multiplication, then merged in pandas.
+    Both tables use SPLIT_PART on ASIN so trailing suffixes never silently
+    drop rows."""
     a = asin.replace("'", "''")
     pnl = run_query(f"""
         SELECT DAY,
@@ -1029,7 +1032,7 @@ def get_asin_daily(asin, geo, d1, d2, sfx):
         FROM {MKTG}
         WHERE DAY BETWEEN '{d1}' AND '{d2}'
           AND GEO = '{geo}'
-          AND ASIN = '{a}'
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
         GROUP BY DAY
     """)
     if not pnl.empty: pnl["DAY"] = pd.to_datetime(pnl["DAY"])
@@ -1039,6 +1042,103 @@ def get_asin_daily(asin, geo, d1, d2, sfx):
     for c in ["REVENUE","UNITS","SPEND","AD_SALES","IMPRESSIONS","CLICKS","CONVERSIONS",
               "BUD_REVENUE","BUD_UNITS"]:
         if c not in merged.columns: merged[c] = 0
+    merged = merged.fillna(0).sort_values("DAY").reset_index(drop=True)
+    return merged
+
+
+@st.cache_data(ttl=3600)
+def discover_sales_mkt_cols():
+    """Return uppercased column names of VAHDAM_AMAZON_SALES_MARKETING.
+    Cached for 1 hour; returns empty frozenset if the table is unavailable."""
+    try:
+        df = run_query("""
+            SELECT UPPER(COLUMN_NAME) AS COL
+            FROM information_schema.columns
+            WHERE UPPER(TABLE_CATALOG) = 'VAHDAM_DB'
+              AND UPPER(TABLE_SCHEMA)  = 'MAPLEMONK'
+              AND UPPER(TABLE_NAME)    = 'VAHDAM_AMAZON_SALES_MARKETING'
+        """)
+        return frozenset(df["COL"].tolist())
+    except Exception:
+        return frozenset()
+
+
+def _sales_mkt_col(*candidates):
+    """Pick the first column name that actually exists in the sales-mkt
+    table from a list of likely candidates. Returns None if none exist."""
+    cols = discover_sales_mkt_cols()
+    for c in candidates:
+        if c.upper() in cols:
+            return c
+    return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_asin_rolling(asin, geo, sfx):
+    """Fetch the LAST 90 DAYS of (units, revenue, spend, sessions) for one
+    ASIN, regardless of the user-selected window. Used to build the
+    rolling 7 / 30 / 90 day cards so they are always accurate even when
+    the user picked a short window. Returns one row per day with columns
+    DAY, REVENUE, UNITS, SPEND, SESSIONS (SESSIONS = 0 if the sales-marketing
+    table or its sessions column is unavailable)."""
+    today_ = date.today()
+    d_start = today_ - timedelta(days=89)
+    a = asin.replace("'", "''")
+
+    pnl = run_query(f"""
+        SELECT DAY,
+            COALESCE(ROUND(SUM(SALES_ACTUAL_{sfx}),0),0)  AS REVENUE,
+            COALESCE(SUM(QTY_ACTUAL),0)                   AS UNITS
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d_start}' AND '{today_}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
+        GROUP BY DAY
+    """)
+    mkt = run_query(f"""
+        SELECT DAY,
+            COALESCE(ROUND(SUM(SPEND),0),0)  AS SPEND
+        FROM {MKTG}
+        WHERE DAY BETWEEN '{d_start}' AND '{today_}'
+          AND GEO = '{geo}'
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
+        GROUP BY DAY
+    """)
+
+    # SESSIONS pull: try the most common column names; degrade gracefully.
+    sess_col = _sales_mkt_col(
+        "SESSIONS", "SESSIONS_TOTAL", "BROWSER_SESSIONS",
+        "TOTAL_SESSIONS", "SESSIONS_B2C", "ORDERED_SESSIONS",
+    )
+    sm = pd.DataFrame(columns=["DAY", "SESSIONS"])
+    if sess_col:
+        try:
+            sm = run_query(f"""
+                SELECT DAY,
+                    COALESCE(SUM({sess_col}),0) AS SESSIONS
+                FROM {SALES_MKT}
+                WHERE DAY BETWEEN '{d_start}' AND '{today_}'
+                  AND GEO = '{geo}'
+                  AND SPLIT_PART(ASIN,' ',1) = '{a}'
+                GROUP BY DAY
+            """)
+        except Exception:
+            sm = pd.DataFrame(columns=["DAY", "SESSIONS"])
+
+    for df_ in (pnl, mkt, sm):
+        if not df_.empty:
+            df_["DAY"] = pd.to_datetime(df_["DAY"])
+
+    if pnl.empty and mkt.empty and sm.empty:
+        return pd.DataFrame(columns=["DAY","REVENUE","UNITS","SPEND","SESSIONS"])
+
+    merged = pnl if not pnl.empty else pd.DataFrame(columns=["DAY"])
+    for df_ in (mkt, sm):
+        if not df_.empty:
+            merged = pd.merge(merged, df_, on="DAY", how="outer")
+    for c in ["REVENUE", "UNITS", "SPEND", "SESSIONS"]:
+        if c not in merged.columns:
+            merged[c] = 0
     merged = merged.fillna(0).sort_values("DAY").reset_index(drop=True)
     return merged
 
@@ -3206,15 +3306,23 @@ def render_asin_detail():
     asp_avg    = (rev_total / units_tot) if (rev_total and units_tot) else None
     acos_avg   = (spend_tot / rev_total * 100) if (rev_total and spend_tot) else None
 
-    # 7/30/90-day comparable buckets (Amazon-style)
-    def _window(days):
+    # 7/30/90-day comparable buckets (Amazon-style). These use an
+    # INDEPENDENT 90-day query so they are always correct even when the user
+    # selects a short window like "Last 7 Days" in the period selector.
+    with st.spinner("Loading 90-day rolling stats…"):
+        roll = get_asin_rolling(asin, geo, sfx)
+
+    def _window90(days):
+        if roll.empty:
+            return roll
         cutoff = today_ - timedelta(days=days - 1)
-        w = daily[daily["DAY"] >= pd.Timestamp(cutoff)]
-        return w
-    last7   = _window(7);   last30 = _window(30);   last90 = _window(90)
+        return roll[roll["DAY"] >= pd.Timestamp(cutoff)]
+    last7   = _window90(7);   last30 = _window90(30);   last90 = _window90(90)
 
     def _sumlbl(slice_, col):
-        v = _f(slice_[col].sum()) if not slice_.empty else None
+        if slice_.empty or col not in slice_.columns:
+            return None
+        v = _f(slice_[col].sum())
         return v
 
     # Top summary strip
@@ -3238,33 +3346,45 @@ def render_asin_detail():
     st.markdown("")
     st.markdown('<div class="section-hdr">Rolling windows</div>',
                 unsafe_allow_html=True)
+
+    def _row(label, slice_):
+        u   = _sumlbl(slice_, "UNITS")
+        r   = _sumlbl(slice_, "REVENUE")
+        sp  = _sumlbl(slice_, "SPEND")
+        ses = _sumlbl(slice_, "SESSIONS")
+        asp = (r / u) if (r is not None and u) else None
+        cr  = (u / ses * 100.0) if (u is not None and ses) else None
+        return {"Window": label,
+                "Units ordered": u,
+                "Sessions":      ses,
+                "CR%":           cr,
+                "Revenue":       r,
+                "Avg ASP":       asp,
+                "Spend":         sp}
+
     rolling = pd.DataFrame([
-        {"Window": "Last 7 days",
-            "Units ordered": _sumlbl(last7, "UNITS"),
-            "Revenue":       _sumlbl(last7, "REVENUE"),
-            "Avg ASP": ((_sumlbl(last7, "REVENUE") or 0) / _sumlbl(last7, "UNITS"))
-                        if _sumlbl(last7, "UNITS") else None,
-            "Spend":         _sumlbl(last7, "SPEND")},
-        {"Window": "Last 30 days",
-            "Units ordered": _sumlbl(last30, "UNITS"),
-            "Revenue":       _sumlbl(last30, "REVENUE"),
-            "Avg ASP": ((_sumlbl(last30, "REVENUE") or 0) / _sumlbl(last30, "UNITS"))
-                        if _sumlbl(last30, "UNITS") else None,
-            "Spend":         _sumlbl(last30, "SPEND")},
-        {"Window": "Last 90 days",
-            "Units ordered": _sumlbl(last90, "UNITS"),
-            "Revenue":       _sumlbl(last90, "REVENUE"),
-            "Avg ASP": ((_sumlbl(last90, "REVENUE") or 0) / _sumlbl(last90, "UNITS"))
-                        if _sumlbl(last90, "UNITS") else None,
-            "Spend":         _sumlbl(last90, "SPEND")},
+        _row("Last 7 days",  last7),
+        _row("Last 30 days", last30),
+        _row("Last 90 days", last90),
     ])
     rolling["Units ordered"] = rolling["Units ordered"].apply(
         lambda v: "—" if v is None else f"{v:,.0f}")
+    rolling["Sessions"] = rolling["Sessions"].apply(
+        lambda v: "—" if v is None or v == 0 else f"{v:,.0f}")
+    rolling["CR%"] = rolling["CR%"].apply(
+        lambda v: "—" if v is None else f"{v:.1f}%")
     rolling["Revenue"] = rolling["Revenue"].apply(fmt_lakhs)
     rolling["Avg ASP"] = rolling["Avg ASP"].apply(
         lambda v: "—" if v is None else f"{sym}{v:,.2f}")
     rolling["Spend"]   = rolling["Spend"].apply(fmt_lakhs)
     st.dataframe(rolling, use_container_width=True, hide_index=True)
+    st.caption(
+        "Rolling windows are computed from the last 90 days "
+        "regardless of the period selector above. "
+        "CR% = Units ÷ Sessions (sessions pulled from "
+        "`vahdam_amazon_sales_marketing`; “—” means the table or column "
+        "isn't available for this GEO)."
+    )
 
     # ── Time-series chart with rich hover (Revenue, ASP, Units, Spend, ACoS) ──
     st.markdown("")
