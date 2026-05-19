@@ -1267,9 +1267,11 @@ def get_asin_data(where, geo, sub_cat, sfx):
         with the header-pollution row "DATE='Date'" filtered out).
       * Total Inv = FBA only for non-USA marketplaces (UK, CA, DE, …).
       * Total Inv = FBA + ADW for USA.
-      * Cover Days = Total Inv ÷ max daily run-rate across the 4 windows
-        (yesterday, last 7d, last 14d, last 30d). The max picks the most
-        aggressive recent velocity so cover days stay conservative.
+      * Cover Days = Total Inv ÷ max daily run-rate across 3 windows
+        (last 7d, last 14d, last 30d). The max picks the most aggressive
+        recent velocity so cover days stay conservative. Yesterday alone
+        is intentionally NOT in the mix — a single-day spike (e.g. a
+        coupon drop) should not collapse the cover-days estimate.
     """
     esc = sub_cat.replace("'","''")
     if sub_cat == "(untagged)":
@@ -1281,7 +1283,6 @@ def get_asin_data(where, geo, sub_cat, sfx):
     d_30 = today_ - timedelta(days=29)   # inclusive 30-day window
     d_14 = today_ - timedelta(days=13)
     d_7  = today_ - timedelta(days=6)
-    d_y  = today_ - timedelta(days=1)    # yesterday
 
     is_usa = (geo or "").upper() == "USA"
     total_inv_expr = (
@@ -1344,13 +1345,13 @@ def get_asin_data(where, geo, sub_cat, sfx):
             GROUP BY UPPER(SPLIT_PART(ASIN, ' ', 1))
         ),
         roll AS (
-            -- Rolling unit-velocity windows (yesterday, 7d, 14d, 30d).
-            -- We always pull the last 30 days here irrespective of the
-            -- user-selected period, so cover-days are correct even when
-            -- the page filter is shorter than 30 days.
+            -- Rolling unit-velocity windows (7d, 14d, 30d). We always pull
+            -- the last 30 days here irrespective of the user-selected
+            -- period, so cover-days are correct even when the page filter
+            -- is shorter than 30 days. Yesterday-only is intentionally
+            -- excluded — a single-day spike should not collapse cover.
             SELECT
                 SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
-                SUM(CASE WHEN DAY = '{d_y}'                                  THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_1D,
                 SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_7D,
                 SUM(CASE WHEN DAY BETWEEN '{d_14}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_14D,
                 SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D
@@ -1400,21 +1401,18 @@ def get_asin_data(where, geo, sub_cat, sfx):
             COALESCE(i.ADW_INV, 0)                                                  AS ADW_INV,
             {total_inv_expr}                                                        AS TOTAL_INV,
             GREATEST(
-                COALESCE(r.U_1D,  0) / 1.0,
                 COALESCE(r.U_7D,  0) / 7.0,
                 COALESCE(r.U_14D, 0) / 14.0,
                 COALESCE(r.U_30D, 0) / 30.0
             )                                                                       AS DAILY_RUN_RATE,
             CASE
                 WHEN GREATEST(
-                    COALESCE(r.U_1D,  0) / 1.0,
                     COALESCE(r.U_7D,  0) / 7.0,
                     COALESCE(r.U_14D, 0) / 14.0,
                     COALESCE(r.U_30D, 0) / 30.0
                 ) > 0
                 THEN ROUND({total_inv_expr}::FLOAT
                     / GREATEST(
-                        COALESCE(r.U_1D,  0) / 1.0,
                         COALESCE(r.U_7D,  0) / 7.0,
                         COALESCE(r.U_14D, 0) / 14.0,
                         COALESCE(r.U_30D, 0) / 30.0
@@ -2910,26 +2908,38 @@ def render_subcategory():
                 'click a row to drill into ASINs</span></div>', unsafe_allow_html=True)
 
     disp = df.copy()
+    # Lag = Budget Rev − Actual Rev (positive when we're behind plan)
+    disp["_LAG_REV"]     = pd.to_numeric(disp["SALES_BUD"], errors="coerce") - \
+                           pd.to_numeric(disp["SALES_ACT"], errors="coerce")
     disp["Budget Rev"]   = disp["SALES_BUD"].apply(fmt_lakhs)
     disp["Actual Rev"]   = disp["SALES_ACT"].apply(fmt_lakhs)
+    disp["Lag"]          = disp["_LAG_REV"].apply(lambda x: fmt_lakhs(x, signed=True))
     disp["Budget CM1"]   = disp["CM1_BUD"].apply(fmt_lakhs)
     disp["Actual CM1"]   = disp["CM1_ACT"].apply(fmt_lakhs)
+    disp["Act ACoS%"]    = disp["ACOS_PCT_ACT"].apply(fmt_pct)
+    disp["Bud ACoS%"]    = disp["ACOS_PCT_BUD"].apply(fmt_pct)
     disp["Budget CM2"]   = disp["CM2_BUD"].apply(fmt_lakhs)
     disp["Actual CM2"]   = disp["CM2_ACT"].apply(fmt_lakhs)
+    disp["Act CM2%"]     = disp["CM2_PCT_ACT"].apply(fmt_pct)
+    disp["Bud CM2%"]     = disp["CM2_PCT_BUD"].apply(fmt_pct)
     disp["% Achieved"]   = disp["REV_PCT"].apply(fmt_pct)
     disp["CM2 Abs %"]    = disp["CM2_ABS_ACHVD_PCT"].apply(fmt_pct)
     disp["CM2 Var"]      = disp["CM2_VAR"].apply(
         lambda x: fmt_lakhs(x, signed=True))
-    disp["Rev vs Plan"]  = disp.apply(
-        lambda r: prorata_str(r["SALES_ACT"], r["FM_SALES_BUD"]), axis=1)
 
-    _rev_n2  = pd.to_numeric(df["REV_PCT"],          errors="coerce").reset_index(drop=True)
-    _cm2a_n2 = pd.to_numeric(df["CM2_ABS_ACHVD_PCT"], errors="coerce").reset_index(drop=True)
-    _var_n2  = pd.to_numeric(df["CM2_VAR"],           errors="coerce").reset_index(drop=True)
-    _pro_s2  = disp["Rev vs Plan"].reset_index(drop=True)
+    _rev_n2   = pd.to_numeric(df["REV_PCT"],          errors="coerce").reset_index(drop=True)
+    _cm2a_n2  = pd.to_numeric(df["CM2_ABS_ACHVD_PCT"], errors="coerce").reset_index(drop=True)
+    _var_n2   = pd.to_numeric(df["CM2_VAR"],           errors="coerce").reset_index(drop=True)
+    _lag_n2   = disp["_LAG_REV"].reset_index(drop=True)
+    _acos_delta_sc = (pd.to_numeric(df["ACOS_PCT_ACT"], errors="coerce") -
+                      pd.to_numeric(df["ACOS_PCT_BUD"], errors="coerce")).reset_index(drop=True)
+    _cm2pct_delta_sc = (pd.to_numeric(df["CM2_PCT_ACT"], errors="coerce") -
+                        pd.to_numeric(df["CM2_PCT_BUD"], errors="coerce")).reset_index(drop=True)
 
-    dcols2 = ["SUB_CATEGORY","Budget Rev","Actual Rev","% Achieved","Rev vs Plan",
-              "Budget CM1","Actual CM1","Budget CM2","Actual CM2","CM2 Abs %","CM2 Var"]
+    dcols2 = ["SUB_CATEGORY","Budget Rev","Actual Rev","Lag","% Achieved",
+              "Budget CM1","Actual CM1","Act ACoS%","Bud ACoS%",
+              "Budget CM2","Actual CM2","Act CM2%","Bud CM2%",
+              "CM2 Abs %","CM2 Var"]
     table_df2 = disp[dcols2].rename(columns={"SUB_CATEGORY":"Sub-Category"}).reset_index(drop=True)
 
     def style_v2(row):
@@ -2938,7 +2948,24 @@ def render_subcategory():
         s[idx.index("% Achieved")]  = color_pct(_rev_n2.iloc[row.name])
         s[idx.index("CM2 Abs %")]   = color_pct(_cm2a_n2.iloc[row.name])
         s[idx.index("CM2 Var")]     = color_var(_var_n2.iloc[row.name])
-        s[idx.index("Rev vs Plan")] = color_prorata(_pro_s2.iloc[row.name])
+        # Lag: positive (behind plan) red, negative (ahead of plan) green
+        lv = _f(_lag_n2.iloc[row.name])
+        if lv is not None and lv != 0:
+            s[idx.index("Lag")] = (
+                "color:#8b1a1a;font-weight:600" if lv > 0
+                else "color:#004A2B;font-weight:600")
+        # Act ACoS% vs Bud: lower is better
+        av = _f(_acos_delta_sc.iloc[row.name])
+        if av is not None:
+            s[idx.index("Act ACoS%")] = (
+                "color:#8b1a1a;font-weight:600" if av > 0
+                else "color:#004A2B;font-weight:600")
+        # Act CM2% vs Bud: higher is better
+        cv = _f(_cm2pct_delta_sc.iloc[row.name])
+        if cv is not None:
+            s[idx.index("Act CM2%")] = (
+                "color:#004A2B;font-weight:600" if cv > 0
+                else "color:#8b1a1a;font-weight:600")
         if row["Sub-Category"] == "GRAND TOTAL":
             s = [(x + TOTAL_ROW).lstrip(";") for x in s]
         return s
@@ -3137,42 +3164,34 @@ def render_asin():
 
     # ── Tab 1: P&L ──
     with tab_pnl:
-        # ── Cohort toggle (#8) ──
-        cc1, cc2, cc3 = st.columns([3, 2, 3])
+        # Default sort: best revenue first. Users can re-sort by clicking any
+        # column header in the table below (st.dataframe gives native
+        # multi-direction sort on every column).
+        if "ACT_REVENUE" in df.columns:
+            df = df.sort_values("ACT_REVENUE", ascending=False,
+                                na_position="last").reset_index(drop=True)
+
+        cc1, cc2 = st.columns([2, 8])
         with cc1:
-            cohort = st.radio("Sort by",
-                              ["Revenue (Actual)", "CM2 Margin %", "CM2 Profit (Abs)", "Rev % Achieved"],
-                              horizontal=True, key=f"asin_cohort_{geo}_{subcat}")
-        with cc2:
             top_n = st.selectbox("Show",
                                  ["All", "Top 10", "Top 20", "Top 50"],
                                  index=0, key=f"asin_topn_{geo}_{subcat}")
-        with cc3:
+        with cc2:
             st.markdown(
                 f'<div style="padding-top:32px;font-size:11.5px;color:#7a6a50;">'
-                f'<b>{len(df):,}</b> ASINs in {subcat} · {geo}</div>',
+                f'<b>{len(df):,}</b> ASINs in {subcat} · {geo} &nbsp;·&nbsp; '
+                f'click any column header to re-sort.</div>',
                 unsafe_allow_html=True)
-
-        sort_key_map = {
-            "Revenue (Actual)":   ("ACT_REVENUE",   False),
-            "CM2 Margin %":       ("ACT_CM2_PCT",   False),
-            "CM2 Profit (Abs)":   ("ACT_CM2_ABS",   False),
-            "Rev % Achieved":     ("REV_ACHVD_PCT", False),
-        }
-        sort_col, asc = sort_key_map[cohort]
-        if sort_col in df.columns:
-            df = df.sort_values(sort_col, ascending=asc, na_position="last").reset_index(drop=True)
         if top_n != "All":
             n = int(top_n.split()[1])
             df = df.head(n).reset_index(drop=True)
 
         st.caption(
-            f"Sorted by **{cohort}** · "
-            f"All budget figures from P&L table for the same date range. "
-            f"Actuals = total sales (organic + paid). "
-            f"**Cover Days** = Total Inv ÷ max daily run-rate across "
-            f"(yesterday, 7d, 14d, 30d). 🔴 < 20 days "
-            f"(or out of stock) · 🟡 20–40 days."
+            "All budget figures from P&L table for the same date range. "
+            "Actuals = total sales (organic + paid). "
+            "**Lag** = Bud Rev − Act Rev (positive = behind plan). "
+            "**Cover Days** = Total Inv ÷ max daily run-rate across "
+            "(7d, 14d, 30d). 🔴 < 20 days (or out of stock) · 🟡 20–40 days."
         )
         # Conditional inventory columns: USA shows FBA + ADW + Total,
         # other GEOs collapse to just Total (since Total = FBA).
@@ -3190,6 +3209,10 @@ def render_asin():
                 ("COVER_DAYS", "Cover Days"),
             ]
 
+        # Lag = Bud Rev - Act Rev (positive = behind plan)
+        df["_LAG_REV"] = (pd.to_numeric(df["BUD_REVENUE"], errors="coerce") -
+                          pd.to_numeric(df["ACT_REVENUE"], errors="coerce"))
+
         pnl_cols = [
             ("ASIN",          "ASIN"),
             ("PRODUCT_NAME",  "Product"),
@@ -3198,6 +3221,7 @@ def render_asin():
             ("BUD_UNITS",     "Bud Units"),
             ("ACT_REVENUE",   "Act Rev"),
             ("BUD_REVENUE",   "Bud Rev"),
+            ("_LAG_REV",      "Lag"),
             ("REV_ACHVD_PCT", "Rev %"),
             ("ACT_ASP",       "Act ASP"),
             ("BUD_ASP",       "Bud ASP"),
@@ -3214,6 +3238,7 @@ def render_asin():
         p["Bud Units"] = p["Bud Units"].apply(fmt_num)
         p["Act Rev"]   = df["ACT_REVENUE"].apply(fmt_lakhs)
         p["Bud Rev"]   = df["BUD_REVENUE"].apply(fmt_lakhs)
+        p["Lag"]       = df["_LAG_REV"].apply(lambda x: fmt_lakhs(x, signed=True))
         p["CM2 Abs"]   = df["ACT_CM2_ABS"].apply(fmt_lakhs)
         p["Act ASP"]   = df["ACT_ASP"].apply(lambda v: fmt_ccy(v))
         p["Bud ASP"]   = df["BUD_ASP"].apply(lambda v: fmt_ccy(v))
@@ -3238,6 +3263,7 @@ def render_asin():
                         pd.to_numeric(df["BUD_CM2_PCT"], errors="coerce")).reset_index(drop=True)
         _cover_days  = pd.to_numeric(df["COVER_DAYS"], errors="coerce").reset_index(drop=True)
         _total_inv_n = pd.to_numeric(df["TOTAL_INV"],   errors="coerce").reset_index(drop=True)
+        _lag_n       = df["_LAG_REV"].reset_index(drop=True)
 
         p = p.reset_index(drop=True)
 
@@ -3246,6 +3272,11 @@ def render_asin():
             idx = row.index.tolist()
             if "Rev %" in idx:
                 s[idx.index("Rev %")]     = color_pct(_rev_achvd.iloc[row.name])
+            if "Lag" in idx:
+                lv = _f(_lag_n.iloc[row.name])
+                if lv is not None and lv != 0:
+                    s[idx.index("Lag")] = ("color:#8b1a1a;font-weight:600" if lv > 0
+                                            else "color:#004A2B;font-weight:600")
             if "Act ACoS%" in idx:
                 v = _f(_acos_delta.iloc[row.name])
                 if v is not None:
