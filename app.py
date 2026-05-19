@@ -3517,6 +3517,20 @@ PRICE_TRACKER_ASINS = {
     "CA":  _CA_ASINS,
 }
 
+# Budgeted (target) selling price per GEO per ASIN, in the marketplace's
+# native currency. When set, the anomaly check compares the latest price to
+# the budget instead of the trailing 7-day average. Fill in as needed:
+#   PRICE_BUDGETS["USA"]["B0XXXXXXXX"] = 24.99
+PRICE_BUDGETS: dict = {
+    "USA": {},
+    "UK":  {},
+    "DE":  {},
+    "FR":  {},
+    "IT":  {},
+    "ES":  {},
+    "CA":  {},
+}
+
 
 def keepa_available():
     try:
@@ -3551,6 +3565,26 @@ def _last_raw_value(csv_arr):
     Returns None if array is None/empty, otherwise the last value (may be -1)."""
     if not csv_arr or len(csv_arr) < 2: return None
     return csv_arr[-1]
+
+
+def _value_as_of(csv_arr, target_dt):
+    """Return the raw value in a Keepa csv array as of `target_dt` (the latest
+    point on or before that datetime). Returns None if no such point exists.
+    `csv_arr` is the raw alternating [keepa_minute, value, ...] array — value
+    may be -1 (no buybox / out of stock)."""
+    if not csv_arr or len(csv_arr) < 2:
+        return None
+    import datetime as _d
+    KEEPA_EPOCH = _d.datetime(2011, 1, 1)
+    target_min = int((target_dt - KEEPA_EPOCH).total_seconds() // 60)
+    last_val = None
+    for i in range(0, len(csv_arr) - 1, 2):
+        km = csv_arr[i]
+        if km <= target_min:
+            last_val = csv_arr[i + 1]
+        else:
+            break
+    return last_val
 
 
 @st.cache_data(ttl=86400, show_spinner=False)  # 24-hour cache
@@ -3618,28 +3652,36 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
         def _last(pts):
             return pts[-1][1] if pts else None
 
-        # Buybox status: present if the LATEST raw csv[18] value is a valid price.
+        # Buybox status: based on YESTERDAY's data point (i.e. the most recent
+        # csv[18] value at least 24h old). This filters out transient blips
+        # where the buybox briefly drops out / is reassigned today.
         # -1 = no buybox at that moment (suppressed / no offer winning).
-        last_raw_18 = _last_raw_value(buybox_arr)
-        last_raw_32 = _last_raw_value(buybox2_arr)
-        if last_raw_18 is not None:
-            buybox_present = last_raw_18 >= 0
-        elif last_raw_32 is not None:
-            buybox_present = last_raw_32 >= 0
+        import datetime as _d
+        yesterday_dt = _d.datetime.utcnow() - _d.timedelta(days=1)
+        y_raw_18 = _value_as_of(buybox_arr, yesterday_dt)
+        y_raw_32 = _value_as_of(buybox2_arr, yesterday_dt)
+        if y_raw_18 is not None:
+            buybox_present = y_raw_18 >= 0
+            buybox_yesterday = (float(y_raw_18) / 100.0) if y_raw_18 >= 0 else None
+        elif y_raw_32 is not None:
+            buybox_present = y_raw_32 >= 0
+            buybox_yesterday = (float(y_raw_32) / 100.0) if y_raw_32 >= 0 else None
         else:
-            buybox_present = None  # unknown — no history
+            buybox_present = None  # unknown — no history yet
+            buybox_yesterday = None
 
         out[asin] = {
-            "title":          prod.get("title", asin),
-            "currency":       sym,
-            "amazon_pts":     amazon_pts,
-            "new_pts":        new_pts,
-            "buybox_pts":     buybox_pts,
-            "last_amazon":    _last(amazon_pts),
-            "last_new":       _last(new_pts),
-            "last_buybox":    _last(buybox_pts),
-            "buybox_present": buybox_present,
-            "stats":          prod.get("stats", {}),
+            "title":            prod.get("title", asin),
+            "currency":         sym,
+            "amazon_pts":       amazon_pts,
+            "new_pts":          new_pts,
+            "buybox_pts":       buybox_pts,
+            "last_amazon":      _last(amazon_pts),
+            "last_new":         _last(new_pts),
+            "last_buybox":      _last(buybox_pts),
+            "buybox_present":   buybox_present,
+            "buybox_yesterday": buybox_yesterday,
+            "stats":            prod.get("stats", {}),
         }
     return out
 
@@ -3668,23 +3710,32 @@ def fetch_keepa_products(asins_tuple, domain_code, chunk_size=50):
     return merged
 
 
-def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0):
+def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0,
+                          budget=None):
     """Flag if the most recent price deviates > threshold_pct from the
-    average of the prior `lookback_days` (i.e. the 7 days immediately
-    before the latest point).
+    baseline. Baseline is the budgeted price when provided, otherwise the
+    average of the prior `lookback_days` (the 7 days immediately before the
+    latest point).
 
     Returns dict with 'flag': bool, 'change_pct': float, 'last': float,
-    'baseline': float, 'direction': 'up'|'down'|None.
+    'baseline': float, 'direction': 'up'|'down'|None, 'basis': 'budget'|'7d'.
     """
-    if not pts or len(pts) < 2:
+    if not pts:
         return {"flag": False}
     import datetime as _d
     last_dt, last_price = pts[-1]
-    window_start = last_dt - _d.timedelta(days=lookback_days)
-    prior = [p for d, p in pts[:-1] if d >= window_start]
-    if not prior:
-        return {"flag": False}
-    baseline = sum(prior) / len(prior)
+    if budget and budget > 0:
+        baseline = float(budget)
+        basis = "budget"
+    else:
+        if len(pts) < 2:
+            return {"flag": False}
+        window_start = last_dt - _d.timedelta(days=lookback_days)
+        prior = [p for d, p in pts[:-1] if d >= window_start]
+        if not prior:
+            return {"flag": False}
+        baseline = sum(prior) / len(prior)
+        basis = "7d"
     if baseline == 0:
         return {"flag": False}
     change = (last_price - baseline) / baseline * 100
@@ -3694,6 +3745,7 @@ def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0):
         "last":       last_price,
         "baseline":   baseline,
         "direction":  "up" if change > 0 else "down",
+        "basis":      basis,
     }
 
 
@@ -3704,7 +3756,8 @@ def render_price_tracker():
     st.markdown(
         '<div class="page-sub">Keepa-tracked price history per ASIN '
         '&nbsp;&bull;&nbsp; flagged when last price deviates >15% from the '
-        'prior 30-day average &nbsp;&bull;&nbsp; data refreshes every 24 h '
+        'budgeted price (or prior 7-day average when no budget is set) '
+        '&nbsp;&bull;&nbsp; data refreshes every 24 h '
         '(use sidebar Refresh to force-update)</div>',
         unsafe_allow_html=True)
 
@@ -3727,6 +3780,7 @@ def render_price_tracker():
             asins = PRICE_TRACKER_ASINS[geo]
             domain = KEEPA_DOMAIN.get(geo, 1)
             domain_str = AMAZON_DOMAIN.get(geo, "amazon.com")
+            budgets = PRICE_BUDGETS.get(geo, {}) or {}
             st.caption(f"{len(asins)} ASIN{'s' if len(asins) != 1 else ''} "
                        f"on {domain_str} · Keepa domain {domain}")
 
@@ -3737,7 +3791,7 @@ def render_price_tracker():
                 st.error(data["_error"])
                 continue
 
-            # ── Buybox-missing summary at the very top ──
+            # ── Buybox-missing summary (based on YESTERDAY) ──
             missing_buybox = []
             not_found = []
             for asin in asins:
@@ -3753,7 +3807,7 @@ def render_price_tracker():
                 if missing_buybox:
                     bits.append(f"🛒 {len(missing_buybox)} ASIN"
                                 f"{'s' if len(missing_buybox) != 1 else ''} "
-                                f"without an active Buy Box")
+                                f"without an active Buy Box (yesterday)")
                 if not_found:
                     bits.append(f"🔍 {len(not_found)} ASIN"
                                 f"{'s' if len(not_found) != 1 else ''} not "
@@ -3770,7 +3824,7 @@ def render_price_tracker():
                         st.markdown(
                             "<div style='font-size:12.5px;color:#8b1a1a;"
                             "font-weight:700;margin-bottom:6px;'>"
-                            "Buy Box currently suppressed / unavailable:</div>",
+                            "Buy Box suppressed / unavailable as of yesterday:</div>",
                             unsafe_allow_html=True)
                         for asin, d in missing_buybox:
                             last_seen = d.get("last_buybox")
@@ -3793,13 +3847,13 @@ def render_price_tracker():
                             unsafe_allow_html=True)
                         st.code(", ".join(not_found), language=None)
 
-            # ── Anomaly summary ──
+            # ── Anomaly summary (uses budget when present, else 7-day avg) ──
             anomalies = []
             for asin in asins:
                 if asin not in data: continue
                 d = data[asin]
-                a = _detect_price_anomaly(d["amazon_pts"]) \
-                    if d.get("amazon_pts") else _detect_price_anomaly(d["new_pts"])
+                pts = d["amazon_pts"] or d["new_pts"]
+                a = _detect_price_anomaly(pts, budget=budgets.get(asin))
                 if a.get("flag"):
                     anomalies.append((asin, d, a))
 
@@ -3808,7 +3862,7 @@ def render_price_tracker():
                     f'<div class="alerts-row">'
                     f'<div class="alert-banner alert-warn">⚠️ {len(anomalies)} '
                     f'price {"anomaly" if len(anomalies) == 1 else "anomalies"} '
-                    f'in the last 7 days — review below.</div></div>',
+                    f'— review below.</div></div>',
                     unsafe_allow_html=True)
                 with st.expander(f"⚠️ {len(anomalies)} anomalies — show details",
                                  expanded=True):
@@ -3816,11 +3870,15 @@ def render_price_tracker():
                         arrow = "▲" if a["direction"] == "up" else "▼"
                         color = "#1a7a3e" if a["direction"] == "up" else "#8b1a1a"
                         title = d['title'][:70]
+                        basis_lbl = ("vs budget" if a.get("basis") == "budget"
+                                     else "vs 7-day avg")
                         st.markdown(
                             f"<div style='padding:6px 0;border-bottom:1px dashed #ede4d0;'>"
                             f"<b>{asin}</b> &nbsp;·&nbsp; "
                             f"<span style='color:{color};font-weight:700;'>"
                             f"{arrow} {abs(a['change_pct']):.1f}%</span> "
+                            f"<span class='small-muted' style='font-size:10.5px;'>"
+                            f"{basis_lbl}</span> "
                             f"&nbsp;<span class='small-muted'>"
                             f"{d['currency']}{a['baseline']:.2f} → "
                             f"{d['currency']}{a['last']:.2f}</span><br>"
@@ -3828,17 +3886,65 @@ def render_price_tracker():
                             f"{title}</span></div>",
                             unsafe_allow_html=True)
             else:
-                st.success("✓ No price anomalies detected in the last 7 days.")
+                st.success("✓ No price anomalies detected.")
 
-            # ── Per-ASIN price charts (3 per row) ──
+            # ── ASIN search / picker ──
             st.markdown('<div class="section-hdr" style="margin-top:18px;">'
                         'Price history (Amazon + New offer)</div>',
                         unsafe_allow_html=True)
 
+            # Build a label map: "ASIN — Title" for each ASIN that came back.
+            # Anomalies / buybox-missing bubble to the top of the dropdown.
+            def _label_for(a):
+                t = (data.get(a, {}).get("title") or "")[:60]
+                return f"{a} — {t}" if t else a
+            anomaly_set = {a[0] for a in anomalies}
+            missing_set = {a[0] for a in missing_buybox}
+            def _sort_key(a):
+                # 0 = anomaly, 1 = missing buybox, 2 = rest
+                if a in anomaly_set: return (0, a)
+                if a in missing_set: return (1, a)
+                return (2, a)
+            options = sorted(asins, key=_sort_key)
+            search_q = st.text_input(
+                "🔍 Search ASIN or title",
+                key=f"price_search_{geo}",
+                placeholder="e.g. B0BJK5GPRD or 'masala chai'",
+            ).strip().lower()
+            if search_q:
+                options = [
+                    a for a in options
+                    if search_q in a.lower()
+                    or search_q in (data.get(a, {}).get("title") or "").lower()
+                ]
+                if not options:
+                    st.info(f"No ASINs matched “{search_q}”.")
+                    continue
+            # Default: any anomaly / missing-buybox ASINs (capped at 6), else
+            # the first 3 ASINs so the page loads quickly.
+            default_picks = [a for a in options
+                             if a in anomaly_set or a in missing_set][:6]
+            if not default_picks:
+                default_picks = options[:3]
+            picks = st.multiselect(
+                f"Select ASINs to chart ({len(options)} available)",
+                options=options,
+                default=default_picks,
+                format_func=_label_for,
+                key=f"price_picks_{geo}",
+            )
+            if not picks:
+                st.info("Pick one or more ASINs above to see their price charts.")
+                continue
+
+            # ── Per-ASIN price charts (3 per row) ──
+            import datetime as _d
+            two_years_ago = _d.datetime.utcnow() - _d.timedelta(days=730)
+
             ROW = 3
-            for row_start in range(0, len(asins), ROW):
+            for row_start in range(0, len(picks), ROW):
                 cols = st.columns(ROW, gap="medium")
-                for i, asin in enumerate(asins[row_start:row_start + ROW]):
+                for i, asin in enumerate(picks[row_start:row_start + ROW]):
                     with cols[i]:
                         if asin not in data:
                             st.markdown(
@@ -3851,6 +3957,13 @@ def render_price_tracker():
                         d = data[asin]
                         title_short = (d["title"][:55] + "…") \
                             if len(d["title"]) > 55 else d["title"]
+                        budget_price = budgets.get(asin)
+
+                        # Restrict pts to last 2 years for both anomaly + chart
+                        amazon_pts_2y = [p for p in d["amazon_pts"]
+                                         if p[0] >= two_years_ago]
+                        new_pts_2y    = [p for p in d["new_pts"]
+                                         if p[0] >= two_years_ago]
 
                         # Price header
                         last = d.get("last_amazon") or d.get("last_new") or d.get("last_buybox")
@@ -3860,8 +3973,10 @@ def render_price_tracker():
                                       else "—")
                         last_str = f"{d['currency']}{last:.2f}" if last else "—"
                         anomaly = _detect_price_anomaly(
-                            d["amazon_pts"] or d["new_pts"])
+                            amazon_pts_2y or new_pts_2y,
+                            budget=budget_price)
                         bb_missing = d.get("buybox_present") is False
+                        bb_yday    = d.get("buybox_yesterday")
                         if bb_missing:
                             bord = "#8b1a1a"
                         elif anomaly.get("flag"):
@@ -3871,13 +3986,33 @@ def render_price_tracker():
                         flag_html = ""
                         if bb_missing:
                             flag_html = ("<span style='color:#8b1a1a;font-weight:700;"
-                                         "font-size:11px;'>🛒 No Buy Box</span>")
+                                         "font-size:11px;'>🛒 No Buy Box (yest.)</span>")
                         elif anomaly.get("flag"):
                             arrow = "▲" if anomaly["direction"] == "up" else "▼"
                             clr = "#1a7a3e" if anomaly["direction"] == "up" else "#8b1a1a"
+                            basis_tag = ("vs budget" if anomaly.get("basis") == "budget"
+                                         else "vs 7d avg")
                             flag_html = (f"<span style='color:{clr};font-weight:700;"
                                           f"font-size:11px;'>{arrow} "
-                                          f"{abs(anomaly['change_pct']):.1f}%</span>")
+                                          f"{abs(anomaly['change_pct']):.1f}% "
+                                          f"<span style='font-weight:500;color:#7a6a50;'>"
+                                          f"{basis_tag}</span></span>")
+                        budget_html = ""
+                        if budget_price:
+                            budget_html = (f"<span class='small-muted' "
+                                           f"style='font-size:10.5px;'>Budget "
+                                           f"{d['currency']}{budget_price:.2f}</span>")
+                        bb_yday_html = ""
+                        if bb_yday is not None and not bb_missing:
+                            bb_yday_html = (f"<span class='small-muted' "
+                                            f"style='font-size:10.5px;'>BB yest. "
+                                            f"{d['currency']}{bb_yday:.2f}</span>")
+                        meta_html = " &nbsp;·&nbsp; ".join(
+                            x for x in [budget_html, bb_yday_html] if x)
+                        if meta_html:
+                            meta_html = (f"<div style='font-size:10.5px;"
+                                         f"color:#7a6a50;margin-top:2px;'>"
+                                         f"{meta_html}</div>")
                         st.markdown(
                             f"<div style='background:#fff;border:1px solid {bord};"
                             f"border-radius:8px;padding:8px 12px;"
@@ -3891,13 +4026,14 @@ def render_price_tracker():
                             f"{flag_html}</div>"
                             f"<div style='font-size:10.5px;color:#7a6a50;"
                             f"line-height:1.3;'>{title_short}</div>"
+                            f"{meta_html}"
                             f"</div>", unsafe_allow_html=True)
 
-                        # Mini Plotly chart
-                        if HAS_PLOTLY and (d["amazon_pts"] or d["new_pts"]):
+                        # Mini Plotly chart — last 2 years only
+                        if HAS_PLOTLY and (amazon_pts_2y or new_pts_2y):
                             fig = go.Figure()
-                            if d["amazon_pts"]:
-                                xs, ys = zip(*d["amazon_pts"])
+                            if amazon_pts_2y:
+                                xs, ys = zip(*amazon_pts_2y)
                                 fig.add_trace(go.Scatter(
                                     x=xs, y=ys, mode="lines",
                                     name="Amazon",
@@ -3905,8 +4041,8 @@ def render_price_tracker():
                                     hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
                                                    f"Amazon: {d['currency']}%{{y:.2f}}"
                                                    "<extra></extra>")))
-                            if d["new_pts"]:
-                                xs, ys = zip(*d["new_pts"])
+                            if new_pts_2y:
+                                xs, ys = zip(*new_pts_2y)
                                 fig.add_trace(go.Scatter(
                                     x=xs, y=ys, mode="lines",
                                     name="New",
@@ -3915,6 +4051,19 @@ def render_price_tracker():
                                     hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
                                                    f"New: {d['currency']}%{{y:.2f}}"
                                                    "<extra></extra>")))
+                            # Budget horizontal reference line
+                            if budget_price:
+                                fig.add_hline(
+                                    y=budget_price,
+                                    line=dict(color="#8b1a1a", width=1.1,
+                                              dash="dash"),
+                                    annotation_text=(f"Budget "
+                                                     f"{d['currency']}"
+                                                     f"{budget_price:.2f}"),
+                                    annotation_position="top left",
+                                    annotation_font=dict(size=9,
+                                                         color="#8b1a1a"),
+                                )
                             fig.update_layout(
                                 plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
                                 height=140,
@@ -3925,9 +4074,12 @@ def render_price_tracker():
                                                 bordercolor="#004A2B",
                                                 font=dict(size=11, color="#171717")),
                             )
-                            fig.update_xaxes(showgrid=False,
-                                              tickfont=dict(size=9, color="#7a6a50"),
-                                              nticks=4)
+                            fig.update_xaxes(
+                                showgrid=False,
+                                tickfont=dict(size=9, color="#7a6a50"),
+                                nticks=4,
+                                range=[two_years_ago, _d.datetime.utcnow()],
+                            )
                             fig.update_yaxes(showgrid=True,
                                               gridcolor="rgba(171,135,67,0.15)",
                                               tickfont=dict(size=9, color="#7a6a50"),
@@ -3936,7 +4088,7 @@ def render_price_tracker():
                             st.plotly_chart(fig, use_container_width=True,
                                             config={"displayModeBar": False})
                         else:
-                            st.caption("No history available")
+                            st.caption("No history available (last 2 years)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
