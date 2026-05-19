@@ -554,17 +554,19 @@ def run_query(sql: str) -> pd.DataFrame:
             raise
 
 # ── Session state ─────────────────────────────────────────────────────────────
-for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None)]:
+for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None),
+             ("selected_asin",None), ("selected_asin_product",None)]:
     if k not in st.session_state: st.session_state[k] = v
 
 # Hydrate from URL on first load (#19)
 if "_url_synced" not in st.session_state:
     try:
         qp = st.query_params
-        if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","pnl"}:
+        if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","asin_detail","pnl"}:
             st.session_state.view = qp["view"]
         if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
         if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
+        if "asin" in qp:   st.session_state.selected_asin   = qp["asin"]
         if "preset" in qp and "date_preset" not in st.session_state:
             st.session_state.date_preset = qp["preset"]
         if "sku" in qp and "sku_search" not in st.session_state:
@@ -996,6 +998,47 @@ def get_fm_budget_v2(where_fm, sfx):
             ROUND(SUM(CM2_BUDGET_{sfx}),0)
         FROM {TABLE} WHERE {where_fm}
     """)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_asin_daily(asin, geo, d1, d2, sfx):
+    """Daily revenue/units/spend for one ASIN. P&L and marketing aggregated
+    separately to avoid join row-multiplication, then merged in pandas."""
+    a = asin.replace("'", "''")
+    pnl = run_query(f"""
+        SELECT DAY,
+            COALESCE(ROUND(SUM(SALES_ACTUAL_{sfx}),0),0)  AS REVENUE,
+            COALESCE(SUM(QTY_ACTUAL),0)                   AS UNITS,
+            COALESCE(ROUND(SUM(SALES_BUDGET_{sfx}),0),0)  AS BUD_REVENUE,
+            COALESCE(SUM(QTY_BUDGET),0)                   AS BUD_UNITS
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d1}' AND '{d2}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
+        GROUP BY DAY
+    """)
+    mkt = run_query(f"""
+        SELECT DAY,
+            COALESCE(ROUND(SUM(SPEND),0),0)        AS SPEND,
+            COALESCE(ROUND(SUM(AD_SALES),0),0)     AS AD_SALES,
+            COALESCE(ROUND(SUM(IMPRESSIONS),0),0)  AS IMPRESSIONS,
+            COALESCE(ROUND(SUM(CLICKS),0),0)       AS CLICKS,
+            COALESCE(ROUND(SUM(CONVERSIONS),0),0)  AS CONVERSIONS
+        FROM {MKTG}
+        WHERE DAY BETWEEN '{d1}' AND '{d2}'
+          AND GEO = '{geo}'
+          AND ASIN = '{a}'
+        GROUP BY DAY
+    """)
+    if not pnl.empty: pnl["DAY"] = pd.to_datetime(pnl["DAY"])
+    if not mkt.empty: mkt["DAY"] = pd.to_datetime(mkt["DAY"])
+    merged = pd.merge(pnl, mkt, on="DAY", how="outer") if not (pnl.empty and mkt.empty) else pd.DataFrame()
+    if merged.empty: return merged
+    for c in ["REVENUE","UNITS","SPEND","AD_SALES","IMPRESSIONS","CLICKS","CONVERSIONS",
+              "BUD_REVENUE","BUD_UNITS"]:
+        if c not in merged.columns: merged[c] = 0
+    merged = merged.fillna(0).sort_values("DAY").reset_index(drop=True)
+    return merged
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_asin_totals(geo, sub_cat, d1, d2, sfx):
@@ -2887,9 +2930,27 @@ def render_asin():
                                                  else "color:#8b1a1a;font-weight:600")
             return s
 
-        st.dataframe(
+        st.caption("💡 **Click any row** to open the ASIN's daily deep-dive "
+                   "(revenue, units, spend, ACoS, ASP over time).")
+        evt_pnl = st.dataframe(
             p.style.apply(style_pnl, axis=1).hide(axis="index"),
-            use_container_width=True, height=500)
+            use_container_width=True, height=500,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"asin_pnl_table_{geo}_{subcat}")
+        # Row click → drill into ASIN detail view
+        try:
+            rows = evt_pnl.selection.rows if evt_pnl else []
+        except Exception:
+            rows = []
+        if rows:
+            idx = rows[0]
+            picked_asin = str(p.iloc[idx]["ASIN"])
+            picked_prod = str(p.iloc[idx].get("Product", picked_asin))
+            st.session_state.selected_asin         = picked_asin
+            st.session_state.selected_asin_product = picked_prod
+            st.session_state.view                  = "asin_detail"
+            st.rerun()
 
     # ── Tab 2: Ad Performance ──
     with tab_ads:
@@ -3060,6 +3121,266 @@ def render_asin():
 # ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 4 — P&L Statement
 # ═══════════════════════════════════════════════════════════════════════════════
+def render_asin_detail():
+    """Single-ASIN deep dive — daily revenue/units/spend with rich hover."""
+    asin   = st.session_state.selected_asin
+    prod   = st.session_state.selected_asin_product or asin
+    geo    = st.session_state.selected_geo
+    subcat = st.session_state.selected_subcat
+
+    # ── Header + breadcrumbs ──
+    c1, c2 = st.columns([1, 9])
+    with c1:
+        if st.button("← Back", key="asin_detail_back"):
+            st.session_state.view = "asin"
+            st.rerun()
+    with c2:
+        render_breadcrumbs([
+            ("Overview",   "overview",    None,    None),
+            (geo or "—",   "subcategory", geo,     None),
+            (subcat or "—","asin",        geo,     subcat),
+            (asin or "—",  "asin_detail", geo,     subcat),
+        ])
+        st.markdown(
+            f'<div class="page-title">ASIN Deep Dive &mdash; {asin}</div>',
+            unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="page-sub" style="margin-bottom:8px;">'
+            f'<span style="color:#004A2B;font-weight:600;">{prod}</span></div>',
+            unsafe_allow_html=True)
+
+    # ── Period selector (independent of global preset) ──
+    p1, p2, p3 = st.columns([2, 5, 5])
+    with p1:
+        det_preset = st.selectbox(
+            "Time window",
+            ["Last 30 Days", "Last 7 Days", "Last 60 Days", "Last 90 Days",
+             "MTD", "Match dashboard range"],
+            index=0, key=f"asin_det_preset_{asin}")
+    today_ = date.today()
+    if det_preset == "Last 7 Days":
+        d1, d2 = today_ - timedelta(days=6),  today_
+    elif det_preset == "Last 30 Days":
+        d1, d2 = today_ - timedelta(days=29), today_
+    elif det_preset == "Last 60 Days":
+        d1, d2 = today_ - timedelta(days=59), today_
+    elif det_preset == "Last 90 Days":
+        d1, d2 = today_ - timedelta(days=89), today_
+    elif det_preset == "MTD":
+        d1, d2 = today_.replace(day=1), today_
+    else:
+        d1, d2 = d_from, d_to
+
+    with p2:
+        st.markdown(
+            f'<div style="font-size:12px;color:#7a6a50;padding-top:34px;">'
+            f'📅 {d1.strftime("%d %b %Y")} – {d2.strftime("%d %b %Y")} · '
+            f'{(d2 - d1).days + 1} days</div>', unsafe_allow_html=True)
+
+    # ── Pull daily data ──
+    with st.spinner("Loading ASIN daily…"):
+        daily = get_asin_daily(asin, geo, d1, d2, sfx)
+
+    if daily.empty:
+        st.warning("📭 No daily data found for this ASIN in the selected window.")
+        if st.button("← Back to ASIN list"):
+            st.session_state.view = "asin"; st.rerun()
+        return
+
+    # ── Derived per-row metrics ──
+    daily["ASP"]   = daily.apply(
+        lambda r: (r["REVENUE"] / r["UNITS"]) if r["UNITS"] else None, axis=1)
+    daily["ACOS"]  = daily.apply(
+        lambda r: (r["SPEND"] / r["REVENUE"] * 100) if r["REVENUE"] else None, axis=1)
+    daily["CVR"]   = daily.apply(
+        lambda r: (r["CONVERSIONS"] / r["CLICKS"] * 100) if r["CLICKS"] else None, axis=1)
+
+    # ── Period totals + Seller-Central-style summary cards ──
+    rev_total  = _f(daily["REVENUE"].sum())
+    units_tot  = _f(daily["UNITS"].sum())
+    spend_tot  = _f(daily["SPEND"].sum())
+    impr_tot   = _f(daily["IMPRESSIONS"].sum())
+    asp_avg    = (rev_total / units_tot) if (rev_total and units_tot) else None
+    acos_avg   = (spend_tot / rev_total * 100) if (rev_total and spend_tot) else None
+
+    # 7/30/90-day comparable buckets (Amazon-style)
+    def _window(days):
+        cutoff = today_ - timedelta(days=days - 1)
+        w = daily[daily["DAY"] >= pd.Timestamp(cutoff)]
+        return w
+    last7   = _window(7);   last30 = _window(30);   last90 = _window(90)
+
+    def _sumlbl(slice_, col):
+        v = _f(slice_[col].sum()) if not slice_.empty else None
+        return v
+
+    # Top summary strip
+    cards = [
+        ("Units · Window",       f"{units_tot:,.0f}" if units_tot else "—",
+            f"{(units_tot/((d2-d1).days+1)):.0f}/day"
+                if (units_tot and (d2-d1).days+1 > 0) else "—"),
+        ("Revenue · Window",     fmt_lakhs(rev_total),
+            f"Avg ASP: {sym}{asp_avg:,.2f}" if asp_avg else "—"),
+        ("Ad Spend · Window",    fmt_lakhs(spend_tot),
+            f"ACoS: {acos_avg:.1f}%" if acos_avg is not None else "—"),
+        ("Impressions · Window", f"{impr_tot/1e6:.2f}M" if impr_tot else "—",
+            f"Clicks: {_f(daily['CLICKS'].sum()):,.0f}"
+                if _f(daily['CLICKS'].sum()) is not None else "—"),
+    ]
+    cols = st.columns(4, gap="medium")
+    for col, (lbl, val, sub) in zip(cols, cards):
+        col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
+
+    # Seller-Central-style 7/30/90 mini-grid
+    st.markdown("")
+    st.markdown('<div class="section-hdr">Rolling windows</div>',
+                unsafe_allow_html=True)
+    rolling = pd.DataFrame([
+        {"Window": "Last 7 days",
+            "Units ordered": _sumlbl(last7, "UNITS"),
+            "Revenue":       _sumlbl(last7, "REVENUE"),
+            "Avg ASP": ((_sumlbl(last7, "REVENUE") or 0) / _sumlbl(last7, "UNITS"))
+                        if _sumlbl(last7, "UNITS") else None,
+            "Spend":         _sumlbl(last7, "SPEND")},
+        {"Window": "Last 30 days",
+            "Units ordered": _sumlbl(last30, "UNITS"),
+            "Revenue":       _sumlbl(last30, "REVENUE"),
+            "Avg ASP": ((_sumlbl(last30, "REVENUE") or 0) / _sumlbl(last30, "UNITS"))
+                        if _sumlbl(last30, "UNITS") else None,
+            "Spend":         _sumlbl(last30, "SPEND")},
+        {"Window": "Last 90 days",
+            "Units ordered": _sumlbl(last90, "UNITS"),
+            "Revenue":       _sumlbl(last90, "REVENUE"),
+            "Avg ASP": ((_sumlbl(last90, "REVENUE") or 0) / _sumlbl(last90, "UNITS"))
+                        if _sumlbl(last90, "UNITS") else None,
+            "Spend":         _sumlbl(last90, "SPEND")},
+    ])
+    rolling["Units ordered"] = rolling["Units ordered"].apply(
+        lambda v: "—" if v is None else f"{v:,.0f}")
+    rolling["Revenue"] = rolling["Revenue"].apply(fmt_lakhs)
+    rolling["Avg ASP"] = rolling["Avg ASP"].apply(
+        lambda v: "—" if v is None else f"{sym}{v:,.2f}")
+    rolling["Spend"]   = rolling["Spend"].apply(fmt_lakhs)
+    st.dataframe(rolling, use_container_width=True, hide_index=True)
+
+    # ── Time-series chart with rich hover (Revenue, ASP, Units, Spend, ACoS) ──
+    st.markdown("")
+    metric_tabs = st.radio(
+        "Show", ["Revenue", "Units", "Spend", "ACoS%"],
+        horizontal=True, key=f"asin_det_metric_{asin}",
+        label_visibility="collapsed")
+
+    if HAS_PLOTLY:
+        if metric_tabs == "Revenue":
+            yvals = pd.to_numeric(daily["REVENUE"], errors="coerce")
+            unit  = "Revenue"
+        elif metric_tabs == "Units":
+            yvals = pd.to_numeric(daily["UNITS"], errors="coerce")
+            unit  = "Units"
+        elif metric_tabs == "Spend":
+            yvals = pd.to_numeric(daily["SPEND"], errors="coerce")
+            unit  = "Spend"
+        else:
+            yvals = pd.to_numeric(daily["ACOS"], errors="coerce")
+            unit  = "ACoS%"
+
+        # Auto-scale for currency metrics
+        peak = yvals.abs().max() or 0
+        if metric_tabs in ("Revenue", "Spend"):
+            if   peak >= 1e7: div, scale_lbl = 1e7, "Cr"
+            elif peak >= 1e5: div, scale_lbl = 1e5, "L"
+            elif peak >= 1e3: div, scale_lbl = 1e3, "K"
+            else:             div, scale_lbl = 1, ""
+        else:
+            div, scale_lbl = 1, ""
+        y_disp = yvals / div
+
+        # Build rich hover with all metrics
+        custom = []
+        for i in range(len(daily)):
+            r = daily.iloc[i]
+            custom.append([
+                fmt_lakhs(r["REVENUE"]),
+                f"{sym}{(r['ASP'] or 0):,.2f}" if r["ASP"] else "—",
+                f"{int(r['UNITS']):,}" if r["UNITS"] else "0",
+                fmt_lakhs(r["SPEND"]) if r["SPEND"] else "—",
+                f"{r['ACOS']:.1f}%" if r["ACOS"] is not None and r["ACOS"] >= 0 else "—",
+                f"{int(r['IMPRESSIONS']):,}" if r["IMPRESSIONS"] else "0",
+                f"{int(r['CLICKS']):,}" if r["CLICKS"] else "0",
+            ])
+
+        fig = go.Figure(go.Scatter(
+            x=daily["DAY"], y=y_disp,
+            mode="lines+markers",
+            line=dict(color="#004A2B", width=2.5),
+            marker=dict(size=6, color="#004A2B",
+                        line=dict(width=1, color="#FBF5EA")),
+            fill="tozeroy",
+            fillcolor="rgba(0,74,43,0.08)",
+            customdata=custom,
+            hovertemplate=(
+                "<b>%{x|%d %b %Y}</b>"
+                "<br>──────────────────"
+                "<br><b>Revenue</b>: %{customdata[0]}"
+                "<br><b>ASP</b>: %{customdata[1]}"
+                "<br><b>Units</b>: %{customdata[2]}"
+                "<br>──────────────────"
+                "<br><b>Ad Spend</b>: %{customdata[3]}"
+                "<br><b>ACoS</b>: %{customdata[4]}"
+                "<br><b>Impr</b>: %{customdata[5]}  |  "
+                "<b>Clicks</b>: %{customdata[6]}"
+                "<extra></extra>"
+            ),
+        ))
+        title_unit = (f" ({sym} {scale_lbl})".rstrip()
+                       if metric_tabs in ("Revenue", "Spend") else
+                       (" (Units)" if metric_tabs == "Units" else " (%)"))
+        fig.update_layout(
+            title=dict(text=f"<b>{metric_tabs}</b> per day{title_unit}",
+                       font=dict(size=15, color="#004A2B")),
+            plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+            font=dict(family="Arial", color="#171717"),
+            height=340, margin=dict(l=40, r=40, t=50, b=40),
+            showlegend=False,
+            hoverlabel=dict(bgcolor="#ffffff",
+                            font=dict(color="#171717", family="Arial"),
+                            bordercolor="#004A2B", align="left"),
+        )
+        fig.update_xaxes(gridcolor="rgba(171,135,67,0.15)",
+                         tickformat="%d %b")
+        fig.update_yaxes(gridcolor="rgba(171,135,67,0.15)",
+                         title_text=metric_tabs +
+                            (f" ({scale_lbl})" if scale_lbl else ""))
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displayModeBar": False})
+        st.caption("Hover any day for the full daily snapshot · "
+                   "switch metric above to retoggle the line shown.")
+
+    # ── Daily detail table (downloadable) ──
+    with st.expander("📄 Daily detail table", expanded=False):
+        td = daily.copy()
+        td["Date"]    = td["DAY"].dt.strftime("%d %b %Y")
+        td["Revenue"] = td["REVENUE"].apply(fmt_lakhs)
+        td["Units"]   = td["UNITS"].apply(
+            lambda v: "—" if not v else f"{int(v):,}")
+        td["ASP"]     = td["ASP"].apply(
+            lambda v: "—" if v is None else f"{sym}{v:,.2f}")
+        td["Spend"]   = td["SPEND"].apply(fmt_lakhs)
+        td["ACoS"]    = td["ACOS"].apply(
+            lambda v: "—" if v is None else f"{v:.1f}%")
+        td["Impr"]    = td["IMPRESSIONS"].apply(
+            lambda v: "—" if not v else f"{int(v):,}")
+        td["Clicks"]  = td["CLICKS"].apply(
+            lambda v: "—" if not v else f"{int(v):,}")
+        show_cols = ["Date","Revenue","Units","ASP","Spend","ACoS","Impr","Clicks"]
+        st.dataframe(td[show_cols].sort_values("Date", ascending=False),
+                     use_container_width=True, height=320, hide_index=True)
+        csv = td[show_cols].to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download CSV", csv,
+            file_name=f"asin_{asin}_{d1}_{d2}.csv",
+            mime="text/csv", key=f"dl_asin_{asin}")
+
+
 def render_pnl():
     c1, c2 = st.columns([1, 9])
     with c1:
@@ -3396,6 +3717,8 @@ elif view == "overview":
     render_overview()
 elif view == "subcategory":
     render_subcategory()
+elif view == "asin_detail":
+    render_asin_detail()
 elif view == "pnl":
     render_pnl()
 else:
