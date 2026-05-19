@@ -1716,12 +1716,18 @@ def top_movers_chips(view1_df, n=3):
 
 
 def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
-               vs_b_pct=None, vs_b_lower_better=False):
+               vs_b_pct=None, vs_b_lower_better=False,
+               lm_value=None, ly_delta=None, ly_value=None):
     """Compact KPI card matching the P&L summary strip style. Reusable across views.
 
     vs_b_pct: optional achievement % vs budget (e.g. 101.2 means 1.2% above plan).
               Renders a small pill between the sub line and the delta line.
     vs_b_lower_better: when True (e.g. for ad spend), <100% is good (green).
+
+    Comparison lines (rendered under the vs-B pill, stacked):
+      delta + delta_suffix  →  "▲ 0.4%  vs LM   (₹10.5Cr)"   if lm_value given
+      ly_delta              →  "▲ 5.2%  vs LY   (₹9.50Cr)"   if ly_value given
+    Both delta lines accept `None` and quietly drop out.
     """
     # ── vs Budget pill ──
     vs_b_html = ""
@@ -1738,18 +1744,24 @@ def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
                 else:           klass = "badge-red"
             vs_b_html = (f'<div class="vs-b-pill {klass}">{v:.1f}% vs B</div>')
 
-    # ── vs LM delta ──
-    delta_html = ""
-    if delta is not None:
-        d = _f(delta)
-        if d is not None:
-            cls = "delta-up" if d >= 0 else "delta-dn"
-            arrow = "▲" if d >= 0 else "▼"
-            suffix_html = (f' <span class="small-muted" '
-                           f'style="font-weight:500;">{delta_suffix}</span>'
-                           if delta_suffix else "")
-            delta_html = (f'<div class="kpi-delta {cls}">'
-                          f'{arrow} {abs(d):.1f}%{suffix_html}</div>')
+    def _delta_line(pct, suffix, raw_value):
+        d = _f(pct)
+        if d is None and raw_value is None:
+            return ""
+        cls = "delta-up" if (d is not None and d >= 0) else "delta-dn"
+        arrow = "▲" if (d is not None and d >= 0) else "▼"
+        pct_html = f"{arrow} {abs(d):.1f}%" if d is not None else "—"
+        suffix_html = (f' <span class="small-muted" '
+                       f'style="font-weight:500;">{suffix}</span>'
+                       if suffix else "")
+        val_html = (f' <span class="small-muted" '
+                    f'style="font-weight:500;">({raw_value})</span>'
+                    if raw_value else "")
+        return (f'<div class="kpi-delta {cls}">'
+                f'{pct_html}{suffix_html}{val_html}</div>')
+
+    delta_html  = _delta_line(delta,    delta_suffix, lm_value)
+    delta_html += _delta_line(ly_delta, "vs LY",      ly_value)
 
     sub_html = f'<div class="pnl-strip-sub">{sub}</div>' if sub else ""
     return (f'<div class="pnl-strip">'
@@ -2330,9 +2342,11 @@ def render_ceo():
 
     where      = build_where()
     where_lm   = build_where(date_from=lm_d_from, date_to=lm_d_to)
+    where_ly   = build_where(date_from=ly_d_from, date_to=ly_d_to)
     where_fm   = build_where(date_from=month_start, date_to=month_end)
     kpi        = get_kpis(where, sfx)
     kpi_lm     = get_kpis(where_lm, sfx)
+    kpi_ly     = get_kpis(where_ly, sfx)
     kpi_fm     = get_kpis(where_fm, sfx)  # full-month budget for forecast
     df         = get_view1(where, sfx)
 
@@ -2341,6 +2355,7 @@ def render_ceo():
         return
     k = kpi.iloc[0]
     klm = kpi_lm.iloc[0] if not kpi_lm.empty else None
+    kly = kpi_ly.iloc[0] if not kpi_ly.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
 
     # Narrative
@@ -2360,43 +2375,54 @@ def render_ceo():
         if c is None or p is None or p == 0: return None
         return (c - p) / abs(p) * 100
 
-    cards = [
+    def _prev_val(prev_kpi, key):
+        return prev_kpi.get(key) if prev_kpi is not None else None
+
+    # Each card: (label, value, sub, lower-better, kpi_key, formatter)
+    #   `lower-better` flips the vs-B pill direction (e.g. ACoS% lower is better)
+    #   `formatter`     formats the raw LM / LY values shown in parentheses
+    card_defs = [
         ("Revenue",  fmt_lakhs(k.get("SALES_ACT")),
             f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
-            _pct_change(k.get("SALES_ACT"),
-                        klm["SALES_ACT"] if klm is not None else None),
-            _ratio(k.get("SALES_ACT"), k.get("SALES_BUD")), False),
+            False, "SALES_ACT",   fmt_lakhs,
+            _ratio(k.get("SALES_ACT"),    k.get("SALES_BUD"))),
         ("Quantity", fmt_units(k.get("UNITS_ACT")),
             f"Bud: {fmt_units(k.get('UNITS_BUD'))}",
-            _pct_change(k.get("UNITS_ACT"),
-                        klm["UNITS_ACT"] if klm is not None else None),
-            _ratio(k.get("UNITS_ACT"), k.get("UNITS_BUD")), False),
-        ("CM1%",    fmt_pct(k.get("CM1_ACT")),
+            False, "UNITS_ACT",   fmt_units,
+            _ratio(k.get("UNITS_ACT"),    k.get("UNITS_BUD"))),
+        ("CM1%",     fmt_pct(k.get("CM1_ACT")),
             f"Bud: {fmt_pct(k.get('CM1_BUD'))}",
-            _pct_change(k.get("CM1_ACT"),
-                        klm["CM1_ACT"] if klm is not None else None),
-            _ratio(k.get("CM1_ACT"), k.get("CM1_BUD")), False),
-        ("ACoS%",   fmt_pct(k.get("ACOS_ACT")),
+            False, "CM1_ACT",     fmt_pct,
+            _ratio(k.get("CM1_ACT"),      k.get("CM1_BUD"))),
+        ("ACoS%",    fmt_pct(k.get("ACOS_ACT")),
             f"Bud: {fmt_pct(k.get('ACOS_BUD'))}",
-            _pct_change(k.get("ACOS_ACT"),
-                        klm["ACOS_ACT"] if klm is not None else None),
-            _ratio(k.get("ACOS_ACT"), k.get("ACOS_BUD")), True),
-        ("CM2%",    fmt_pct(k.get("CM2_ACT")),
+            True,  "ACOS_ACT",    fmt_pct,
+            _ratio(k.get("ACOS_ACT"),     k.get("ACOS_BUD"))),
+        ("CM2%",     fmt_pct(k.get("CM2_ACT")),
             f"Bud: {fmt_pct(k.get('CM2_BUD'))}",
-            _pct_change(k.get("CM2_ACT"),
-                        klm["CM2_ACT"] if klm is not None else None),
-            _ratio(k.get("CM2_ACT"), k.get("CM2_BUD")), False),
-        ("CM2 Abs", fmt_lakhs(k.get("CM2_ABS_ACT")),
+            False, "CM2_ACT",     fmt_pct,
+            _ratio(k.get("CM2_ACT"),      k.get("CM2_BUD"))),
+        ("CM2 Abs",  fmt_lakhs(k.get("CM2_ABS_ACT")),
             f"Bud: {fmt_lakhs(k.get('CM2_ABS_BUD'))}",
-            _pct_change(k.get("CM2_ABS_ACT"),
-                        klm["CM2_ABS_ACT"] if klm is not None else None),
-            _ratio(k.get("CM2_ABS_ACT"), k.get("CM2_ABS_BUD")), False),
+            False, "CM2_ABS_ACT", fmt_lakhs,
+            _ratio(k.get("CM2_ABS_ACT"), k.get("CM2_ABS_BUD"))),
     ]
     cols = st.columns(6, gap="medium")
-    for col, (lbl, val, sub, delta, ach, lb) in zip(cols, cards):
-        col.markdown(strip_card(lbl, val, sub, delta=delta,
-                                vs_b_pct=ach, vs_b_lower_better=lb),
-                     unsafe_allow_html=True)
+    for col, (lbl, val, sub, lb, key, fmt, ach) in zip(cols, card_defs):
+        cur     = k.get(key)
+        lm_raw  = _prev_val(klm, key)
+        ly_raw  = _prev_val(kly, key)
+        col.markdown(
+            strip_card(
+                lbl, val, sub,
+                delta=_pct_change(cur, lm_raw),
+                vs_b_pct=ach,
+                vs_b_lower_better=lb,
+                lm_value=fmt(lm_raw) if lm_raw is not None else None,
+                ly_delta=_pct_change(cur, ly_raw),
+                ly_value=fmt(ly_raw) if ly_raw is not None else None,
+            ),
+            unsafe_allow_html=True)
 
     # ── Forecast EOM (left) — gauges removed (redundant with vs-B pills above) ──
     if kfm is not None and days_elapsed > 0:
