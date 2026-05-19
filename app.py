@@ -3396,14 +3396,46 @@ KEEPA_SYMBOL = {1: "$", 2: "£", 3: "€", 4: "€", 6: "C$", 8: "€",
                 9: "€", 10: "₹", 11: "$"}
 
 # ASINs to track per GEO. Add more here as the user grows the list.
+_UK_ASINS = [
+    "B0BJL537F1", "B0BJK5GPRD", "B0BJK7NW9F", "B0BB1LXSPN", "B0BJK93HN2",
+    "B0BT7H247Z", "B0BFHKDK88", "B0BJK6L1G2", "B0B2928XNH", "B0C9CJ8L3N",
+    "B0BJK5T1QR", "B0C7N1F4Y1", "B0F3CT8RFY", "B09Y9CYXK5", "B0BT7FB4MC",
+    "B0DC52J7YZ", "B0D5D41L6R", "B09YXT3C1L", "B0B292NNQ1", "B0DFM8Y65X",
+    "B095PLTKFV", "B09YXMVQTV", "B074L4MZRY", "B0DC53P9XX", "B0DC52TQSJ",
+]
+
+# Shared list for the four EU marketplaces (DE, FR, IT, ES).
+_EU_ASINS = [
+    "B07K1WBH4K","B07MD4LB49","B0BJK5GPRD","B0C8ZDBRGG","B0D5D41L6R",
+    "B0DYP3S2Q7","B0BJK451HH","B0B5ZNJM36","B00VG5QV2O","B0BT7H247Z",
+    "B00VFYPIDO","B0C7N1F4Y1","B0BJK5T3Z9","B0BJL537F1","B00R65SD4C",
+    "B00VFYPK82","B0BF5KQFYV","B015J3FXOU","B0FSDLB9N4","B0757M47FW",
+    "B07RDK9WTN","B0FP5QDGFV","B0B5285BRC","B0DYP54XFC","B0BJK33PFP",
+    "B07MNSZ61S","B0C8ST8KVL","B0BJK93HN2","B0BV2YFWQR","B08G8SDB6D",
+    "B0B528DFWL","B00VIDX8V6","B0186XTAUI","B0B5277MXT","B019FLGKZI",
+    "B00VFYPG1S","B01JAK7UAS","B0B527SRQ9","B0DK5JHV4Q","B01M0DB0Z3",
+    "B0BV2Z423K","B00Q6FM6GY","B017P6DS5A","B0BV2ZBJP8","B01K78VZE4",
+    "B0BJK687Z2","B0B5277PX7","B0F5W48J88","B00XL1E6QO","B00M56WWX0",
+    "B0D54CSMKV","B0BV323L3X","B00VBUY3SS","B07MNSWD6D","B0DBL9384Q",
+    "B00VK0LF0S","B00QRVGUNW","B016IJ0YY8","B0757N4D53","B0BYK1F7Q8",
+    "B07RLM88NM","B013P6ZFHI","B0B52MMLFP","B07RHN9RVP","B0D54DF9WQ",
+    "B07M61PL9K","B0BV2Y41QJ","B00MN668VY","B00Q6UN3ZM","B0B52B1L1R",
+    "B093663R1Q","B08G2LFLCG","B097HLWC93","B00M5A28YO","B0BJK4KWW2",
+    "B016IL75S4","B00ZUTOATI","B0B526KNN6","B00VIDY1GC","B07RKWCXMB",
+    "B0BV2YWK27","B0BF5GCDBG","B07RGK4H2B","B075XQXSLM","B01NA9WRZF",
+    "B0B5266XD2","B07RHN6RRX","B07RHN9TDF","B0CGTZXY9M","B01M27XFKM",
+    "B078J3C15N","B08LVZV78R","B07RJRJC7V","B00VIDZ72Y","B07RBN3ZMJ",
+    "B01DZOZJNA","B08G2J583H","B07R6MHNMB","B0757VW95S","B096QC2CC7",
+    "B07K1XSGBK","B074L4MZRY","B0C9CJ8L3N","B016KQXYZA","B075XR382W",
+    "B07ZB61GXF","B0DHCJ1HHR","B08FXWK7LT","B0F5VYH6VX","B09DW76XD4",
+]
+
 PRICE_TRACKER_ASINS = {
-    "UK": [
-        "B0BJL537F1", "B0BJK5GPRD", "B0BJK7NW9F", "B0BB1LXSPN", "B0BJK93HN2",
-        "B0BT7H247Z", "B0BFHKDK88", "B0BJK6L1G2", "B0B2928XNH", "B0C9CJ8L3N",
-        "B0BJK5T1QR", "B0C7N1F4Y1", "B0F3CT8RFY", "B09Y9CYXK5", "B0BT7FB4MC",
-        "B0DC52J7YZ", "B0D5D41L6R", "B09YXT3C1L", "B0B292NNQ1", "B0DFM8Y65X",
-        "B095PLTKFV", "B09YXMVQTV", "B074L4MZRY", "B0DC53P9XX", "B0DC52TQSJ",
-    ],
+    "UK": _UK_ASINS,
+    "DE": _EU_ASINS,
+    "FR": _EU_ASINS,
+    "IT": _EU_ASINS,
+    "ES": _EU_ASINS,
 }
 
 
@@ -3435,14 +3467,16 @@ def _keepa_decode_csv(csv_arr, divide_by=100):
     return out
 
 
-@st.cache_data(ttl=43200, show_spinner=False)  # 12-hour cache
-def fetch_keepa_products(asins_tuple, domain_code):
-    """Fetch product data from Keepa for a tuple of ASINs in one request.
+def _last_raw_value(csv_arr):
+    """Return the last value in a Keepa csv array (alternating time,value).
+    Returns None if array is None/empty, otherwise the last value (may be -1)."""
+    if not csv_arr or len(csv_arr) < 2: return None
+    return csv_arr[-1]
 
-    asins_tuple must be a tuple (hashable) for caching. Returns dict keyed by
-    ASIN with {'title','csv_amazon','csv_new','csv_buybox','last_amazon',
-    'last_new','last_buybox','currency','tokens_left','error'} fields.
-    """
+
+@st.cache_data(ttl=43200, show_spinner=False)  # 12-hour cache
+def _fetch_keepa_chunk(asins_tuple, domain_code):
+    """Internal: fetch ONE chunk (≤50 ASINs) from Keepa. Cached per chunk."""
     if not keepa_available():
         return {"_error": "Keepa API key not configured in secrets.toml"}
     try:
@@ -3491,30 +3525,68 @@ def fetch_keepa_products(asins_tuple, domain_code):
         if not asin: continue
         csv_data = prod.get("csv") or []
         # CSV index reference:
-        # 0=AMAZON, 1=NEW, 2=USED, 3=SALES (rank), 7=LIST_PRICE, 18=BUY_BOX_SHIPPING
+        # 0=AMAZON, 1=NEW, 2=USED, 3=SALES (rank), 7=LIST_PRICE,
+        # 18=BUY_BOX_SHIPPING (most reliable), 32=BUY_BOX (price-only)
         amazon_arr  = csv_data[0]  if len(csv_data) > 0  else None
         new_arr     = csv_data[1]  if len(csv_data) > 1  else None
         buybox_arr  = csv_data[18] if len(csv_data) > 18 else None
+        buybox2_arr = csv_data[32] if len(csv_data) > 32 else None
 
         amazon_pts = _keepa_decode_csv(amazon_arr)
         new_pts    = _keepa_decode_csv(new_arr)
-        buybox_pts = _keepa_decode_csv(buybox_arr)
+        buybox_pts = _keepa_decode_csv(buybox_arr) or _keepa_decode_csv(buybox2_arr)
 
         def _last(pts):
             return pts[-1][1] if pts else None
 
+        # Buybox status: present if the LATEST raw csv[18] value is a valid price.
+        # -1 = no buybox at that moment (suppressed / no offer winning).
+        last_raw_18 = _last_raw_value(buybox_arr)
+        last_raw_32 = _last_raw_value(buybox2_arr)
+        if last_raw_18 is not None:
+            buybox_present = last_raw_18 >= 0
+        elif last_raw_32 is not None:
+            buybox_present = last_raw_32 >= 0
+        else:
+            buybox_present = None  # unknown — no history
+
         out[asin] = {
-            "title":       prod.get("title", asin),
-            "currency":    sym,
-            "amazon_pts":  amazon_pts,
-            "new_pts":     new_pts,
-            "buybox_pts":  buybox_pts,
-            "last_amazon": _last(amazon_pts),
-            "last_new":    _last(new_pts),
-            "last_buybox": _last(buybox_pts),
-            "stats":       prod.get("stats", {}),
+            "title":          prod.get("title", asin),
+            "currency":       sym,
+            "amazon_pts":     amazon_pts,
+            "new_pts":        new_pts,
+            "buybox_pts":     buybox_pts,
+            "last_amazon":    _last(amazon_pts),
+            "last_new":       _last(new_pts),
+            "last_buybox":    _last(buybox_pts),
+            "buybox_present": buybox_present,
+            "stats":          prod.get("stats", {}),
         }
     return out
+
+
+def fetch_keepa_products(asins_tuple, domain_code, chunk_size=50):
+    """Public wrapper: auto-chunks large ASIN lists into multiple cached calls.
+
+    Keepa accepts up to ~100 ASINs per request, but 50 is a safer default that
+    keeps URLs short and lets each chunk cache independently."""
+    asins = list(asins_tuple)
+    if not asins:
+        return {}
+    if len(asins) <= chunk_size:
+        return _fetch_keepa_chunk(tuple(asins), domain_code)
+
+    merged = {}
+    for i in range(0, len(asins), chunk_size):
+        chunk = tuple(asins[i:i + chunk_size])
+        part = _fetch_keepa_chunk(chunk, domain_code)
+        if "_error" in part and i == 0:
+            # First chunk failed — bubble it up so the UI shows the error.
+            return part
+        # Keep the most recent meta from the last successful chunk
+        for k, v in part.items():
+            merged[k] = v
+    return merged
 
 
 def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0):
@@ -3589,7 +3661,63 @@ def render_price_tracker():
                 st.caption(f"🪙 Keepa tokens left: **{tl}** "
                            f"· refill rate: {data.get('_refill_rate', '?')}/min")
 
-            # ── Anomaly summary at the top ──
+            # ── Buybox-missing summary at the very top ──
+            missing_buybox = []
+            not_found = []
+            for asin in asins:
+                if asin not in data:
+                    not_found.append(asin)
+                    continue
+                bp = data[asin].get("buybox_present")
+                if bp is False:
+                    missing_buybox.append((asin, data[asin]))
+
+            if missing_buybox or not_found:
+                bits = []
+                if missing_buybox:
+                    bits.append(f"🛒 {len(missing_buybox)} ASIN"
+                                f"{'s' if len(missing_buybox) != 1 else ''} "
+                                f"without an active Buy Box")
+                if not_found:
+                    bits.append(f"🔍 {len(not_found)} ASIN"
+                                f"{'s' if len(not_found) != 1 else ''} not "
+                                f"found in Keepa response")
+                st.markdown(
+                    f'<div class="alerts-row">'
+                    f'<div class="alert-banner alert-danger">'
+                    f'{" · ".join(bits)}</div></div>',
+                    unsafe_allow_html=True)
+                with st.expander(
+                    f"🛒 Buy Box / availability — show details",
+                    expanded=bool(missing_buybox)):
+                    if missing_buybox:
+                        st.markdown(
+                            "<div style='font-size:12.5px;color:#8b1a1a;"
+                            "font-weight:700;margin-bottom:6px;'>"
+                            "Buy Box currently suppressed / unavailable:</div>",
+                            unsafe_allow_html=True)
+                        for asin, d in missing_buybox:
+                            last_seen = d.get("last_buybox")
+                            seen_txt = (f"last seen {d['currency']}{last_seen:.2f}"
+                                        if last_seen else "no recent history")
+                            st.markdown(
+                                f"<div style='padding:4px 0;"
+                                f"border-bottom:1px dashed #ede4d0;'>"
+                                f"<b>{asin}</b> &nbsp;·&nbsp; "
+                                f"<span class='small-muted'>{seen_txt}</span><br>"
+                                f"<span style='font-size:11.5px;color:#7a6a50;'>"
+                                f"{(d['title'] or '')[:80]}</span></div>",
+                                unsafe_allow_html=True)
+                    if not_found:
+                        st.markdown(
+                            "<div style='font-size:12.5px;color:#8b1a1a;"
+                            "font-weight:700;margin:8px 0 4px 0;'>"
+                            "Not in Keepa response (may not be live on this "
+                            "marketplace):</div>",
+                            unsafe_allow_html=True)
+                        st.code(", ".join(not_found), language=None)
+
+            # ── Anomaly summary ──
             anomalies = []
             for asin in asins:
                 if asin not in data: continue
@@ -3657,9 +3785,18 @@ def render_price_tracker():
                         last_str = f"{d['currency']}{last:.2f}" if last else "—"
                         anomaly = _detect_price_anomaly(
                             d["amazon_pts"] or d["new_pts"])
-                        bord = "#AB8743" if anomaly.get("flag") else "#d6ccba"
+                        bb_missing = d.get("buybox_present") is False
+                        if bb_missing:
+                            bord = "#8b1a1a"
+                        elif anomaly.get("flag"):
+                            bord = "#AB8743"
+                        else:
+                            bord = "#d6ccba"
                         flag_html = ""
-                        if anomaly.get("flag"):
+                        if bb_missing:
+                            flag_html = ("<span style='color:#8b1a1a;font-weight:700;"
+                                         "font-size:11px;'>🛒 No Buy Box</span>")
+                        elif anomaly.get("flag"):
                             arrow = "▲" if anomaly["direction"] == "up" else "▼"
                             clr = "#1a7a3e" if anomaly["direction"] == "up" else "#8b1a1a"
                             flag_html = (f"<span style='color:{clr};font-weight:700;"
