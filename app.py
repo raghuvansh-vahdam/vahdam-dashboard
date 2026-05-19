@@ -1217,59 +1217,96 @@ def get_asin_totals(geo, sub_cat, d1, d2, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_asin_data(where, geo, sub_cat, sfx):
+    """ASIN-level table for the ASIN view.
+
+    IMPORTANT: P&L and marketing MUST be aggregated separately before any
+    join, otherwise a single (day, ASIN) row in the P&L table gets duplicated
+    by the number of campaign rows in the marketing table — which inflates
+    revenue, units, CM1, CM2 and spend at the ASIN level (subcategory totals
+    looked correct because get_asin_totals already aggregates separately).
+    """
     esc = sub_cat.replace("'","''")
     if sub_cat == "(untagged)":
-        subcat_filter = "COALESCE(NULLIF(p.SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+        pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
     else:
-        subcat_filter = f"UPPER(TRIM(COALESCE(p.SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+        pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
     return run_query(f"""
+        WITH pnl AS (
+            SELECT
+                SPLIT_PART(ASIN,' ',1)                                  AS ASIN_KEY,
+                MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))  AS PRODUCT_NAME,
+                MAX(BRAND)                                              AS BRAND,
+                MAX(CHANNEL)                                            AS CHANNEL,
+                SUM(QTY_BUDGET)                                         AS BUD_UNITS_RAW,
+                SUM(SALES_BUDGET_{sfx})                                 AS BUD_REVENUE_RAW,
+                SUM(CM1_BUDGET_{sfx})                                   AS CM1_BUD_RAW,
+                SUM(PM_SPEND_BUDGET_{sfx})                              AS PM_SPEND_BUD_RAW,
+                SUM(CM2_BUDGET_{sfx})                                   AS CM2_BUD_RAW,
+                SUM(QTY_ACTUAL)                                         AS ACT_UNITS_RAW,
+                SUM(SALES_ACTUAL_{sfx})                                 AS ACT_REVENUE_RAW,
+                SUM(CM1_ACTUAL_{sfx})                                   AS CM1_ACT_RAW,
+                SUM(PM_SPEND_ACTUAL_{sfx})                              AS PM_SPEND_ACT_RAW,
+                SUM(CM2_ACTUAL_{sfx})                                   AS CM2_ACT_RAW
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND {pnl_subcat}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        mkt AS (
+            SELECT
+                SPLIT_PART(ASIN,' ',1)  AS ASIN_KEY,
+                SUM(SPEND)              AS PAID_SPEND_RAW,
+                SUM(AD_SALES)           AS PAID_REVENUE_RAW,
+                SUM(IMPRESSIONS)        AS IMPRESSIONS_RAW,
+                SUM(CLICKS)             AS CLICKS_RAW,
+                SUM(CONVERSIONS)        AS PAID_UNITS_RAW
+            FROM {MKTG}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND GEO = '{geo}'
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        )
         SELECT
-            SPLIT_PART(p.ASIN,' ',1)                                                AS ASIN,
-            COALESCE(MAX(NULLIF(p.COMMON_SKU_DESCRIPTION,'')),MAX(p.ASIN))          AS PRODUCT_NAME,
-            MAX(p.BRAND)                                                             AS BRAND,
-            MAX(p.CHANNEL)                                                           AS CHANNEL,
+            p.ASIN_KEY                                                              AS ASIN,
+            p.PRODUCT_NAME                                                          AS PRODUCT_NAME,
+            p.BRAND                                                                 AS BRAND,
+            p.CHANNEL                                                               AS CHANNEL,
             -- Budget
-            ROUND(SUM(p.QTY_BUDGET),0)                                              AS BUD_UNITS,
-            ROUND(SUM(p.SALES_BUDGET_{sfx}),0)                                      AS BUD_REVENUE,
-            ROUND(SUM(p.SALES_BUDGET_{sfx})/NULLIF(SUM(p.QTY_BUDGET),0),2)         AS BUD_ASP,
-            ROUND(SUM(p.CM1_BUDGET_{sfx})/NULLIF(SUM(p.SALES_BUDGET_{sfx}),0)*100,1) AS BUD_CM1_PCT,
-            ROUND(SUM(p.PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(p.SALES_BUDGET_{sfx}),0)*100,1) AS BUD_ACOS_PCT,
-            ROUND(SUM(p.CM2_BUDGET_{sfx})/NULLIF(SUM(p.SALES_BUDGET_{sfx}),0)*100,1) AS BUD_CM2_PCT,
+            ROUND(p.BUD_UNITS_RAW, 0)                                               AS BUD_UNITS,
+            ROUND(p.BUD_REVENUE_RAW, 0)                                             AS BUD_REVENUE,
+            ROUND(p.BUD_REVENUE_RAW / NULLIF(p.BUD_UNITS_RAW, 0), 2)                AS BUD_ASP,
+            ROUND(p.CM1_BUD_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)            AS BUD_CM1_PCT,
+            ROUND(p.PM_SPEND_BUD_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)       AS BUD_ACOS_PCT,
+            ROUND(p.CM2_BUD_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)            AS BUD_CM2_PCT,
             -- P&L Actuals
-            ROUND(SUM(p.QTY_ACTUAL),0)                                              AS ACT_UNITS,
-            ROUND(SUM(p.SALES_ACTUAL_{sfx}),0)                                      AS ACT_REVENUE,
-            ROUND(SUM(p.SALES_ACTUAL_{sfx})/NULLIF(SUM(p.QTY_ACTUAL),0),2)         AS ACT_ASP,
-            ROUND(SUM(p.CM1_ACTUAL_{sfx})/NULLIF(SUM(p.SALES_ACTUAL_{sfx}),0)*100,1) AS ACT_CM1_PCT,
-            ROUND(SUM(p.PM_SPEND_ACTUAL_{sfx}),0)                                   AS ACT_SPEND,
-            ROUND(SUM(p.PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(p.SALES_ACTUAL_{sfx}),0)*100,1) AS ACT_ACOS_PCT,
-            ROUND(SUM(p.CM2_ACTUAL_{sfx})/NULLIF(SUM(p.SALES_ACTUAL_{sfx}),0)*100,1) AS ACT_CM2_PCT,
-            ROUND(SUM(p.CM2_ACTUAL_{sfx}),0)                                        AS ACT_CM2_ABS,
-            ROUND(SUM(p.SALES_ACTUAL_{sfx})/NULLIF(SUM(p.SALES_BUDGET_{sfx}),0)*100,1) AS REV_ACHVD_PCT,
-            -- Marketing (paid ads)
-            COALESCE(ROUND(SUM(m.SPEND),0),0)                                       AS PAID_SPEND,
-            COALESCE(ROUND(SUM(m.AD_SALES),0),0)                                    AS PAID_REVENUE,
-            COALESCE(ROUND(SUM(m.IMPRESSIONS),0),0)                                 AS IMPRESSIONS,
-            COALESCE(ROUND(SUM(m.CLICKS),0),0)                                      AS CLICKS,
-            COALESCE(ROUND(SUM(m.CONVERSIONS),0),0)                                 AS PAID_UNITS,
-            ROUND(SUM(m.CLICKS)/NULLIF(SUM(m.IMPRESSIONS),0)*100,2)                 AS CTR_PCT,
-            ROUND(SUM(m.SPEND)/NULLIF(SUM(m.CLICKS),0),2)                           AS CPC,
-            ROUND(SUM(m.AD_SALES)/NULLIF(SUM(m.SPEND),0),2)                         AS PACOS,
-            ROUND(SUM(m.SPEND)/NULLIF(SUM(m.AD_SALES),0)*100,1)                     AS AD_ACOS_PCT,
-            ROUND(SUM(m.AD_SALES)/NULLIF(SUM(p.SALES_ACTUAL_{sfx}),0)*100,1)        AS PCT_PAID_SALES,
-            ROUND(SUM(m.CONVERSIONS)/NULLIF(SUM(m.CLICKS),0)*100,2)                 AS CONV_RATE_PCT
-        FROM {TABLE} p
-        LEFT JOIN {MKTG} m
-            ON p.DAY = m.DAY
-            AND SPLIT_PART(p.ASIN,' ',1) = m.ASIN
-            AND p.GEO = m.GEO
-        WHERE p.DAY BETWEEN '{d_from}' AND '{d_to}'
-            AND p.GEO = '{geo}'
-            AND {GEO_EXCL.replace('GEO','p.GEO')}
-            AND {subcat_filter}
-            AND p.ASIN IS NOT NULL AND p.ASIN != ''
-        GROUP BY SPLIT_PART(p.ASIN,' ',1)
-        HAVING SUM(p.SALES_ACTUAL_{sfx}) > 0 OR SUM(m.SPEND) > 0
-        ORDER BY SUM(p.SALES_ACTUAL_{sfx}) DESC NULLS LAST
+            ROUND(p.ACT_UNITS_RAW, 0)                                               AS ACT_UNITS,
+            ROUND(p.ACT_REVENUE_RAW, 0)                                             AS ACT_REVENUE,
+            ROUND(p.ACT_REVENUE_RAW / NULLIF(p.ACT_UNITS_RAW, 0), 2)                AS ACT_ASP,
+            ROUND(p.CM1_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)            AS ACT_CM1_PCT,
+            ROUND(p.PM_SPEND_ACT_RAW, 0)                                            AS ACT_SPEND,
+            ROUND(p.PM_SPEND_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)       AS ACT_ACOS_PCT,
+            ROUND(p.CM2_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)            AS ACT_CM2_PCT,
+            ROUND(p.CM2_ACT_RAW, 0)                                                 AS ACT_CM2_ABS,
+            ROUND(p.ACT_REVENUE_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)        AS REV_ACHVD_PCT,
+            -- Marketing (paid ads) — null-safe when no ad rows exist
+            COALESCE(ROUND(m.PAID_SPEND_RAW,    0), 0)                              AS PAID_SPEND,
+            COALESCE(ROUND(m.PAID_REVENUE_RAW,  0), 0)                              AS PAID_REVENUE,
+            COALESCE(ROUND(m.IMPRESSIONS_RAW,   0), 0)                              AS IMPRESSIONS,
+            COALESCE(ROUND(m.CLICKS_RAW,        0), 0)                              AS CLICKS,
+            COALESCE(ROUND(m.PAID_UNITS_RAW,    0), 0)                              AS PAID_UNITS,
+            ROUND(m.CLICKS_RAW       / NULLIF(m.IMPRESSIONS_RAW, 0) * 100, 2)       AS CTR_PCT,
+            ROUND(m.PAID_SPEND_RAW   / NULLIF(m.CLICKS_RAW,      0),       2)       AS CPC,
+            ROUND(m.PAID_REVENUE_RAW / NULLIF(m.PAID_SPEND_RAW,  0),       2)       AS PACOS,
+            ROUND(m.PAID_SPEND_RAW   / NULLIF(m.PAID_REVENUE_RAW,0) * 100, 1)       AS AD_ACOS_PCT,
+            ROUND(m.PAID_REVENUE_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)       AS PCT_PAID_SALES,
+            ROUND(m.PAID_UNITS_RAW   / NULLIF(m.CLICKS_RAW,      0) * 100, 2)       AS CONV_RATE_PCT
+        FROM pnl p
+        LEFT JOIN mkt m ON p.ASIN_KEY = m.ASIN_KEY
+        WHERE COALESCE(p.ACT_REVENUE_RAW, 0) > 0
+           OR COALESCE(m.PAID_SPEND_RAW,   0) > 0
+        ORDER BY p.ACT_REVENUE_RAW DESC NULLS LAST
         LIMIT 200
     """)
 
