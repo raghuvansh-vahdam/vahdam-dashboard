@@ -562,7 +562,7 @@ for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None),
 if "_url_synced" not in st.session_state:
     try:
         qp = st.query_params
-        if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","asin_detail","pnl"}:
+        if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","asin_detail","pnl","price"}:
             st.session_state.view = qp["view"]
         if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
         if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
@@ -668,6 +668,9 @@ with st.sidebar:
         st.rerun()
     if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
         st.session_state.view = "pnl"
+        st.rerun()
+    if st.button("Price Tracker", use_container_width=True, key="nav_price"):
+        st.session_state.view = "price"
         st.rerun()
 
     # ── Refresh data ──
@@ -1931,7 +1934,7 @@ def build_variance_chart(view1_df):
 def sync_state_from_url():
     """Read URL params on initial load and seed session_state."""
     qp = st.query_params
-    if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","pnl"}:
+    if "view" in qp and qp["view"] in {"ceo","overview","subcategory","asin","pnl","price"}:
         st.session_state.view = qp["view"]
     if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
     if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
@@ -3381,6 +3384,333 @@ def render_asin_detail():
             mime="text/csv", key=f"dl_asin_{asin}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRICE TRACKER (Keepa)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Domain codes per Keepa REST API: 1=US, 2=UK, 3=DE, 4=FR, 5=JP, 6=CA, 8=IT,
+# 9=ES, 10=IN, 11=MX, 12=BR
+KEEPA_DOMAIN = {"USA": 1, "UK": 2, "DE": 3, "FR": 4, "CA": 6,
+                "IT": 8, "ES": 9, "AUS": 11, "UAE": 1}  # UAE/AUS fallback to US
+# Currency symbol per Keepa domain
+KEEPA_SYMBOL = {1: "$", 2: "£", 3: "€", 4: "€", 6: "C$", 8: "€",
+                9: "€", 10: "₹", 11: "$"}
+
+# ASINs to track per GEO. Add more here as the user grows the list.
+PRICE_TRACKER_ASINS = {
+    "UK": [
+        "B0BJL537F1", "B0BJK5GPRD", "B0BJK7NW9F", "B0BB1LXSPN", "B0BJK93HN2",
+        "B0BT7H247Z", "B0BFHKDK88", "B0BJK6L1G2", "B0B2928XNH", "B0C9CJ8L3N",
+        "B0BJK5T1QR", "B0C7N1F4Y1", "B0F3CT8RFY", "B09Y9CYXK5", "B0BT7FB4MC",
+        "B0DC52J7YZ", "B0D5D41L6R", "B09YXT3C1L", "B0B292NNQ1", "B0DFM8Y65X",
+        "B095PLTKFV", "B09YXMVQTV", "B074L4MZRY", "B0DC53P9XX", "B0DC52TQSJ",
+    ],
+}
+
+
+def keepa_available():
+    try:
+        return "keepa" in st.secrets and bool(st.secrets["keepa"].get("api_key"))
+    except Exception:
+        return False
+
+
+def _keepa_decode_csv(csv_arr, divide_by=100):
+    """Decode a Keepa CSV array (alternating [keepa_minute, value, ...]).
+
+    Returns list of (datetime, price) tuples. -1 values mean 'out of stock' /
+    no data and are skipped. Keepa time = unix minutes since 2011-01-01.
+    """
+    import datetime as _d
+    if not csv_arr:
+        return []
+    KEEPA_EPOCH = _d.datetime(2011, 1, 1)
+    out = []
+    for i in range(0, len(csv_arr) - 1, 2):
+        km = csv_arr[i]
+        val = csv_arr[i + 1]
+        if val is None or val < 0:
+            continue
+        dt = KEEPA_EPOCH + _d.timedelta(minutes=int(km))
+        out.append((dt, float(val) / divide_by))
+    return out
+
+
+@st.cache_data(ttl=43200, show_spinner=False)  # 12-hour cache
+def fetch_keepa_products(asins_tuple, domain_code):
+    """Fetch product data from Keepa for a tuple of ASINs in one request.
+
+    asins_tuple must be a tuple (hashable) for caching. Returns dict keyed by
+    ASIN with {'title','csv_amazon','csv_new','csv_buybox','last_amazon',
+    'last_new','last_buybox','currency','tokens_left','error'} fields.
+    """
+    if not keepa_available():
+        return {"_error": "Keepa API key not configured in secrets.toml"}
+    try:
+        import urllib.request, urllib.error, urllib.parse, json
+        api_key = st.secrets["keepa"]["api_key"]
+        asins_csv = ",".join(asins_tuple)
+        params = urllib.parse.urlencode({
+            "key": api_key, "domain": domain_code,
+            "asin": asins_csv, "stats": 90, "history": 1,
+        })
+        url = f"https://api.keepa.com/product?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "vahdam-dashboard"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"_error": f"Keepa HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"_error": f"Keepa request failed: {e}"}
+
+    out = {
+        "_tokens_left": payload.get("tokensLeft"),
+        "_refill_in":   payload.get("refillIn"),
+        "_refill_rate": payload.get("refillRate"),
+    }
+    sym = KEEPA_SYMBOL.get(domain_code, "$")
+    for prod in payload.get("products", []):
+        asin = prod.get("asin")
+        if not asin: continue
+        csv_data = prod.get("csv") or []
+        # CSV index reference:
+        # 0=AMAZON, 1=NEW, 2=USED, 3=SALES (rank), 7=LIST_PRICE, 18=BUY_BOX_SHIPPING
+        amazon_arr  = csv_data[0]  if len(csv_data) > 0  else None
+        new_arr     = csv_data[1]  if len(csv_data) > 1  else None
+        buybox_arr  = csv_data[18] if len(csv_data) > 18 else None
+
+        amazon_pts = _keepa_decode_csv(amazon_arr)
+        new_pts    = _keepa_decode_csv(new_arr)
+        buybox_pts = _keepa_decode_csv(buybox_arr)
+
+        def _last(pts):
+            return pts[-1][1] if pts else None
+
+        out[asin] = {
+            "title":       prod.get("title", asin),
+            "currency":    sym,
+            "amazon_pts":  amazon_pts,
+            "new_pts":     new_pts,
+            "buybox_pts":  buybox_pts,
+            "last_amazon": _last(amazon_pts),
+            "last_new":    _last(new_pts),
+            "last_buybox": _last(buybox_pts),
+            "stats":       prod.get("stats", {}),
+        }
+    return out
+
+
+def _detect_price_anomaly(pts, lookback_days=7, threshold_pct=15.0):
+    """Detect a price anomaly in the last `lookback_days`.
+
+    Returns dict with 'flag': bool, 'change_pct': float, 'last': float,
+    'baseline': float, 'direction': 'up'|'down'|None.
+    """
+    if not pts or len(pts) < 2:
+        return {"flag": False}
+    import datetime as _d
+    cutoff = _d.datetime.utcnow() - _d.timedelta(days=lookback_days)
+    recent = [p for d, p in pts if d >= cutoff]
+    older  = [p for d, p in pts if d <  cutoff]
+    if not recent or not older:
+        return {"flag": False}
+    last = recent[-1]
+    baseline = sum(older[-min(len(older), 30):]) / min(len(older), 30)
+    if baseline == 0:
+        return {"flag": False}
+    change = (last - baseline) / baseline * 100
+    return {
+        "flag":       abs(change) >= threshold_pct,
+        "change_pct": change,
+        "last":       last,
+        "baseline":   baseline,
+        "direction":  "up" if change > 0 else "down",
+    }
+
+
+def render_price_tracker():
+    """Price Tracker view: per-GEO tabs, Keepa price charts, anomaly highlights."""
+    st.markdown('<div class="page-title">Price Tracker</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-sub">Keepa-tracked price history per ASIN '
+        '&nbsp;&bull;&nbsp; flagged when last price deviates >15% from the '
+        'prior 30-day average</div>', unsafe_allow_html=True)
+
+    if not keepa_available():
+        st.warning(
+            "🔑 No Keepa API key found. Add it to Streamlit Cloud Secrets:\n\n"
+            "```toml\n[keepa]\napi_key = \"your_keepa_api_key\"\n```\n"
+            "Get a key at https://keepa.com/#!api"
+        )
+        return
+
+    geos = list(PRICE_TRACKER_ASINS.keys())
+    if not geos:
+        st.info("No ASINs configured. Add them to PRICE_TRACKER_ASINS in app.py.")
+        return
+
+    geo_tabs = st.tabs([f"🌍 {g}" for g in geos])
+    for geo, tab in zip(geos, geo_tabs):
+        with tab:
+            asins = PRICE_TRACKER_ASINS[geo]
+            domain = KEEPA_DOMAIN.get(geo, 1)
+            st.caption(f"{len(asins)} ASIN{'s' if len(asins) != 1 else ''} "
+                       f"on Amazon.{'co.uk' if geo=='UK' else 'com'} · "
+                       f"Keepa domain {domain}")
+
+            with st.spinner(f"Fetching Keepa data for {len(asins)} ASINs…"):
+                data = fetch_keepa_products(tuple(asins), domain)
+
+            if "_error" in data:
+                st.error(data["_error"])
+                continue
+
+            # Token usage info
+            tl = data.get("_tokens_left")
+            if tl is not None:
+                st.caption(f"🪙 Keepa tokens left: **{tl}** "
+                           f"· refill rate: {data.get('_refill_rate', '?')}/min")
+
+            # ── Anomaly summary at the top ──
+            anomalies = []
+            for asin in asins:
+                if asin not in data: continue
+                d = data[asin]
+                a = _detect_price_anomaly(d["amazon_pts"]) \
+                    if d.get("amazon_pts") else _detect_price_anomaly(d["new_pts"])
+                if a.get("flag"):
+                    anomalies.append((asin, d, a))
+
+            if anomalies:
+                st.markdown(
+                    f'<div class="alerts-row">'
+                    f'<div class="alert-banner alert-warn">⚠️ {len(anomalies)} '
+                    f'price {"anomaly" if len(anomalies) == 1 else "anomalies"} '
+                    f'in the last 7 days — review below.</div></div>',
+                    unsafe_allow_html=True)
+                with st.expander(f"⚠️ {len(anomalies)} anomalies — show details",
+                                 expanded=True):
+                    for asin, d, a in anomalies:
+                        arrow = "▲" if a["direction"] == "up" else "▼"
+                        color = "#1a7a3e" if a["direction"] == "up" else "#8b1a1a"
+                        title = d['title'][:70]
+                        st.markdown(
+                            f"<div style='padding:6px 0;border-bottom:1px dashed #ede4d0;'>"
+                            f"<b>{asin}</b> &nbsp;·&nbsp; "
+                            f"<span style='color:{color};font-weight:700;'>"
+                            f"{arrow} {abs(a['change_pct']):.1f}%</span> "
+                            f"&nbsp;<span class='small-muted'>"
+                            f"{d['currency']}{a['baseline']:.2f} → "
+                            f"{d['currency']}{a['last']:.2f}</span><br>"
+                            f"<span style='font-size:11.5px;color:#7a6a50;'>"
+                            f"{title}</span></div>",
+                            unsafe_allow_html=True)
+            else:
+                st.success("✓ No price anomalies detected in the last 7 days.")
+
+            # ── Per-ASIN price charts (3 per row) ──
+            st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                        'Price history (Amazon + New offer)</div>',
+                        unsafe_allow_html=True)
+
+            ROW = 3
+            for row_start in range(0, len(asins), ROW):
+                cols = st.columns(ROW, gap="medium")
+                for i, asin in enumerate(asins[row_start:row_start + ROW]):
+                    with cols[i]:
+                        if asin not in data:
+                            st.markdown(
+                                f"<div class='pnl-strip' style='height:auto;'>"
+                                f"<div class='pnl-strip-label'>{asin}</div>"
+                                f"<div style='color:#8b1a1a;font-size:11px;'>"
+                                f"Not found in Keepa response</div></div>",
+                                unsafe_allow_html=True)
+                            continue
+                        d = data[asin]
+                        title_short = (d["title"][:55] + "…") \
+                            if len(d["title"]) > 55 else d["title"]
+
+                        # Price header
+                        last = d.get("last_amazon") or d.get("last_new") or d.get("last_buybox")
+                        last_label = ("Amazon" if d.get("last_amazon")
+                                      else "New" if d.get("last_new")
+                                      else "Buy Box" if d.get("last_buybox")
+                                      else "—")
+                        last_str = f"{d['currency']}{last:.2f}" if last else "—"
+                        anomaly = _detect_price_anomaly(
+                            d["amazon_pts"] or d["new_pts"])
+                        bord = "#AB8743" if anomaly.get("flag") else "#d6ccba"
+                        flag_html = ""
+                        if anomaly.get("flag"):
+                            arrow = "▲" if anomaly["direction"] == "up" else "▼"
+                            clr = "#1a7a3e" if anomaly["direction"] == "up" else "#8b1a1a"
+                            flag_html = (f"<span style='color:{clr};font-weight:700;"
+                                          f"font-size:11px;'>{arrow} "
+                                          f"{abs(anomaly['change_pct']):.1f}%</span>")
+                        st.markdown(
+                            f"<div style='background:#fff;border:1px solid {bord};"
+                            f"border-radius:8px;padding:8px 12px;"
+                            f"margin-bottom:4px;'>"
+                            f"<div style='font-size:11px;color:#AB8743;"
+                            f"font-weight:700;letter-spacing:0.4px;'>{asin}</div>"
+                            f"<div style='font-size:18px;font-weight:700;"
+                            f"color:#004A2B;'>{last_str} "
+                            f"<span class='small-muted' style='font-size:10px;"
+                            f"font-weight:500;'>{last_label}</span> "
+                            f"{flag_html}</div>"
+                            f"<div style='font-size:10.5px;color:#7a6a50;"
+                            f"line-height:1.3;'>{title_short}</div>"
+                            f"</div>", unsafe_allow_html=True)
+
+                        # Mini Plotly chart
+                        if HAS_PLOTLY and (d["amazon_pts"] or d["new_pts"]):
+                            fig = go.Figure()
+                            if d["amazon_pts"]:
+                                xs, ys = zip(*d["amazon_pts"])
+                                fig.add_trace(go.Scatter(
+                                    x=xs, y=ys, mode="lines",
+                                    name="Amazon",
+                                    line=dict(color="#004A2B", width=1.6),
+                                    hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
+                                                   f"Amazon: {d['currency']}%{{y:.2f}}"
+                                                   "<extra></extra>")))
+                            if d["new_pts"]:
+                                xs, ys = zip(*d["new_pts"])
+                                fig.add_trace(go.Scatter(
+                                    x=xs, y=ys, mode="lines",
+                                    name="New",
+                                    line=dict(color="#AB8743", width=1.2,
+                                              dash="dot"),
+                                    hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
+                                                   f"New: {d['currency']}%{{y:.2f}}"
+                                                   "<extra></extra>")))
+                            fig.update_layout(
+                                plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+                                height=140,
+                                margin=dict(l=10, r=10, t=6, b=20),
+                                showlegend=False,
+                                hovermode="x",
+                                hoverlabel=dict(bgcolor="#ffffff",
+                                                bordercolor="#004A2B",
+                                                font=dict(size=11, color="#171717")),
+                            )
+                            fig.update_xaxes(showgrid=False,
+                                              tickfont=dict(size=9, color="#7a6a50"),
+                                              nticks=4)
+                            fig.update_yaxes(showgrid=True,
+                                              gridcolor="rgba(171,135,67,0.15)",
+                                              tickfont=dict(size=9, color="#7a6a50"),
+                                              tickprefix=d["currency"],
+                                              nticks=4)
+                            st.plotly_chart(fig, use_container_width=True,
+                                            config={"displayModeBar": False})
+                        else:
+                            st.caption("No history available")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VIEW 4 — P&L Statement
+# ═══════════════════════════════════════════════════════════════════════════════
 def render_pnl():
     c1, c2 = st.columns([1, 9])
     with c1:
@@ -3721,5 +4051,7 @@ elif view == "asin_detail":
     render_asin_detail()
 elif view == "pnl":
     render_pnl()
+elif view == "price":
+    render_price_tracker()
 else:
     render_asin()
