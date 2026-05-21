@@ -5113,7 +5113,17 @@ def render_customer_insights():
     if pd.isna(d_min) or pd.isna(d_max):
         d_min, d_max = pd.Timestamp(date.today() - timedelta(days=365)), pd.Timestamp(date.today())
 
-    f1, f2, f3, f4, f5, f6, f7 = st.columns([1.2, 1.2, 1.4, 1.4, 1.4, 1.0, 2.0])
+    # Use a custom CSS block to force every widget label in this row to
+    # have the SAME height so the inputs themselves stay perfectly aligned
+    # even when label text wraps differently.
+    st.markdown(
+        '<style>'
+        'div[data-testid="stHorizontalBlock"] '
+        '  [data-testid="stWidgetLabel"] { '
+        '    min-height: 20px; line-height: 1.2; }'
+        '</style>',
+        unsafe_allow_html=True)
+    f1, f2, f3, f4, f5, f6, f7 = st.columns([1.2, 1.2, 1.4, 1.4, 1.4, 1.2, 2.0])
     with f1:
         f_geo = st.selectbox("Geography", geos, index=0, key="ci_f_geo")
     with f2:
@@ -5129,10 +5139,12 @@ def render_customer_insights():
                               min_value=d_min.date(), max_value=d_max.date(),
                               key="ci_f_to")
     with f6:
-        f_min = st.number_input("Min reviews / ASIN", min_value=0, value=20,
-                                  step=5, key="ci_f_min")
+        f_min = st.number_input("Min reviews", min_value=0, value=20,
+                                  step=5, key="ci_f_min",
+                                  help="Minimum reviews per ASIN to be "
+                                       "included in Products / Actionables.")
     with f7:
-        f_search = st.text_input("Search product (ASIN or name)",
+        f_search = st.text_input("Search ASIN or name",
                                   key="ci_f_search",
                                   placeholder="e.g. B07RGK5QKZ / matcha").strip()
 
@@ -5190,17 +5202,14 @@ def render_customer_insights():
         cards = [
             ("Reviews",    f"{n_tot:,}",
                 f"{asin_grp['ASIN'].nunique():,} products"),
-            ("Avg Rating", f"{avg:.2f}", "/5"),
+            ("Avg Rating", f"{avg:.2f}/5", "across all reviews"),
             ("Negative %", f"{pct(n_neg):.1f}%",
                 f"{n_neg:,} reviews 1–2★"),
             ("Positive %", f"{pct(n_pos):.0f}%",
                 f"{n_pos:,} reviews 4–5★"),
             ("Neutral 3★", f"{n_neu:,}",  "opportunity to convert"),
-            ("Date Range",
-                f"{df['REVIEW_DATE'].min():%Y-%m-%d}",
-                f"→ {df['REVIEW_DATE'].max():%Y-%m-%d}"),
         ]
-        cols = st.columns(6, gap="small")
+        cols = st.columns(5, gap="small")
         for col, (lbl, val, sub) in zip(cols, cards):
             col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
 
