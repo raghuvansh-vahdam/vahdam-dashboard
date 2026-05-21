@@ -2189,6 +2189,7 @@ def build_subcat_perf_chart(view2_df):
     acos_act_p= _num("ACOS_PCT_ACT");acos_bud_p= _num("ACOS_PCT_BUD")
     cm2_act_p = _num("CM2_PCT_ACT"); cm2_bud_p = _num("CM2_PCT_BUD")
     cm2a      = _num("CM2_ACT");     cm2a_bud  = _num("CM2_BUD")
+    qty_act   = _num("UNITS_ACT");   qty_bud   = _num("UNITS_BUD")
 
     def _pp_str(a, b):
         if pd.isna(a) or pd.isna(b): return "—"
@@ -2213,6 +2214,9 @@ def build_subcat_perf_chart(view2_df):
             _pp_str(cm2_act_p.iloc[i], cm2_bud_p.iloc[i]),
             fmt_lakhs(cm2a.iloc[i]),      fmt_lakhs(cm2a_bud.iloc[i]),
             _ratio_str(cm2a.iloc[i], cm2a_bud.iloc[i]),
+            # Quantity (units)
+            fmt_units(qty_act.iloc[i]),   fmt_units(qty_bud.iloc[i]),
+            _ratio_str(qty_act.iloc[i], qty_bud.iloc[i]),
         ]
         customdata.append(cd)
 
@@ -2241,6 +2245,8 @@ def build_subcat_perf_chart(view2_df):
             "──────────────────<br>"
             "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
             "<b>(%{customdata[2]})</b><br>"
+            "<b>Quantity</b>     %{customdata[15]}  /  %{customdata[16]}  "
+            "<b>(%{customdata[17]})</b><br>"
             "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
             "<b>(%{customdata[5]} vs B)</b><br>"
             "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
