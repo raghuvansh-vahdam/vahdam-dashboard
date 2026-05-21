@@ -5163,16 +5163,34 @@ def render_dbr():
     st.markdown('<div class="page-title">DBR &mdash; Daily Business Report</div>',
                  unsafe_allow_html=True)
     st.markdown(
-        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} '
-        f'&rarr; {d_to.strftime("%d %b %Y")} '
-        f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
+        f'<div class="page-sub">'
+        f'Currency: {"INR (₹)" if use_inr else "Local"} '
         f'&nbsp;&bull;&nbsp; <b>VT</b> = Vahdam &nbsp;·&nbsp; '
         f'<b>HP</b> = Handpick + Spice Train</div>',
         unsafe_allow_html=True)
 
+    # ── Local date filter (overrides the sidebar's global range) ──
+    df1, df2, df3 = st.columns([1.4, 1.4, 5])
+    with df1:
+        dbr_from = st.date_input("Date from", value=d_from,
+                                   key="dbr_d_from")
+    with df2:
+        dbr_to   = st.date_input("Date to",   value=d_to,
+                                   key="dbr_d_to")
+    with df3:
+        st.markdown(
+            f'<div style="padding-top:34px;font-size:12px;color:#7a6a50;">'
+            f'📅 <b>{dbr_from.strftime("%d %b %Y")}</b> &rarr; '
+            f'<b>{dbr_to.strftime("%d %b %Y")}</b> &nbsp;·&nbsp; '
+            f'{(dbr_to - dbr_from).days + 1} days</div>',
+            unsafe_allow_html=True)
+    if dbr_to < dbr_from:
+        st.error("Date to is earlier than Date from — please adjust.")
+        return
+
     # ── Fetch data once for everything ──
     with st.spinner("Loading DBR…"):
-        data = get_dbr_data(d_from, d_to, sfx)
+        data = get_dbr_data(dbr_from, dbr_to, sfx)
 
     if data.empty:
         st.info("📭 No data for the selected date range.")
@@ -5280,12 +5298,14 @@ def render_dbr():
         return styles
 
     # The big horizontal table is wider than the screen — let st.dataframe
-    # scroll. height tuned to fit one normal viewport.
+    # scroll. height tuned to fit one normal viewport. hide_index=True
+    # suppresses Streamlit's row-number column on the left.
     n_rows = len(df_disp)
     table_height = min(800, 38 + n_rows * 36)
     st.dataframe(
         df_disp.style.apply(_style_dbr, axis=1).hide(axis="index"),
         use_container_width=True, height=table_height,
+        hide_index=True,
     )
 
     # ── Quick legend + caveat ──
