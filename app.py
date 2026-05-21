@@ -1020,6 +1020,8 @@ TOTAL_ROW = ";font-weight:700;background:#EDE8DC;color:#004A2B"
 def _v1_metrics(sfx):
     return f"""
         SUM(QTY_ACTUAL)                                                                    AS QTY,
+        SUM(QTY_BUDGET)                                                                    AS QTY_BUD,
+        ROUND(SUM(QTY_ACTUAL)/NULLIF(SUM(QTY_BUDGET),0)*100,1)                             AS QTY_PCT,
         ROUND(SUM(SALES_ACTUAL_{sfx}),0)                                                  AS SALES_ACT,
         ROUND(SUM(SALES_BUDGET_{sfx}),0)                                                  AS SALES_BUD,
         ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)            AS REV_PCT,
@@ -2061,6 +2063,7 @@ def build_country_perf_chart(view1_df):
     cm2_act = _num("CM2_PCT_ACT"); cm2_bud = _num("CM2_PCT_BUD")
     cm2a    = _num("CM2_ABS_ACT"); cm2a_bud= _num("CM2_ABS_BUD")
     sales_act = _num("SALES_ACT"); sales_bud = _num("SALES_BUD")
+    qty_act   = _num("QTY");       qty_bud   = _num("QTY_BUD")
 
     def _ppdiff(a, b):
         return [None if (pd.isna(x) or pd.isna(y)) else float(x) - float(y)
@@ -2077,6 +2080,7 @@ def build_country_perf_chart(view1_df):
 
     customdata = []
     for i, row in t.iterrows():
+        qty_ratio = _ratio([qty_act.iloc[i]], [qty_bud.iloc[i]])[0]
         cd = [
             fmt_lakhs(sales_act.iloc[i]),     fmt_lakhs(sales_bud.iloc[i]),
             f"{_f(t['REV_PCT_n'].iloc[i]):.1f}%",
@@ -2089,6 +2093,9 @@ def build_country_perf_chart(view1_df):
             fmt_lakhs(cm2a.iloc[i]),          fmt_lakhs(cm2a_bud.iloc[i]),
             (f"{_ratio([cm2a.iloc[i]],[cm2a_bud.iloc[i]])[0]:.1f}%"
               if _ratio([cm2a.iloc[i]],[cm2a_bud.iloc[i]])[0] is not None else "—"),
+            # Quantity (units)
+            fmt_units(qty_act.iloc[i]),       fmt_units(qty_bud.iloc[i]),
+            (f"{qty_ratio:.1f}%" if qty_ratio is not None else "—"),
         ]
         customdata.append(cd)
 
@@ -2118,6 +2125,8 @@ def build_country_perf_chart(view1_df):
             "──────────────────<br>"
             "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
             "<b>(%{customdata[2]})</b><br>"
+            "<b>Quantity</b>     %{customdata[15]}  /  %{customdata[16]}  "
+            "<b>(%{customdata[17]})</b><br>"
             "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
             "<b>(%{customdata[5]} vs B)</b><br>"
             "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
