@@ -514,6 +514,7 @@ TABLE          = "vahdam_db.maplemonk.vahdam_amazon_pnl_overall_fy27_onwards"
 MKTG           = "vahdam_db.maplemonk.VAHDAM_AMAZON_MARKETING"
 SALES_MKT      = "vahdam_db.maplemonk.VAHDAM_AMAZON_SALES_MARKETING"
 INV_3P         = "vahdam_db.maplemonk.vahdam_amazon_3P_inv"
+REVIEWS        = "vahdam_db.maplemonk.Amazon_reviews_detailed_reviews"
 GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
 GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
@@ -682,6 +683,9 @@ with st.sidebar:
         st.rerun()
     if st.button("Price Tracker", use_container_width=True, key="nav_price"):
         st.session_state.view = "price"
+        st.rerun()
+    if st.button("Customer Insights", use_container_width=True, key="nav_ci"):
+        st.session_state.view = "customer_insights"
         st.rerun()
 
     # ── Refresh data ──
@@ -4871,6 +4875,569 @@ if sku_search and sku_search.strip():
             st.dataframe(show_sk.style.apply(style_sk, axis=1).hide(axis="index"),
                          use_container_width=True)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# VIEW 6 — Customer Insights
+# ═══════════════════════════════════════════════════════════════════════════════
+# Theme columns in the reviews table. (column_in_table, display_label)
+_REVIEW_THEMES = [
+    ("T_DISLIKE",     "General Taste Dislike"),
+    ("T_LIGHT_TASTE", "Light taste"),
+    ("T_STRONG_TASTE","Strong Taste"),
+    ("T_HEALTH",      "Health Issue"),
+    ("T_PRICE",       "Price"),
+    ("T_PACK",        "Other Packaging"),
+    ("T_TEABAG",      "Tea Bag Related"),
+    ("T_MISSING",     "Missing items"),
+    ("T_ODOUR",       "Odour"),
+    ("T_TEXTURE",     "Texture"),
+    ("T_DELIVERY",    "Delivery"),
+    ("T_LISTING",     "Listing"),
+    ("T_OTHERS",      "Others"),
+    ("T_ANIMAL",      "Animal"),
+]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_reviews_all():
+    """Pull every review row with normalized columns + parsed date.
+
+    The source table mixes two date formats ("November 10, 2025" for USA/India,
+    "1 April 2026" for EU/UK) and has a header-pollution row with all blanks,
+    so we filter both out here. Theme columns are kept as raw text — a review
+    "mentions" a theme when the column is non-empty.
+    Cached 15 min."""
+    df = run_query(f"""
+        SELECT
+            UPPER(TRIM(GEO))                            AS GEO,
+            UPPER(TRIM(ASIN))                           AS ASIN,
+            NAME                                        AS PRODUCT_NAME,
+            UPPER(TRIM(BRAND))                          AS BRAND,
+            UPPER(TRIM(CATEGORY))                       AS CATEGORY,
+            "Sub Category"                              AS SUB_CATEGORY,
+            TRY_TO_NUMBER(RATING)                       AS RATING,
+            COALESCE(
+                TRY_TO_DATE(DATE, 'MMMM DD, YYYY'),
+                TRY_TO_DATE(DATE, 'DD MMMM YYYY'),
+                TRY_TO_DATE(DATE, 'DD/MM/YYYY'),
+                TRY_TO_DATE(DATE, 'MM/DD/YYYY'),
+                TRY_TO_DATE(DATE, 'YYYY-MM-DD')
+            )                                           AS REVIEW_DATE,
+            "Review Description"                        AS REVIEW_TEXT,
+            "Review title"                              AS REVIEW_TITLE,
+            "Light taste"                               AS T_LIGHT_TASTE,
+            "Health Issue"                              AS T_HEALTH,
+            "Strong Taste"                              AS T_STRONG_TASTE,
+            "General Taste Dislike"                     AS T_DISLIKE,
+            "Other Packaging"                           AS T_PACK,
+            "Tea Bag Related"                           AS T_TEABAG,
+            "Missing items"                             AS T_MISSING,
+            PRICE                                       AS T_PRICE,
+            ODOUR                                       AS T_ODOUR,
+            TEXTURE                                     AS T_TEXTURE,
+            OTHERS                                      AS T_OTHERS,
+            LISTING                                     AS T_LISTING,
+            DELIVERY                                    AS T_DELIVERY,
+            ANIMAL                                      AS T_ANIMAL
+        FROM {REVIEWS}
+        WHERE ASIN IS NOT NULL AND TRIM(ASIN) <> ''
+          AND GEO IS NOT NULL AND TRIM(GEO) <> ''
+          AND UPPER(TRIM(GEO)) <> 'GEO'
+          AND TRY_TO_NUMBER(RATING) IS NOT NULL
+    """)
+    if df.empty:
+        return df
+    df["REVIEW_DATE"] = pd.to_datetime(df["REVIEW_DATE"], errors="coerce")
+    df["RATING"]      = pd.to_numeric(df["RATING"], errors="coerce")
+    # Sentiment buckets
+    df["NEGATIVE"] = df["RATING"] <= 2
+    df["NEUTRAL"]  = df["RATING"] == 3
+    df["POSITIVE"] = df["RATING"] >= 4
+    # Convenience: month bucket
+    df["YEAR_MONTH"] = df["REVIEW_DATE"].dt.to_period("M").astype(str)
+    return df
+
+
+def _theme_counts(slice_df):
+    """Return DataFrame[theme, n] sorted desc — counts non-empty theme cells."""
+    rows = []
+    for col, label in _REVIEW_THEMES:
+        if col in slice_df.columns:
+            n = int((slice_df[col].fillna("").astype(str).str.strip() != "").sum())
+            if n > 0:
+                rows.append({"theme": label, "n": n})
+    return pd.DataFrame(rows).sort_values("n", ascending=False).reset_index(drop=True)
+
+
+def _star_dist(slice_df):
+    """5/4/3/2/1 star counts as a 5-element list (1★ → 5★)."""
+    s = slice_df["RATING"].round().clip(1, 5).astype("Int64")
+    return [int((s == i).sum()) for i in range(1, 6)]
+
+
+def render_customer_insights():
+    """Customer Insights dashboard — review-based, 6 sub-tabs."""
+    st.markdown('<div class="page-title">Customer Insights</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-sub">Voice of the customer — pulls from '
+        '<code>vahdam_amazon_reviews</code>. '
+        'Theme columns are populated by the AI tagger; a review "mentions" a '
+        'theme when the cell is non-empty.</div>',
+        unsafe_allow_html=True)
+
+    with st.spinner("Loading reviews…"):
+        raw = get_reviews_all()
+    if raw.empty:
+        st.warning("📭 No review rows available.")
+        return
+
+    # ── Filters bar ──
+    geos     = ["All"] + sorted(g for g in raw["GEO"].dropna().unique() if g)
+    brands   = ["All"] + sorted(b for b in raw["BRAND"].dropna().unique() if b)
+    cats     = ["All"] + sorted(c for c in raw["CATEGORY"].dropna().unique() if c)
+    d_min    = raw["REVIEW_DATE"].min()
+    d_max    = raw["REVIEW_DATE"].max()
+    if pd.isna(d_min) or pd.isna(d_max):
+        d_min, d_max = pd.Timestamp(date.today() - timedelta(days=365)), pd.Timestamp(date.today())
+
+    f1, f2, f3, f4, f5, f6, f7 = st.columns([1.2, 1.2, 1.4, 1.4, 1.4, 1.0, 2.0])
+    with f1:
+        f_geo = st.selectbox("Geography", geos, index=0, key="ci_f_geo")
+    with f2:
+        f_brand = st.selectbox("Brand", brands, index=0, key="ci_f_brand")
+    with f3:
+        f_cat = st.selectbox("Category", cats, index=0, key="ci_f_cat")
+    with f4:
+        f_from = st.date_input("Date from", value=d_min.date(),
+                                min_value=d_min.date(), max_value=d_max.date(),
+                                key="ci_f_from")
+    with f5:
+        f_to = st.date_input("Date to", value=d_max.date(),
+                              min_value=d_min.date(), max_value=d_max.date(),
+                              key="ci_f_to")
+    with f6:
+        f_min = st.number_input("Min reviews / ASIN", min_value=0, value=20,
+                                  step=5, key="ci_f_min")
+    with f7:
+        f_search = st.text_input("Search product (ASIN or name)",
+                                  key="ci_f_search",
+                                  placeholder="e.g. B07RGK5QKZ / matcha").strip()
+
+    # ── Apply filters ──
+    df = raw.copy()
+    if f_geo != "All":
+        df = df[df["GEO"] == f_geo]
+    if f_brand != "All":
+        df = df[df["BRAND"] == f_brand]
+    if f_cat != "All":
+        df = df[df["CATEGORY"] == f_cat]
+    df = df[(df["REVIEW_DATE"] >= pd.Timestamp(f_from)) &
+            (df["REVIEW_DATE"] <= pd.Timestamp(f_to))]
+    if f_search:
+        q = f_search.lower()
+        df = df[df["ASIN"].str.lower().str.contains(q, na=False) |
+                df["PRODUCT_NAME"].fillna("").str.lower().str.contains(q, na=False)]
+
+    # ── ASIN-level cohort (used by several tabs) ──
+    if df.empty:
+        st.info("📭 No reviews match the current filters.")
+        return
+
+    asin_grp = df.groupby(["ASIN", "PRODUCT_NAME", "BRAND", "CATEGORY"],
+                          dropna=False).agg(
+        REVIEWS  = ("RATING",   "count"),
+        AVG_RAT  = ("RATING",   "mean"),
+        NEG      = ("NEGATIVE", "sum"),
+        NEU      = ("NEUTRAL",  "sum"),
+        POS      = ("POSITIVE", "sum"),
+    ).reset_index()
+    asin_grp["NEG_PCT"] = asin_grp["NEG"] / asin_grp["REVIEWS"] * 100
+    asin_grp["POS_PCT"] = asin_grp["POS"] / asin_grp["REVIEWS"] * 100
+    asin_min = asin_grp[asin_grp["REVIEWS"] >= f_min].copy()
+
+    st.caption(
+        f"**{len(df):,}** reviews · **{asin_grp['ASIN'].nunique():,}** ASINs total · "
+        f"**{len(asin_min):,}** ASINs with ≥ {f_min} reviews."
+    )
+
+    # ── Sub-tabs ──
+    t_over, t_act, t_prod, t_cat, t_geo, t_explorer = st.tabs(
+        ["📊 Overview", "🎯 Actionables", "📦 Products",
+         "🗂 Categories", "🌍 Geographies", "🔎 Review Explorer"])
+
+    # ─────────────────────────── 1. OVERVIEW ───────────────────────────
+    with t_over:
+        n_tot = len(df)
+        avg   = float(df["RATING"].mean()) if n_tot else 0.0
+        n_neg = int(df["NEGATIVE"].sum())
+        n_neu = int(df["NEUTRAL"].sum())
+        n_pos = int(df["POSITIVE"].sum())
+        pct = lambda x: (x / n_tot * 100) if n_tot else 0.0
+
+        cards = [
+            ("Reviews",    f"{n_tot:,}",
+                f"{asin_grp['ASIN'].nunique():,} products"),
+            ("Avg Rating", f"{avg:.2f}", "/5"),
+            ("Negative %", f"{pct(n_neg):.1f}%",
+                f"{n_neg:,} reviews 1–2★"),
+            ("Positive %", f"{pct(n_pos):.0f}%",
+                f"{n_pos:,} reviews 4–5★"),
+            ("Neutral 3★", f"{n_neu:,}",  "opportunity to convert"),
+            ("Date Range",
+                f"{df['REVIEW_DATE'].min():%Y-%m-%d}",
+                f"→ {df['REVIEW_DATE'].max():%Y-%m-%d}"),
+        ]
+        cols = st.columns(6, gap="small")
+        for col, (lbl, val, sub) in zip(cols, cards):
+            col.markdown(strip_card(lbl, val, sub), unsafe_allow_html=True)
+
+        st.markdown('<div class="kpi-row-gap"></div>', unsafe_allow_html=True)
+
+        # Two rows of charts: distribution + monthly trend ; by geo + top themes
+        c1, c2 = st.columns(2, gap="medium")
+        with c1:
+            st.markdown('<div class="section-hdr">Rating Distribution</div>',
+                         unsafe_allow_html=True)
+            dist = _star_dist(df)
+            if HAS_PLOTLY:
+                fig = go.Figure(go.Bar(
+                    x=["1★", "2★", "3★", "4★", "5★"], y=dist,
+                    marker_color=["#8b1a1a","#c75c3c","#d6b54a","#7faa6e","#1a7a3e"]))
+                fig.update_layout(plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+                                  height=300, margin=dict(l=30, r=20, t=20, b=30))
+                fig.update_xaxes(showgrid=False)
+                fig.update_yaxes(gridcolor="rgba(171,135,67,0.18)")
+                st.plotly_chart(fig, use_container_width=True,
+                                 config={"displayModeBar": False})
+        with c2:
+            st.markdown('<div class="section-hdr">Monthly Trend — '
+                         'Reviews &amp; Avg Rating</div>', unsafe_allow_html=True)
+            monthly = df.groupby("YEAR_MONTH").agg(
+                REVIEWS=("RATING","count"), AVG=("RATING","mean")
+            ).reset_index().sort_values("YEAR_MONTH")
+            if HAS_PLOTLY and not monthly.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=monthly["YEAR_MONTH"], y=monthly["REVIEWS"],
+                                       name="Reviews", marker_color="#AB8743",
+                                       yaxis="y"))
+                fig.add_trace(go.Scatter(x=monthly["YEAR_MONTH"], y=monthly["AVG"],
+                                          name="Avg rating", mode="lines+markers",
+                                          line=dict(color="#004A2B", width=2),
+                                          yaxis="y2"))
+                fig.update_layout(
+                    plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+                    height=300, margin=dict(l=30, r=20, t=20, b=30),
+                    yaxis=dict(title="Reviews",
+                                gridcolor="rgba(171,135,67,0.18)"),
+                    yaxis2=dict(title="Avg ★", overlaying="y", side="right",
+                                  range=[1, 5]),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  x=0.5, xanchor="center"))
+                st.plotly_chart(fig, use_container_width=True,
+                                 config={"displayModeBar": False})
+
+        c3, c4 = st.columns(2, gap="medium")
+        with c3:
+            st.markdown('<div class="section-hdr">By Geography</div>',
+                         unsafe_allow_html=True)
+            by_geo = df.groupby("GEO").agg(
+                AVG=("RATING","mean"),
+                NEG_PCT=("NEGATIVE", lambda s: float(s.mean()) * 100),
+                N=("RATING","count")).reset_index()
+            by_geo = by_geo.sort_values("N", ascending=False)
+            if HAS_PLOTLY and not by_geo.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=by_geo["GEO"], y=by_geo["AVG"],
+                                       name="Avg ★", marker_color="#AB8743"))
+                fig.add_trace(go.Scatter(x=by_geo["GEO"], y=by_geo["NEG_PCT"],
+                                          name="% 1-2★", mode="lines+markers",
+                                          line=dict(color="#8b1a1a", width=2),
+                                          yaxis="y2"))
+                fig.update_layout(
+                    plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+                    height=300, margin=dict(l=30, r=20, t=20, b=30),
+                    yaxis=dict(title="Avg ★", range=[0, 5],
+                                gridcolor="rgba(171,135,67,0.18)"),
+                    yaxis2=dict(title="% 1-2★", overlaying="y", side="right",
+                                  range=[0, 50]),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  x=0.5, xanchor="center"))
+                st.plotly_chart(fig, use_container_width=True,
+                                 config={"displayModeBar": False})
+        with c4:
+            st.markdown('<div class="section-hdr">Top complaint themes</div>',
+                         unsafe_allow_html=True)
+            st.caption("Among 1–2★ reviews")
+            t = _theme_counts(df[df["NEGATIVE"]])
+            if HAS_PLOTLY and not t.empty:
+                t = t.head(12).iloc[::-1]
+                fig = go.Figure(go.Bar(x=t["n"], y=t["theme"], orientation="h",
+                                         marker_color="#c75c3c"))
+                fig.update_layout(plot_bgcolor="#FBF5EA",
+                                    paper_bgcolor="#FBF5EA",
+                                    height=300, margin=dict(l=120, r=20, t=10, b=30))
+                fig.update_xaxes(gridcolor="rgba(171,135,67,0.18)")
+                st.plotly_chart(fig, use_container_width=True,
+                                 config={"displayModeBar": False})
+
+    # ─────────────────────────── 2. ACTIONABLES ───────────────────────────
+    with t_act:
+        st.markdown(
+            '<div class="page-sub">Heuristic-ranked priorities. <b>What to fix</b> '
+            '= products with high review volume AND high negative %. '
+            '<b>What to market</b> = products with high volume AND high positive % '
+            '(4★+).</div>', unsafe_allow_html=True)
+
+        if asin_min.empty:
+            st.info(f"No ASINs meet the ≥ {f_min} review threshold. "
+                     "Lower the filter to populate Actionables.")
+        else:
+            # Priority score: weight neg/pos by sqrt(volume) so we don't
+            # over-index on niche tiny SKUs.
+            asin_min["FIX_SCORE"] = asin_min["NEG_PCT"] * (asin_min["REVIEWS"] ** 0.5)
+            asin_min["WIN_SCORE"] = asin_min["POS_PCT"] * (asin_min["REVIEWS"] ** 0.5)
+            fix_list = asin_min.sort_values("FIX_SCORE", ascending=False).head(12)
+            win_list = asin_min.sort_values("WIN_SCORE", ascending=False).head(12)
+
+            colA, colB = st.columns(2, gap="medium")
+            with colA:
+                st.markdown('<div class="section-hdr" '
+                             'style="border-left-color:#8b1a1a;">'
+                             'What to fix — highest priority</div>',
+                             unsafe_allow_html=True)
+                for _, r in fix_list.iterrows():
+                    top_themes = _theme_counts(
+                        df[(df["ASIN"] == r["ASIN"]) & (df["NEGATIVE"])]).head(3)
+                    theme_str = " · ".join(
+                        f"{row['theme']} ({row['n']})" for _, row in top_themes.iterrows()
+                    ) or "—"
+                    st.markdown(
+                        f"<div style='padding:8px 12px;border-left:3px solid #8b1a1a;"
+                        f"background:#fff;border-radius:6px;margin-bottom:8px;"
+                        f"box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
+                        f"<div style='font-weight:700;color:#004A2B;font-size:13px;'>"
+                        f"{(r['PRODUCT_NAME'] or '')[:70]} "
+                        f"<span class='small-muted' style='font-weight:500;'>"
+                        f"({r['ASIN']})</span></div>"
+                        f"<div style='font-size:11.5px;color:#7a6a50;margin-top:2px;'>"
+                        f"{r['REVIEWS']:,} reviews · avg "
+                        f"<b style='color:#8b1a1a;'>{r['AVG_RAT']:.2f}★</b> · "
+                        f"<b>{r['NEG_PCT']:.0f}% neg</b></div>"
+                        f"<div style='font-size:11px;color:#7a5c00;margin-top:4px;'>"
+                        f"Top complaints: {theme_str}</div></div>",
+                        unsafe_allow_html=True)
+            with colB:
+                st.markdown('<div class="section-hdr" '
+                             'style="border-left-color:#1a7a3e;">'
+                             'What to market — loudest wins</div>',
+                             unsafe_allow_html=True)
+                for _, r in win_list.iterrows():
+                    top_themes = _theme_counts(
+                        df[(df["ASIN"] == r["ASIN"]) & (df["POSITIVE"])]).head(3)
+                    theme_str = " · ".join(
+                        f"{row['theme']} ({row['n']})" for _, row in top_themes.iterrows()
+                    ) or "—"
+                    st.markdown(
+                        f"<div style='padding:8px 12px;border-left:3px solid #1a7a3e;"
+                        f"background:#fff;border-radius:6px;margin-bottom:8px;"
+                        f"box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
+                        f"<div style='font-weight:700;color:#004A2B;font-size:13px;'>"
+                        f"{(r['PRODUCT_NAME'] or '')[:70]} "
+                        f"<span class='small-muted' style='font-weight:500;'>"
+                        f"({r['ASIN']})</span></div>"
+                        f"<div style='font-size:11.5px;color:#7a6a50;margin-top:2px;'>"
+                        f"{r['REVIEWS']:,} reviews · avg "
+                        f"<b style='color:#1a7a3e;'>{r['AVG_RAT']:.2f}★</b> · "
+                        f"<b>{r['POS_PCT']:.0f}% pos</b></div>"
+                        f"<div style='font-size:11px;color:#1a7a3e;margin-top:4px;'>"
+                        f"Top praise themes: {theme_str}</div></div>",
+                        unsafe_allow_html=True)
+
+    # ─────────────────────────── 3. PRODUCTS ───────────────────────────
+    with t_prod:
+        st.markdown('<div class="section-hdr">All Products</div>',
+                     unsafe_allow_html=True)
+        st.caption("Click a row to see review samples + theme breakdown.")
+        # Build display table
+        prod = asin_min.sort_values("REVIEWS", ascending=False).copy()
+        # Per-ASIN top negative themes
+        def _top_neg(asin):
+            return _theme_counts(df[(df["ASIN"] == asin) & (df["NEGATIVE"])]).head(3)
+        prod["TOP_NEG"] = prod["ASIN"].apply(
+            lambda a: ", ".join(f"{r['theme']} {r['n']}"
+                                for _, r in _top_neg(a).iterrows()) or "—")
+        show = pd.DataFrame({
+            "ASIN":          prod["ASIN"],
+            "Product":       prod["PRODUCT_NAME"].fillna("").str.slice(0, 60),
+            "Brand":         prod["BRAND"].fillna("—"),
+            "Category":      prod["CATEGORY"].fillna("—"),
+            "Reviews":       prod["REVIEWS"].astype(int),
+            "Avg ★":         prod["AVG_RAT"].round(2),
+            "Neg %":         prod["NEG_PCT"].round(1),
+            "Top Neg Themes":prod["TOP_NEG"],
+        }).reset_index(drop=True)
+        _neg = pd.to_numeric(show["Neg %"], errors="coerce").reset_index(drop=True)
+        _avg = pd.to_numeric(show["Avg ★"], errors="coerce").reset_index(drop=True)
+        def _style_prod(row):
+            s = [""] * len(row)
+            idx = row.index.tolist()
+            v = _f(_avg.iloc[row.name])
+            if v is not None:
+                s[idx.index("Avg ★")] = (
+                    "color:#004A2B;font-weight:700" if v >= 4.5 else
+                    "color:#7a5c00;font-weight:700" if v >= 3.5 else
+                    "color:#8b1a1a;font-weight:700")
+            n = _f(_neg.iloc[row.name])
+            if n is not None:
+                s[idx.index("Neg %")] = (
+                    "color:#8b1a1a;font-weight:700" if n >= 30 else
+                    "color:#7a5c00;font-weight:700" if n >= 15 else
+                    "color:#1a7a3e;font-weight:700")
+            return s
+        st.dataframe(show.style.apply(_style_prod, axis=1).hide(axis="index"),
+                     use_container_width=True, height=540,
+                     column_config={
+                         "Reviews": st.column_config.NumberColumn(format="%,d"),
+                         "Avg ★":   st.column_config.NumberColumn(format="%.2f"),
+                         "Neg %":   st.column_config.NumberColumn(format="%.1f%%"),
+                     })
+
+    # ─────────────────────────── 4. CATEGORIES ───────────────────────────
+    with t_cat:
+        st.markdown('<div class="section-hdr">By Category</div>',
+                     unsafe_allow_html=True)
+        cat_g = df.groupby(df["CATEGORY"].fillna("—")).agg(
+            REVIEWS=("RATING","count"),
+            AVG=("RATING","mean"),
+            NEG=("NEGATIVE","sum"),
+            POS=("POSITIVE","sum"),
+        ).reset_index().rename(columns={"CATEGORY":"Category"})
+        cat_g["Neg %"]    = cat_g["NEG"] / cat_g["REVIEWS"] * 100
+        cat_g["Pos %"]    = cat_g["POS"] / cat_g["REVIEWS"] * 100
+        cat_g = cat_g.sort_values("REVIEWS", ascending=False)
+
+        def _top_for(slice_filter, top_label, n=3):
+            sub = df[slice_filter]
+            t   = _theme_counts(sub).head(n)
+            return ", ".join(f"{r['theme']} {r['n']}" for _, r in t.iterrows()) or "—"
+        cat_g["Top Complaints"] = cat_g["Category"].apply(
+            lambda c: _top_for((df["CATEGORY"].fillna("—") == c) & df["NEGATIVE"],
+                                "complaints"))
+        cat_g["Top Praise"]     = cat_g["Category"].apply(
+            lambda c: _top_for((df["CATEGORY"].fillna("—") == c) & df["POSITIVE"],
+                                "praise"))
+
+        show = pd.DataFrame({
+            "Category":       cat_g["Category"],
+            "Reviews":        cat_g["REVIEWS"].astype(int),
+            "Avg ★":          cat_g["AVG"].round(2),
+            "Neg %":          cat_g["Neg %"].round(1),
+            "Pos %":          cat_g["Pos %"].round(1),
+            "Top Complaints": cat_g["Top Complaints"],
+            "Top Praise":     cat_g["Top Praise"],
+        }).reset_index(drop=True)
+        st.dataframe(show, use_container_width=True, height=540,
+                     hide_index=True,
+                     column_config={
+                         "Reviews": st.column_config.NumberColumn(format="%,d"),
+                         "Avg ★":   st.column_config.NumberColumn(format="%.2f"),
+                         "Neg %":   st.column_config.NumberColumn(format="%.1f%%"),
+                         "Pos %":   st.column_config.NumberColumn(format="%.1f%%"),
+                     })
+
+    # ─────────────────────────── 5. GEOGRAPHIES ───────────────────────────
+    with t_geo:
+        st.markdown('<div class="section-hdr">By Geography</div>',
+                     unsafe_allow_html=True)
+        geo_g = df.groupby("GEO").agg(
+            REVIEWS=("RATING","count"),
+            ASINS=("ASIN","nunique"),
+            AVG=("RATING","mean"),
+            NEG=("NEGATIVE","sum"),
+            POS=("POSITIVE","sum"),
+        ).reset_index().rename(columns={"GEO":"Geo"})
+        geo_g["Neg %"] = geo_g["NEG"] / geo_g["REVIEWS"] * 100
+        geo_g["Pos %"] = geo_g["POS"] / geo_g["REVIEWS"] * 100
+        geo_g = geo_g.sort_values("REVIEWS", ascending=False)
+        geo_g["Top Complaints"] = geo_g["Geo"].apply(
+            lambda g: ", ".join(f"{r['theme']} {r['n']}"
+                                  for _, r in _theme_counts(
+                                      df[(df["GEO"] == g) & df["NEGATIVE"]]
+                                  ).head(3).iterrows()) or "—")
+        geo_g["Top Praise"] = geo_g["Geo"].apply(
+            lambda g: ", ".join(f"{r['theme']} {r['n']}"
+                                  for _, r in _theme_counts(
+                                      df[(df["GEO"] == g) & df["POSITIVE"]]
+                                  ).head(3).iterrows()) or "—")
+
+        show_g = pd.DataFrame({
+            "Geo":             geo_g["Geo"],
+            "Reviews":         geo_g["REVIEWS"].astype(int),
+            "ASINs":           geo_g["ASINS"].astype(int),
+            "Avg ★":           geo_g["AVG"].round(2),
+            "Neg %":           geo_g["Neg %"].round(1),
+            "Pos %":           geo_g["Pos %"].round(1),
+            "Top Complaints":  geo_g["Top Complaints"],
+            "Top Praise":      geo_g["Top Praise"],
+        }).reset_index(drop=True)
+        st.dataframe(show_g, use_container_width=True, height=400,
+                     hide_index=True,
+                     column_config={
+                         "Reviews": st.column_config.NumberColumn(format="%,d"),
+                         "ASINs":   st.column_config.NumberColumn(format="%,d"),
+                         "Avg ★":   st.column_config.NumberColumn(format="%.2f"),
+                         "Neg %":   st.column_config.NumberColumn(format="%.1f%%"),
+                         "Pos %":   st.column_config.NumberColumn(format="%.1f%%"),
+                     })
+
+    # ─────────────────────────── 6. REVIEW EXPLORER ───────────────────────────
+    with t_explorer:
+        st.markdown('<div class="section-hdr">Individual Reviews</div>',
+                     unsafe_allow_html=True)
+        rc1, rc2, rc3 = st.columns([1.5, 1.5, 5])
+        with rc1:
+            rating_filter = st.multiselect("Star rating", [1, 2, 3, 4, 5],
+                                             default=[1, 2],
+                                             key="ci_rev_rating")
+        with rc2:
+            theme_opts = ["(any)"] + [lbl for _, lbl in _REVIEW_THEMES]
+            theme_pick = st.selectbox("Mentions theme", theme_opts, index=0,
+                                       key="ci_rev_theme")
+        with rc3:
+            kw = st.text_input("Keyword in review text",
+                                 key="ci_rev_kw",
+                                 placeholder="e.g. bitter, packaging, leak").strip()
+
+        rev_df = df.copy()
+        if rating_filter:
+            rev_df = rev_df[rev_df["RATING"].round().isin(rating_filter)]
+        if theme_pick != "(any)":
+            for col, lbl in _REVIEW_THEMES:
+                if lbl == theme_pick:
+                    rev_df = rev_df[rev_df[col].fillna("").astype(str).str.strip() != ""]
+                    break
+        if kw:
+            rev_df = rev_df[
+                rev_df["REVIEW_TEXT"].fillna("").str.contains(kw, case=False, na=False) |
+                rev_df["REVIEW_TITLE"].fillna("").str.contains(kw, case=False, na=False)]
+        st.caption(f"**{len(rev_df):,}** matching reviews.")
+        rev_df = rev_df.sort_values("REVIEW_DATE", ascending=False).head(500)
+        rev_show = pd.DataFrame({
+            "Date":     rev_df["REVIEW_DATE"].dt.strftime("%Y-%m-%d"),
+            "Geo":      rev_df["GEO"],
+            "ASIN":     rev_df["ASIN"],
+            "Product":  rev_df["PRODUCT_NAME"].fillna("").str.slice(0, 60),
+            "Rating":   rev_df["RATING"].round(1),
+            "Title":    rev_df["REVIEW_TITLE"].fillna("").str.slice(0, 80),
+            "Review":   rev_df["REVIEW_TEXT"].fillna("").str.slice(0, 200),
+        })
+        st.dataframe(rev_show, use_container_width=True, height=600,
+                     hide_index=True,
+                     column_config={
+                         "Rating": st.column_config.NumberColumn(format="%.1f ★"),
+                     })
+
+
 view = st.session_state.view
 if view == "ceo":
     render_ceo()
@@ -4884,5 +5451,7 @@ elif view == "pnl":
     render_pnl()
 elif view == "price":
     render_price_tracker()
+elif view == "customer_insights":
+    render_customer_insights()
 else:
     render_asin()
