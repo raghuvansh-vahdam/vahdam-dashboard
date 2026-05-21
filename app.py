@@ -5011,20 +5011,6 @@ if sku_search and sku_search.strip():
 # VIEW 5b — DBR (Daily Business Report)
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=300, show_spinner=False)
-def get_pnl_categories(sfx_unused=None):
-    """All distinct CATEGORY values present in the P&L table."""
-    try:
-        return run_query(f"""
-            SELECT DISTINCT TRIM(CATEGORY) AS CATEGORY
-            FROM {TABLE}
-            WHERE CATEGORY IS NOT NULL AND TRIM(CATEGORY) <> ''
-            ORDER BY CATEGORY
-        """)
-    except Exception:
-        return pd.DataFrame(columns=["CATEGORY"])
-
-
-@st.cache_data(ttl=300, show_spinner=False)
 def get_dbr_data(d_from, d_to, sfx):
     """One row per (GEO, CATEGORY, BRAND_BUCKET) — Budget and Actual totals
     across the columns the DBR table needs. CATEGORY is kept so the view
@@ -5149,115 +5135,104 @@ def _build_dbr_block(label, slice_totals, actual_only=False):
     return rows
 
 
+def _is_core_cat(c):
+    """CORE = Teas & Botanicals. Case-insensitive 'contains' so minor
+    spelling variants (& vs and, plural vs singular) still match."""
+    cl = (c or "").lower()
+    return "tea" in cl and "botan" in cl
+
+def _is_new_cat(c):
+    """NEW = Coffee + Supplements."""
+    cl = (c or "").lower()
+    return ("coffee" in cl) or ("supplement" in cl)
+
+
 def render_dbr():
     """Daily Business Report — Budget / Actual / % Achievement matrix.
 
-    Top blocks roll up to "Amazon Global Business":
-      * Total     — every GEO, every category, every brand
-      * Core      — chosen core category (default: Teas & Botanicals)
-      * New       — chosen "new" categories (default: Coffee + Supplements)
-      * VT        — Vahdam brand, ALL categories
-      * HP        — Handpick + Spice Train brands, ALL categories
-    Below: per-GEO × {Overall(Core) / VT / HP} — restricted to the Core
-    category, mirroring the spreadsheet layout."""
+    One filter at the top — Business Type — defines the scope of the
+    per-GEO breakdown:
+      * Both  : per-GEO covers T&B + Coffee + Supplements (everything)
+      * CORE  : per-GEO covers Teas & Botanicals only
+      * NEW   : per-GEO covers Coffee + Supplements only
+
+    Five global aggregate blocks are always shown above the per-GEO
+    breakdown:
+      * (Total) — every GEO, every category, every brand
+      * (Core)  — Teas & Botanicals
+      * (New)   — Coffee + Supplements (Actual only — no budget yet)
+      * VT      — Vahdam brand, every category
+      * HP      — Handpick + Spice Train, every category
+    """
     st.markdown('<div class="page-title">DBR &mdash; Daily Business Report</div>',
                  unsafe_allow_html=True)
     st.markdown(
-        f'<div class="page-sub">'
-        f'Currency: {"INR (₹)" if use_inr else "Local"} '
-        f'&nbsp;&bull;&nbsp; <b>VT</b> = Vahdam &nbsp;·&nbsp; '
-        f'<b>HP</b> = Handpick + Spice Train</div>',
+        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} '
+        f'&rarr; {d_to.strftime("%d %b %Y")} '
+        f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
+        f'&nbsp;&bull;&nbsp; <b>CORE</b> = Teas &amp; Botanicals &nbsp;·&nbsp; '
+        f'<b>NEW</b> = Coffee + Supplements &nbsp;·&nbsp; '
+        f'<b>VT</b> = Vahdam &nbsp;·&nbsp; <b>HP</b> = Handpick + Spice Train'
+        f'</div>',
         unsafe_allow_html=True)
 
-    # ── Local date filter (overrides the sidebar's global range) ──
-    df1, df2, df3 = st.columns([1.4, 1.4, 5])
-    with df1:
-        dbr_from = st.date_input("Date from", value=d_from,
-                                   key="dbr_d_from")
-    with df2:
-        dbr_to   = st.date_input("Date to",   value=d_to,
-                                   key="dbr_d_to")
-    with df3:
-        st.markdown(
-            f'<div style="padding-top:34px;font-size:12px;color:#7a6a50;">'
-            f'📅 <b>{dbr_from.strftime("%d %b %Y")}</b> &rarr; '
-            f'<b>{dbr_to.strftime("%d %b %Y")}</b> &nbsp;·&nbsp; '
-            f'{(dbr_to - dbr_from).days + 1} days</div>',
-            unsafe_allow_html=True)
-    if dbr_to < dbr_from:
-        st.error("Date to is earlier than Date from — please adjust.")
-        return
+    # ── Single filter: Business Type ──
+    bt = st.radio(
+        "Business Type",
+        ["Both", "CORE (T&B)", "NEW (Coffee + Supplements)"],
+        index=0, horizontal=True, key="dbr_bt",
+        help="Scopes the per-GEO breakdown. Global blocks above are "
+             "always shown.")
 
-    # ── Fetch data once for everything ──
+    # ── Fetch once, slice in pandas ──
     with st.spinner("Loading DBR…"):
-        data = get_dbr_data(dbr_from, dbr_to, sfx)
-
+        data = get_dbr_data(d_from, d_to, sfx)
     if data.empty:
         st.info("📭 No data for the selected date range.")
         return
 
-    # ── Numeric cleanup ──
     numeric_cols = [c for c in data.columns
                     if c not in ("GEO", "CATEGORY", "BRAND_BUCKET")]
     for c in numeric_cols:
         data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
     data["CATEGORY"] = data["CATEGORY"].fillna("").astype(str).str.upper().str.strip()
 
-    # ── Category pickers ──
-    cats_all = sorted(c for c in data["CATEGORY"].unique() if c)
-    def _idx_first(predicate, default=0):
-        for i, c in enumerate(cats_all):
-            if predicate(c.lower()):
-                return i
-        return default
-    core_default = _idx_first(lambda cl: "tea" in cl and "botan" in cl,
-                               _idx_first(lambda cl: "tea" in cl, 0))
-    new_defaults = [c for c in cats_all
-                     if "coffee" in c.lower() or "supplement" in c.lower()]
-    fc1, fc2 = st.columns([3, 7])
-    with fc1:
-        core_cat = st.selectbox("Core category", cats_all, index=core_default,
-                                  key="dbr_core_cat",
-                                  help="Used for the (Core) blocks AND the "
-                                       "per-GEO breakdown below.")
-    with fc2:
-        new_cats = st.multiselect("New categories", cats_all,
-                                    default=new_defaults,
-                                    key="dbr_new_cats",
-                                    help="Bundled into the (New) global block "
-                                         "— typically Coffee + Supplements.")
+    # ── Hard-coded business-type masks ──
+    core_mask = data["CATEGORY"].apply(_is_core_cat)
+    new_mask  = data["CATEGORY"].apply(_is_new_cat)
 
-    # ── Compute the various global slices ──
+    if bt == "CORE (T&B)":
+        per_geo_mask = core_mask
+    elif bt == "NEW (Coffee + Supplements)":
+        per_geo_mask = new_mask
+    else:  # Both
+        per_geo_mask = core_mask | new_mask
+
     def _sum(mask) -> pd.Series:
         sub = data[mask]
-        if sub.empty:
-            return pd.Series({c: 0 for c in numeric_cols})
-        return sub[numeric_cols].sum()
-
-    core_mask  = data["CATEGORY"] == (core_cat or "").upper().strip()
-    new_mask   = data["CATEGORY"].isin([c.upper().strip() for c in (new_cats or [])])
-    total_s    = _sum(pd.Series([True] * len(data)))
-    core_s     = _sum(core_mask)
-    new_s      = _sum(new_mask)
-    vt_global  = _sum(data["BRAND_BUCKET"] == "VT")
-    hp_global  = _sum(data["BRAND_BUCKET"] == "HP")
+        return (sub[numeric_cols].sum() if not sub.empty
+                else pd.Series({c: 0 for c in numeric_cols}))
 
     rows = []
-    # ── Five global aggregate blocks ──
-    rows.extend(_build_dbr_block("Amazon Global Business (Total)", total_s))
-    rows.extend(_build_dbr_block("Amazon Global Business (Core)",  core_s))
-    # New: only Actual row (no budget for new launches)
-    rows.extend(_build_dbr_block("Amazon Global Business (New)",   new_s,
-                                  actual_only=True))
-    rows.extend(_build_dbr_block("Amazon Global Business VT",      vt_global))
-    rows.extend(_build_dbr_block("Amazon Global Business HP",      hp_global))
+    # ── Five global blocks — always shown ──
+    rows.extend(_build_dbr_block("Amazon Global Business (Total)",
+                                  _sum(pd.Series([True] * len(data)))))
+    rows.extend(_build_dbr_block("Amazon Global Business (Core)",
+                                  _sum(core_mask)))
+    rows.extend(_build_dbr_block("Amazon Global Business (New)",
+                                  _sum(new_mask), actual_only=True))
+    rows.extend(_build_dbr_block("Amazon Global Business VT",
+                                  _sum(data["BRAND_BUCKET"] == "VT")))
+    rows.extend(_build_dbr_block("Amazon Global Business HP",
+                                  _sum(data["BRAND_BUCKET"] == "HP")))
 
-    # ── Per-GEO blocks — restricted to the Core category ──
-    geos_in_data = data[core_mask]["GEO"].unique().tolist()
-    geo_order = [g for g in GEO_ORDER if g in geos_in_data]
-    geo_order += [g for g in geos_in_data if g not in geo_order]
+    # ── Per-GEO blocks scoped by Business Type ──
+    scoped = data[per_geo_mask]
+    geos_in_scope = scoped["GEO"].unique().tolist()
+    geo_order = [g for g in GEO_ORDER if g in geos_in_scope]
+    geo_order += [g for g in geos_in_scope if g not in geo_order]
     for geo in geo_order:
-        sub = data[core_mask & (data["GEO"] == geo)]
+        sub = scoped[scoped["GEO"] == geo]
         if sub.empty: continue
         overall = sub[numeric_cols].sum()
         vt = (sub[sub["BRAND_BUCKET"] == "VT"][numeric_cols].sum()
@@ -5266,7 +5241,7 @@ def render_dbr():
         hp = (sub[sub["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
               if (sub["BRAND_BUCKET"] == "HP").any()
               else pd.Series({c: 0 for c in numeric_cols}))
-        rows.extend(_build_dbr_block(f"{geo} Overall (Core)", overall))
+        rows.extend(_build_dbr_block(f"{geo} Overall", overall))
         rows.extend(_build_dbr_block(f"{geo} VT", vt))
         rows.extend(_build_dbr_block(f"{geo} HP", hp))
 
@@ -5308,14 +5283,14 @@ def render_dbr():
         hide_index=True,
     )
 
-    # ── Quick legend + caveat ──
+    # ── Compact legend ──
     st.caption(
-        "Each GEO is broken into three blocks: **Overall (Core)** = all brands "
-        "in the chosen category · **VT** = Vahdam only · **HP** = Handpick + "
-        "Spice Train. Within each block: Budget (peach), Actual (green), "
-        "% Achievement (pink, Actual ÷ Budget). The CM1% / ACoS% / CM2% "
-        "Budget and Actual cells are expressed as a percent of Net Revenue; "
-        "their % Achievement column repeats the absolute ratio for that line."
+        "Rows: **Budget** (peach), **Actual** (green), "
+        "**% Achievement** (pink, Actual ÷ Budget). "
+        "Per-GEO scope follows the Business Type filter above. "
+        "CM1% / ACoS% / CM2% Budget and Actual cells are expressed as a "
+        "percent of Net Revenue; their % Achievement column repeats the "
+        "absolute ratio for that line."
     )
 
 
