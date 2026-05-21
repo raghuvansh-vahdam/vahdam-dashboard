@@ -795,6 +795,9 @@ with st.sidebar:
     if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
         st.session_state.view = "pnl"
         st.rerun()
+    if st.button("DBR", use_container_width=True, key="nav_dbr"):
+        st.session_state.view = "dbr"
+        st.rerun()
     if st.button("Price Tracker", use_container_width=True, key="nav_price"):
         st.session_state.view = "price"
         st.rerun()
@@ -5005,6 +5008,242 @@ if sku_search and sku_search.strip():
                          use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# VIEW 5b — DBR (Daily Business Report)
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=300, show_spinner=False)
+def get_pnl_categories(sfx_unused=None):
+    """All distinct CATEGORY values present in the P&L table."""
+    try:
+        return run_query(f"""
+            SELECT DISTINCT TRIM(CATEGORY) AS CATEGORY
+            FROM {TABLE}
+            WHERE CATEGORY IS NOT NULL AND TRIM(CATEGORY) <> ''
+            ORDER BY CATEGORY
+        """)
+    except Exception:
+        return pd.DataFrame(columns=["CATEGORY"])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_dbr_data(d_from, d_to, sfx, category):
+    """One row per (GEO, BRAND_BUCKET) — Budget and Actual totals across
+    the columns the DBR table needs. BRAND_BUCKET resolves to VT (Vahdam)
+    / HP (Handpick + Spice Train) / OTHER (anything else)."""
+    cat_esc = (category or "").replace("'", "''")
+    return run_query(f"""
+        SELECT
+            GEO,
+            CASE
+                WHEN UPPER(TRIM(BRAND)) = 'VAHDAM'                    THEN 'VT'
+                WHEN UPPER(TRIM(BRAND)) IN ('HANDPICK','SPICE TRAIN') THEN 'HP'
+                ELSE 'OTHER'
+            END AS BRAND_BUCKET,
+            COALESCE(SUM(QTY_BUDGET), 0)                          AS UNITS_BUD,
+            COALESCE(SUM(QTY_ACTUAL), 0)                          AS UNITS_ACT,
+            COALESCE(SUM(SALES_BUDGET_{sfx}),  0)                 AS NETREV_BUD,
+            COALESCE(SUM(SALES_ACTUAL_{sfx}),  0)                 AS NETREV_ACT,
+            COALESCE(SUM(COGS_BUDGET_{sfx}),   0)                 AS COGS_BUD,
+            COALESCE(SUM(COGS_ACTUAL_{sfx}),   0)                 AS COGS_ACT,
+            COALESCE(SUM(OUTBOUND_BUDGET_{sfx}),   0)             AS OUT_BUD,
+            COALESCE(SUM(OUTBOUND_ACTUAL_{sfx}),   0)             AS OUT_ACT,
+            COALESCE(SUM(LAST_MILE_BUDGET_{sfx}),  0)             AS LM_BUD,
+            COALESCE(SUM(LAST_MILE_ACTUAL_{sfx}),  0)             AS LM_ACT,
+            COALESCE(SUM(COMMISSION_BUDGET_{sfx}), 0)             AS COMM_BUD,
+            COALESCE(SUM(COMMISSION_ACTUAL_{sfx}), 0)             AS COMM_ACT,
+            COALESCE(SUM(STORAGE_BUDGET_{sfx}),    0)             AS STR_BUD,
+            COALESCE(SUM(STORAGE_ACTUAL_{sfx}),    0)             AS STR_ACT,
+            COALESCE(SUM(ADDITIONAL_DUTY_BUDGET_{sfx}), 0)        AS ADDL_BUD,
+            COALESCE(SUM(ADDITIONAL_DUTY_ACTUAL_{sfx}), 0)        AS ADDL_ACT,
+            COALESCE(SUM(CM1_BUDGET_{sfx}),    0)                 AS CM1_BUD,
+            COALESCE(SUM(CM1_ACTUAL_{sfx}),    0)                 AS CM1_ACT,
+            COALESCE(SUM(PM_SPEND_BUDGET_{sfx}), 0)               AS SPND_BUD,
+            COALESCE(SUM(PM_SPEND_ACTUAL_{sfx}), 0)               AS SPND_ACT,
+            COALESCE(SUM(CM2_BUDGET_{sfx}),    0)                 AS CM2_BUD,
+            COALESCE(SUM(CM2_ACTUAL_{sfx}),    0)                 AS CM2_ACT
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+          AND UPPER(TRIM(CATEGORY)) = UPPER(TRIM('{cat_esc}'))
+          AND GEO IS NOT NULL AND TRIM(GEO) <> ''
+          AND {GEO_EXCL}
+        GROUP BY GEO, BRAND_BUCKET
+    """)
+
+
+# Columns rendered in the DBR table. Each tuple:
+#   (display_label, budget_col, actual_col, fmt)
+# fmt: "int"     → integer, comma-separated (units)
+#      "ccy"     → currency, comma-separated (rupees, integer)
+#      "pct_rev" → expressed as % of Net Revenue (CM1%, ACoS%, CM2%)
+_DBR_COLS = [
+    ("Units",             "UNITS_BUD",  "UNITS_ACT",  "int"),
+    ("Net Revenue",       "NETREV_BUD", "NETREV_ACT", "ccy"),
+    ("COGS",              "COGS_BUD",   "COGS_ACT",   "ccy"),
+    ("Outbound",          "OUT_BUD",    "OUT_ACT",    "ccy"),
+    ("Last Mile",         "LM_BUD",     "LM_ACT",     "ccy"),
+    ("Commission",        "COMM_BUD",   "COMM_ACT",   "ccy"),
+    ("Storage",           "STR_BUD",    "STR_ACT",    "ccy"),
+    ("additional duty",   "ADDL_BUD",   "ADDL_ACT",   "ccy"),
+    ("CM1%",              "CM1_BUD",    "CM1_ACT",    "pct_rev"),
+    ("CM1",               "CM1_BUD",    "CM1_ACT",    "ccy"),
+    ("Spend",             "SPND_BUD",   "SPND_ACT",   "ccy"),
+    ("ACOS%",             "SPND_BUD",   "SPND_ACT",   "pct_rev"),
+    ("CM2%",              "CM2_BUD",    "CM2_ACT",    "pct_rev"),
+    ("CM2",               "CM2_BUD",    "CM2_ACT",    "ccy"),
+]
+
+
+def _dbr_fmt_int(v):
+    n = _f(v)
+    if n is None: return "—"
+    return f"{int(round(n)):,}"
+
+def _dbr_fmt_pct(v):
+    n = _f(v)
+    if n is None: return "—"
+    return f"{n:.2f}%"
+
+
+def _build_dbr_block(label, slice_totals):
+    """Return three dict rows (Budget / Actual / % Achievement) for one
+    GEO bucket given a Series-like with the SUM totals."""
+    netrev_b = _f(slice_totals.get("NETREV_BUD")) or 0
+    netrev_a = _f(slice_totals.get("NETREV_ACT")) or 0
+
+    def _val(b_col, a_col, fmt, kind):
+        bv = _f(slice_totals.get(b_col)) or 0
+        av = _f(slice_totals.get(a_col)) or 0
+        if kind == "Budget":
+            if fmt == "pct_rev":
+                return _dbr_fmt_pct(bv / netrev_b * 100) if netrev_b else "—"
+            return _dbr_fmt_int(bv)
+        if kind == "Actual":
+            if fmt == "pct_rev":
+                return _dbr_fmt_pct(av / netrev_a * 100) if netrev_a else "—"
+            return _dbr_fmt_int(av)
+        # % Achievement — same ratio shown for both the absolute and % cell
+        if bv == 0:
+            return "—"
+        return _dbr_fmt_pct(av / bv * 100)
+
+    rows = []
+    for kind in ("Budget", "Actual", "% Achievement"):
+        row = {"GEO Bucket": label, "Type": kind}
+        for col_label, b_col, a_col, fmt in _DBR_COLS:
+            row[col_label] = _val(b_col, a_col, fmt, kind)
+        rows.append(row)
+    return rows
+
+
+def render_dbr():
+    """Daily Business Report — Budget / Actual / % Achievement matrix
+    per GEO × {Overall(Core) / VT / HP} within a chosen category."""
+    st.markdown('<div class="page-title">DBR &mdash; Daily Business Report</div>',
+                 unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} '
+        f'&rarr; {d_to.strftime("%d %b %Y")} '
+        f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
+        f'&nbsp;&bull;&nbsp; <b>VT</b> = Vahdam &nbsp;·&nbsp; '
+        f'<b>HP</b> = Handpick + Spice Train</div>',
+        unsafe_allow_html=True)
+
+    # ── Category picker (defaults to a Teas & Botanicals-like value) ──
+    cats_df = get_pnl_categories(sfx)
+    cats = cats_df["CATEGORY"].dropna().tolist() if not cats_df.empty else []
+    if not cats:
+        st.warning("No CATEGORY values found in the P&L table.")
+        return
+    default_idx = 0
+    for i, c in enumerate(cats):
+        cl = c.lower()
+        if "tea" in cl and "botan" in cl:
+            default_idx = i; break
+        if "tea" in cl or "botan" in cl:
+            default_idx = i
+    fc1, fc2 = st.columns([3, 7])
+    with fc1:
+        category = st.selectbox("Category (Core)", cats, index=default_idx,
+                                  key="dbr_category")
+
+    # ── Fetch data ──
+    with st.spinner("Loading DBR…"):
+        data = get_dbr_data(d_from, d_to, sfx, category)
+
+    if data.empty:
+        st.info("📭 No data for the chosen category / date range.")
+        return
+
+    # ── Build the report rows in GEO_ORDER ──
+    numeric_cols = [c for c in data.columns if c not in ("GEO", "BRAND_BUCKET")]
+    for c in numeric_cols:
+        data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
+
+    rows = []
+    geos_in_data = data["GEO"].unique().tolist()
+    geo_order = [g for g in GEO_ORDER if g in geos_in_data]
+    geo_order += [g for g in geos_in_data if g not in geo_order]
+    for geo in geo_order:
+        sub = data[data["GEO"] == geo]
+        if sub.empty: continue
+        overall = sub[numeric_cols].sum()
+        vt      = sub[sub["BRAND_BUCKET"] == "VT"][numeric_cols].sum() \
+                  if (sub["BRAND_BUCKET"] == "VT").any() \
+                  else pd.Series({c: 0 for c in numeric_cols})
+        hp      = sub[sub["BRAND_BUCKET"] == "HP"][numeric_cols].sum() \
+                  if (sub["BRAND_BUCKET"] == "HP").any() \
+                  else pd.Series({c: 0 for c in numeric_cols})
+        rows.extend(_build_dbr_block(f"{geo} Overall (Core)", overall))
+        rows.extend(_build_dbr_block(f"{geo} VT", vt))
+        rows.extend(_build_dbr_block(f"{geo} HP", hp))
+
+    if not rows:
+        st.info("📭 No rows produced.")
+        return
+
+    # Column order: GEO Bucket, Type, then every metric col in _DBR_COLS order
+    col_order = ["GEO Bucket", "Type"] + [c[0] for c in _DBR_COLS]
+    df_disp = pd.DataFrame(rows, columns=col_order)
+
+    # Stripe + row-type colouring. Each ROW gets a background based on Type,
+    # and the leftmost columns (GEO Bucket / Type) get a slightly stronger
+    # tint so they read as row labels.
+    def _style_dbr(row):
+        rt = row.get("Type", "")
+        if   rt == "Budget":        bg, lbl = "#fde9c8", "#7a5c00"
+        elif rt == "Actual":        bg, lbl = "#d4ecd4", "#004A2B"
+        elif rt == "% Achievement": bg, lbl = "#f9d6d6", "#8b1a1a"
+        else:                       bg, lbl = "#ffffff", "#171717"
+        styles = [f"background-color:{bg};color:#171717;"] * len(row)
+        idx    = row.index.tolist()
+        # Stronger left-side accent on the label cells
+        for col_name in ("GEO Bucket", "Type"):
+            if col_name in idx:
+                styles[idx.index(col_name)] = (
+                    f"background-color:{bg};color:{lbl};font-weight:700;"
+                )
+        return styles
+
+    # The big horizontal table is wider than the screen — let st.dataframe
+    # scroll. height tuned to fit one normal viewport.
+    n_rows = len(df_disp)
+    table_height = min(800, 38 + n_rows * 36)
+    st.dataframe(
+        df_disp.style.apply(_style_dbr, axis=1).hide(axis="index"),
+        use_container_width=True, height=table_height,
+    )
+
+    # ── Quick legend + caveat ──
+    st.caption(
+        "Each GEO is broken into three blocks: **Overall (Core)** = all brands "
+        "in the chosen category · **VT** = Vahdam only · **HP** = Handpick + "
+        "Spice Train. Within each block: Budget (peach), Actual (green), "
+        "% Achievement (pink, Actual ÷ Budget). The CM1% / ACoS% / CM2% "
+        "Budget and Actual cells are expressed as a percent of Net Revenue; "
+        "their % Achievement column repeats the absolute ratio for that line."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 6 — Customer Insights
 # ═══════════════════════════════════════════════════════════════════════════════
 # Theme columns in the reviews table. (column_in_table, display_label)
@@ -5803,6 +6042,8 @@ elif view == "asin_detail":
     render_asin_detail()
 elif view == "pnl":
     render_pnl()
+elif view == "dbr":
+    render_dbr()
 elif view == "price":
     render_price_tracker()
 elif view == "customer_insights":
