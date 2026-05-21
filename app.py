@@ -515,6 +515,55 @@ st.markdown("""
         text-align: center; padding: 20px; color: #7a6a50;
         font-size: 12.5px; font-style: italic;
     }
+    /* Sample review tiles inside Products expand panel */
+    .ci-sample {
+        background: #ffffff; border: 1px solid #e8dfc9;
+        border-left: 3px solid #d6ccba; border-radius: 8px;
+        padding: 8px 10px; margin-bottom: 8px;
+        box-shadow: 0 1px 2px rgba(0,74,43,0.04);
+        transition: transform .12s ease, box-shadow .12s ease,
+                    border-color .12s ease;
+    }
+    .ci-sample:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 3px 8px rgba(0,74,43,0.10);
+    }
+    .ci-sample.ci-sample-neg { border-left-color: #8b1a1a; }
+    .ci-sample.ci-sample-pos { border-left-color: #1a7a3e; }
+    .ci-sample-meta {
+        font-size: 10.5px; color: #7a6a50;
+        display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    }
+    .ci-sample-star {
+        font-size: 10px; font-weight: 800; letter-spacing: 0.4px;
+        padding: 1px 7px; border-radius: 999px;
+    }
+    .ci-sample-star.neg { background: #fde8e8; color: #8b1a1a; }
+    .ci-sample-star.pos { background: #d6ece1; color: #004A2B; }
+    .ci-sample-star.neu { background: #fef3d6; color: #7a5c00; }
+    .ci-sample-title {
+        font-size: 12px; font-weight: 700; color: #004A2B;
+        margin-top: 3px; line-height: 1.3;
+    }
+    .ci-sample-body {
+        font-size: 11.5px; color: #5a4d35; line-height: 1.45;
+        margin-top: 2px;
+    }
+    /* Subhead inside the expand panel */
+    .ci-subhead {
+        font-size: 11px; font-weight: 800; color: #AB8743;
+        text-transform: uppercase; letter-spacing: 1px;
+        margin: 10px 0 6px 0;
+    }
+    .ci-subhead.neg { color: #8b1a1a; }
+    .ci-subhead.pos { color: #1a7a3e; }
+    /* Panel wrapper around the detail strip */
+    .ci-panel {
+        background: linear-gradient(180deg, #ffffff 0%, #faf5ea 100%);
+        border: 1px solid #d6ccba; border-radius: 10px;
+        padding: 12px 16px 4px 16px; margin: 8px 0 16px 0;
+        box-shadow: 0 1px 4px rgba(0,74,43,0.05);
+    }
 
     /* ── Gauges container ── */
     .gauge-grid { display: grid; gap: 14px; }
@@ -5419,7 +5468,7 @@ def render_customer_insights():
     with t_prod:
         st.markdown('<div class="section-hdr">All Products</div>',
                      unsafe_allow_html=True)
-        st.caption("Click a row to see review samples + theme breakdown.")
+        st.caption("Click any row to expand sample reviews + theme breakdown.")
         # Build display table
         prod = asin_min.sort_values("REVIEWS", ascending=False).copy()
         # Per-ASIN top negative themes
@@ -5456,13 +5505,127 @@ def render_customer_insights():
                     "color:#7a5c00;font-weight:700" if n >= 15 else
                     "color:#1a7a3e;font-weight:700")
             return s
-        st.dataframe(show.style.apply(_style_prod, axis=1).hide(axis="index"),
-                     use_container_width=True, height=540,
-                     column_config={
-                         "Reviews": st.column_config.NumberColumn(format="%,d"),
-                         "Avg ★":   st.column_config.NumberColumn(format="%.2f"),
-                         "Neg %":   st.column_config.NumberColumn(format="%.1f%%"),
-                     })
+        prod_event = st.dataframe(
+            show.style.apply(_style_prod, axis=1).hide(axis="index"),
+            use_container_width=True, height=540,
+            on_select="rerun", selection_mode="single-row",
+            key="ci_prod_table",
+            column_config={
+                "Reviews": st.column_config.NumberColumn(format="%,d"),
+                "Avg ★":   st.column_config.NumberColumn(format="%.2f"),
+                "Neg %":   st.column_config.NumberColumn(format="%.1f%%"),
+            })
+
+        # ── Detail panel for the selected ASIN ──
+        try:
+            sel_rows = prod_event.selection.rows if prod_event else []
+        except Exception:
+            sel_rows = []
+        if sel_rows:
+            sel_idx  = sel_rows[0]
+            sel_asin = str(show.iloc[sel_idx]["ASIN"])
+            sel_name = str(show.iloc[sel_idx]["Product"])
+            asin_slice = df[df["ASIN"] == sel_asin]
+            neg_themes = _theme_counts(asin_slice[asin_slice["NEGATIVE"]]).head(8)
+            pos_themes = _theme_counts(asin_slice[asin_slice["POSITIVE"]]).head(8)
+
+            def _chip_row(themes_df, polarity):
+                if themes_df is None or themes_df.empty:
+                    return ('<div style="font-size:11px;color:#7a6a50;'
+                            'font-style:italic;">No themes tagged.</div>')
+                cls = "ci-chip-neg" if polarity == "neg" else "ci-chip-pos"
+                chips = [
+                    f'<span class="ci-chip {cls}">{row["theme"]} '
+                    f'<span class="ci-chip-count">{int(row["n"])}</span></span>'
+                    for _, row in themes_df.iterrows()
+                ]
+                return f'<div class="ci-themes">{"".join(chips)}</div>'
+
+            def _star_class(r):
+                if r is None or pd.isna(r):
+                    return "neu"
+                r = float(r)
+                if r <= 2: return "neg"
+                if r >= 4: return "pos"
+                return "neu"
+
+            def _sample_tiles(slice_df, polarity, n=4):
+                if slice_df is None or slice_df.empty:
+                    return ('<div style="font-size:11px;color:#7a6a50;'
+                            'font-style:italic;padding:6px 0;">'
+                            'No sample reviews to show.</div>')
+                s = slice_df.copy()
+                s["_LEN"] = s["REVIEW_TEXT"].fillna("").astype(str).str.len()
+                s = s[s["_LEN"] > 0]
+                if s.empty:
+                    return ('<div style="font-size:11px;color:#7a6a50;'
+                            'font-style:italic;padding:6px 0;">'
+                            'No sample reviews to show.</div>')
+                # For negatives we want low rating + long; for positives high + long
+                if polarity == "neg":
+                    s = s.sort_values(["RATING", "_LEN"], ascending=[True, False])
+                else:
+                    s = s.sort_values(["RATING", "_LEN"], ascending=[False, False])
+                tiles = []
+                for _, r in s.head(n).iterrows():
+                    rating = float(r["RATING"]) if pd.notna(r["RATING"]) else None
+                    star_cls = _star_class(rating)
+                    title    = (r["REVIEW_TITLE"] or "").strip()
+                    body     = (r["REVIEW_TEXT"]  or "").strip()
+                    if len(body) > 280:
+                        body = body[:277].rsplit(" ", 1)[0] + "…"
+                    when = ""
+                    if pd.notna(r["REVIEW_DATE"]):
+                        try:
+                            when = pd.to_datetime(r["REVIEW_DATE"]).strftime("%d %b %Y")
+                        except Exception:
+                            when = ""
+                    geo  = (r["GEO"] or "")
+                    star_label = f"{rating:.0f}★" if rating is not None else "—"
+                    tile_cls   = ("ci-sample-neg" if polarity == "neg"
+                                  else "ci-sample-pos")
+                    tiles.append(
+                        f'<div class="ci-sample {tile_cls}">'
+                        f'  <div class="ci-sample-meta">'
+                        f'    <span class="ci-sample-star {star_cls}">{star_label}</span>'
+                        f'    <span>·</span><span>{geo}</span>'
+                        f'    <span>·</span><span>{when}</span>'
+                        f'  </div>'
+                        f'  <div class="ci-sample-title">{title or "—"}</div>'
+                        f'  <div class="ci-sample-body">{body or "—"}</div>'
+                        f'</div>'
+                    )
+                return "".join(tiles)
+
+            # Open the detail panel
+            html = (
+                f'<div class="ci-panel">'
+                f'  <div class="ci-card-head" style="margin-bottom:6px;">'
+                f'    <span class="ci-title" style="font-size:14px;">{sel_name} '
+                f'<span class="ci-asin">· {sel_asin}</span></span>'
+                f'  </div>'
+                f'</div>'
+            )
+            st.markdown(html, unsafe_allow_html=True)
+            cL, cR = st.columns(2, gap="medium")
+            with cL:
+                st.markdown('<div class="ci-subhead neg">Negative themes</div>',
+                             unsafe_allow_html=True)
+                st.markdown(_chip_row(neg_themes, "neg"), unsafe_allow_html=True)
+                st.markdown('<div class="ci-subhead neg">Sample 1–2★ reviews</div>',
+                             unsafe_allow_html=True)
+                st.markdown(
+                    _sample_tiles(asin_slice[asin_slice["NEGATIVE"]], "neg"),
+                    unsafe_allow_html=True)
+            with cR:
+                st.markdown('<div class="ci-subhead pos">Positive themes</div>',
+                             unsafe_allow_html=True)
+                st.markdown(_chip_row(pos_themes, "pos"), unsafe_allow_html=True)
+                st.markdown('<div class="ci-subhead pos">Sample 5★ reviews</div>',
+                             unsafe_allow_html=True)
+                st.markdown(
+                    _sample_tiles(asin_slice[asin_slice["POSITIVE"]], "pos"),
+                    unsafe_allow_html=True)
 
     # ─────────────────────────── 4. CATEGORIES ───────────────────────────
     with t_cat:
@@ -5557,22 +5720,36 @@ def render_customer_insights():
         st.markdown('<div class="section-hdr">Individual Reviews</div>',
                      unsafe_allow_html=True)
         rc1, rc2, rc3 = st.columns([1.5, 1.5, 5])
+        sentiment_opts = [
+            "All",
+            "Positive (4-5★)",
+            "Neutral (3★)",
+            "Negative (1-2★)",
+        ]
         with rc1:
-            rating_filter = st.multiselect("Star rating", [1, 2, 3, 4, 5],
-                                             default=[1, 2],
-                                             key="ci_rev_rating")
+            sentiment_pick = st.selectbox("Sentiment", sentiment_opts, index=0,
+                                            key="ci_rev_sentiment")
         with rc2:
             theme_opts = ["(any)"] + [lbl for _, lbl in _REVIEW_THEMES]
-            theme_pick = st.selectbox("Mentions theme", theme_opts, index=0,
-                                       key="ci_rev_theme")
+            theme_pick = st.selectbox("Theme", theme_opts, index=0,
+                                       key="ci_rev_theme",
+                                       help="Reviews that mention this theme "
+                                            "(any rating).")
         with rc3:
-            kw = st.text_input("Keyword in review text",
+            kw = st.text_input("Keyword",
                                  key="ci_rev_kw",
-                                 placeholder="e.g. bitter, packaging, leak").strip()
+                                 placeholder="e.g. bitter, packaging, leak",
+                                 help="Free-text match against review title or "
+                                      "body (case insensitive).").strip()
 
         rev_df = df.copy()
-        if rating_filter:
-            rev_df = rev_df[rev_df["RATING"].round().isin(rating_filter)]
+        if sentiment_pick == "Positive (4-5★)":
+            rev_df = rev_df[rev_df["POSITIVE"]]
+        elif sentiment_pick == "Neutral (3★)":
+            rev_df = rev_df[rev_df["NEUTRAL"]]
+        elif sentiment_pick == "Negative (1-2★)":
+            rev_df = rev_df[rev_df["NEGATIVE"]]
+        # else "All" → no rating filter applied
         if theme_pick != "(any)":
             for col, lbl in _REVIEW_THEMES:
                 if lbl == theme_pick:
