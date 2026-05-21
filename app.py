@@ -451,6 +451,71 @@ st.markdown("""
     .alert-warn   { background: #fef3d6; color: #7a5c00; border-color: #f0dca0; }
     .alert-info   { background: #eaf3fb; color: #0b4a6b; border-color: #c5dcef; }
 
+    /* ── Customer Insights cards ── */
+    .ci-card {
+        background: #ffffff; border: 1px solid #e8dfc9;
+        border-left: 4px solid #d6ccba; border-radius: 10px;
+        padding: 12px 14px 11px 14px; margin-bottom: 10px;
+        box-shadow: 0 1px 3px rgba(0,74,43,0.05);
+        transition: transform .12s ease, box-shadow .12s ease,
+                    border-color .12s ease;
+    }
+    .ci-card:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(0,74,43,0.10);
+    }
+    .ci-card.ci-fix    { border-left-color: #8b1a1a; }
+    .ci-card.ci-watch  { border-left-color: #c75c3c; }
+    .ci-card.ci-amber  { border-left-color: #AB8743; }
+    .ci-card.ci-win    { border-left-color: #1a7a3e; }
+    .ci-card-head {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        margin-bottom: 4px;
+    }
+    .ci-badge {
+        display: inline-flex; align-items: center;
+        font-size: 9.5px; font-weight: 800; letter-spacing: 0.8px;
+        padding: 2px 8px; border-radius: 999px;
+        text-transform: uppercase;
+    }
+    .ci-title {
+        font-size: 13px; font-weight: 700; color: #004A2B;
+        line-height: 1.25; flex: 1 1 auto;
+    }
+    .ci-title .ci-asin {
+        font-weight: 500; color: #7a6a50; font-size: 11.5px;
+    }
+    .ci-stats {
+        font-size: 11.5px; color: #5a4d35; margin: 2px 0 6px 0;
+        line-height: 1.4;
+    }
+    .ci-stats b { color: #004A2B; }
+    .ci-themes {
+        display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 6px 0;
+    }
+    .ci-chip {
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 10.5px; font-weight: 600; padding: 2px 8px;
+        border-radius: 999px; border: 1px solid;
+    }
+    .ci-chip-neg { background: #fde8e8; color: #8b1a1a; border-color: #f0c5c5; }
+    .ci-chip-pos { background: #d6ece1; color: #004A2B; border-color: #bcd9c8; }
+    .ci-chip-count { font-weight: 700; opacity: .85; }
+    .ci-quote {
+        font-size: 11.5px; color: #5a4d35; font-style: italic;
+        padding: 6px 10px; background: #faf5ea; border-radius: 6px;
+        border-left: 2px solid #d6ccba; line-height: 1.4;
+        margin-top: 6px;
+    }
+    .ci-quote::before { content: '"'; color: #AB8743; font-weight: 700;
+                         margin-right: 2px; }
+    .ci-quote::after  { content: '"'; color: #AB8743; font-weight: 700;
+                         margin-left: 2px; }
+    .ci-empty {
+        text-align: center; padding: 20px; color: #7a6a50;
+        font-size: 12.5px; font-style: italic;
+    }
+
     /* ── Gauges container ── */
     .gauge-grid { display: grid; gap: 14px; }
 
@@ -4958,14 +5023,62 @@ def get_reviews_all():
 
 
 def _theme_counts(slice_df):
-    """Return DataFrame[theme, n] sorted desc — counts non-empty theme cells."""
+    """Return DataFrame[theme, n] sorted desc — counts non-empty theme cells.
+    Always returns the same two columns even when no themes are present
+    (otherwise sort_values('n') on an empty DataFrame raises KeyError)."""
     rows = []
-    for col, label in _REVIEW_THEMES:
-        if col in slice_df.columns:
-            n = int((slice_df[col].fillna("").astype(str).str.strip() != "").sum())
-            if n > 0:
-                rows.append({"theme": label, "n": n})
+    if slice_df is not None and not slice_df.empty:
+        for col, label in _REVIEW_THEMES:
+            if col in slice_df.columns:
+                n = int((slice_df[col].fillna("").astype(str).str.strip() != "").sum())
+                if n > 0:
+                    rows.append({"theme": label, "n": n})
+    if not rows:
+        return pd.DataFrame(columns=["theme", "n"])
     return pd.DataFrame(rows).sort_values("n", ascending=False).reset_index(drop=True)
+
+
+def _sample_quote(slice_df, low_rating=True, max_len=140):
+    """Pick a representative review quote from a slice. For "What to fix"
+    we want the lowest-rated, most detailed review; for "What to market"
+    we want the highest-rated."""
+    if slice_df is None or slice_df.empty:
+        return ""
+    s = slice_df.copy()
+    s["_LEN"] = s["REVIEW_TEXT"].fillna("").astype(str).str.len()
+    s = s[s["_LEN"] > 20]
+    if s.empty:
+        return ""
+    s = s.sort_values(["RATING", "_LEN"],
+                       ascending=[True if low_rating else False, False])
+    t = str(s.iloc[0]["REVIEW_TEXT"]).strip()
+    if len(t) > max_len:
+        t = t[:max_len].rsplit(" ", 1)[0] + "…"
+    return t
+
+
+def _severity(neg_pct, reviews):
+    """Severity badge for fix-list cards."""
+    n, r = (neg_pct or 0), (reviews or 0)
+    if n >= 35 and r >= 30:
+        return ("CRITICAL",     "#fff", "#8b1a1a")
+    if n >= 25 and r >= 20:
+        return ("HIGH PRIORITY","#fff", "#c75c3c")
+    if n >= 15:
+        return ("WATCH",        "#7a5c00", "#fef3d6")
+    return ("MONITOR",          "#7a6a50", "#f0e9d8")
+
+
+def _strength(pos_pct, reviews, avg_rating):
+    """Strength badge for market-list cards."""
+    a, p, r = (avg_rating or 0), (pos_pct or 0), (reviews or 0)
+    if a >= 4.6 and r >= 50:
+        return ("HERO",      "#fff", "#1a7a3e")
+    if a >= 4.4 and r >= 30:
+        return ("STAR",      "#fff", "#2e8c4f")
+    if a >= 4.0 and r >= 20:
+        return ("RISING",    "#1a7a3e", "#d6ece1")
+    return ("STEADY",        "#7a6a50", "#f0e9d8")
 
 
 def _star_dist(slice_df):
@@ -5183,75 +5296,115 @@ def render_customer_insights():
     # ─────────────────────────── 2. ACTIONABLES ───────────────────────────
     with t_act:
         st.markdown(
-            '<div class="page-sub">Heuristic-ranked priorities. <b>What to fix</b> '
-            '= products with high review volume AND high negative %. '
-            '<b>What to market</b> = products with high volume AND high positive % '
-            '(4★+).</div>', unsafe_allow_html=True)
+            '<div class="page-sub">Data-driven priorities. <b>What to fix</b> '
+            'ranks by negative % × √reviews (so high-volume SKUs surface even '
+            'when % isn\'t extreme). <b>What to market</b> uses avg ★ × √reviews '
+            'to highlight high-performing SKUs with enough volume to back the claim. '
+            'Each card shows top complaint/praise themes and the most informative '
+            'customer quote.</div>', unsafe_allow_html=True)
 
         if asin_min.empty:
-            st.info(f"No ASINs meet the ≥ {f_min} review threshold. "
-                     "Lower the filter to populate Actionables.")
+            st.markdown('<div class="ci-empty">'
+                         f'No ASINs meet the ≥ {f_min} review threshold. '
+                         f'Lower the filter to populate Actionables.</div>',
+                         unsafe_allow_html=True)
         else:
-            # Priority score: weight neg/pos by sqrt(volume) so we don't
-            # over-index on niche tiny SKUs.
-            asin_min["FIX_SCORE"] = asin_min["NEG_PCT"] * (asin_min["REVIEWS"] ** 0.5)
-            asin_min["WIN_SCORE"] = asin_min["POS_PCT"] * (asin_min["REVIEWS"] ** 0.5)
-            fix_list = asin_min.sort_values("FIX_SCORE", ascending=False).head(12)
-            win_list = asin_min.sort_values("WIN_SCORE", ascending=False).head(12)
+            # Priority scores — sqrt(volume) prevents niche micro-SKUs from
+            # dominating the list when their % looks extreme on tiny n.
+            asin_rank = asin_min.copy()
+            asin_rank["FIX_SCORE"] = asin_rank["NEG_PCT"] * (asin_rank["REVIEWS"] ** 0.5)
+            asin_rank["WIN_SCORE"] = asin_rank["AVG_RAT"] * (asin_rank["REVIEWS"] ** 0.5)
+            fix_list = asin_rank.sort_values("FIX_SCORE", ascending=False).head(12)
+            win_list = asin_rank[asin_rank["AVG_RAT"] >= 4.0] \
+                          .sort_values("WIN_SCORE", ascending=False).head(12)
+
+            def _theme_chips(top_themes, polarity):
+                if top_themes is None or top_themes.empty:
+                    return ""
+                cls = "ci-chip-neg" if polarity == "neg" else "ci-chip-pos"
+                chips = []
+                for _, row in top_themes.head(3).iterrows():
+                    chips.append(
+                        f'<span class="ci-chip {cls}">{row["theme"]}'
+                        f' <span class="ci-chip-count">{int(row["n"])}</span></span>'
+                    )
+                return f'<div class="ci-themes">{"".join(chips)}</div>'
+
+            def _card(r, polarity, badge, sample):
+                # polarity: "neg" for fix-list, "pos" for win-list
+                card_cls   = "ci-fix" if polarity == "neg" else "ci-win"
+                stat_color = "#8b1a1a" if polarity == "neg" else "#1a7a3e"
+                pct_label  = (f"<b>{r['NEG_PCT']:.0f}% neg</b> "
+                              f"({int(r['NEG'])} of {int(r['REVIEWS'])} 1–2★)"
+                              if polarity == "neg" else
+                              f"<b>{r['POS_PCT']:.0f}% pos</b> "
+                              f"({int(r['POS'])} of {int(r['REVIEWS'])} 4–5★)")
+                top_neg = _theme_counts(df[(df["ASIN"] == r["ASIN"]) & df["NEGATIVE"]])
+                top_pos = _theme_counts(df[(df["ASIN"] == r["ASIN"]) & df["POSITIVE"]])
+                chips = (_theme_chips(top_neg, "neg") if polarity == "neg"
+                         else _theme_chips(top_pos, "pos"))
+                badge_label, badge_fg, badge_bg = badge
+                title = (r["PRODUCT_NAME"] or "").strip() or r["ASIN"]
+                if len(title) > 75:
+                    title = title[:72] + "…"
+                cats = []
+                if r.get("BRAND"):    cats.append(str(r["BRAND"]))
+                if r.get("CATEGORY"): cats.append(str(r["CATEGORY"]))
+                meta = " · ".join(cats) if cats else ""
+                quote_html = (f'<div class="ci-quote">{sample}</div>'
+                              if sample else "")
+                meta_html = (f'<div class="ci-stats" '
+                             f'style="font-size:10.5px;color:#7a6a50;'
+                             f'margin-top:0;">{meta}</div>' if meta else "")
+                return (
+                    f'<div class="ci-card {card_cls}">'
+                    f'  <div class="ci-card-head">'
+                    f'    <span class="ci-badge" style="background:{badge_bg};'
+                    f'color:{badge_fg};">{badge_label}</span>'
+                    f'    <span class="ci-title">{title} '
+                    f'<span class="ci-asin">· {r["ASIN"]}</span></span>'
+                    f'  </div>'
+                    f'  {meta_html}'
+                    f'  <div class="ci-stats">'
+                    f'    <b>{int(r["REVIEWS"]):,}</b> reviews · avg '
+                    f'<b style="color:{stat_color};">{r["AVG_RAT"]:.2f}★</b> · '
+                    f'{pct_label}'
+                    f'  </div>'
+                    f'  {chips}'
+                    f'  {quote_html}'
+                    f'</div>'
+                )
 
             colA, colB = st.columns(2, gap="medium")
             with colA:
-                st.markdown('<div class="section-hdr" '
-                             'style="border-left-color:#8b1a1a;">'
-                             'What to fix — highest priority</div>',
-                             unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="section-hdr" style="border-left-color:#8b1a1a;">'
+                    'What to fix · highest priority</div>',
+                    unsafe_allow_html=True)
                 for _, r in fix_list.iterrows():
-                    top_themes = _theme_counts(
-                        df[(df["ASIN"] == r["ASIN"]) & (df["NEGATIVE"])]).head(3)
-                    theme_str = " · ".join(
-                        f"{row['theme']} ({row['n']})" for _, row in top_themes.iterrows()
-                    ) or "—"
-                    st.markdown(
-                        f"<div style='padding:8px 12px;border-left:3px solid #8b1a1a;"
-                        f"background:#fff;border-radius:6px;margin-bottom:8px;"
-                        f"box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
-                        f"<div style='font-weight:700;color:#004A2B;font-size:13px;'>"
-                        f"{(r['PRODUCT_NAME'] or '')[:70]} "
-                        f"<span class='small-muted' style='font-weight:500;'>"
-                        f"({r['ASIN']})</span></div>"
-                        f"<div style='font-size:11.5px;color:#7a6a50;margin-top:2px;'>"
-                        f"{r['REVIEWS']:,} reviews · avg "
-                        f"<b style='color:#8b1a1a;'>{r['AVG_RAT']:.2f}★</b> · "
-                        f"<b>{r['NEG_PCT']:.0f}% neg</b></div>"
-                        f"<div style='font-size:11px;color:#7a5c00;margin-top:4px;'>"
-                        f"Top complaints: {theme_str}</div></div>",
-                        unsafe_allow_html=True)
+                    badge  = _severity(r["NEG_PCT"], r["REVIEWS"])
+                    sample = _sample_quote(
+                        df[(df["ASIN"] == r["ASIN"]) & df["NEGATIVE"]],
+                        low_rating=True)
+                    st.markdown(_card(r, "neg", badge, sample),
+                                 unsafe_allow_html=True)
             with colB:
-                st.markdown('<div class="section-hdr" '
-                             'style="border-left-color:#1a7a3e;">'
-                             'What to market — loudest wins</div>',
-                             unsafe_allow_html=True)
-                for _, r in win_list.iterrows():
-                    top_themes = _theme_counts(
-                        df[(df["ASIN"] == r["ASIN"]) & (df["POSITIVE"])]).head(3)
-                    theme_str = " · ".join(
-                        f"{row['theme']} ({row['n']})" for _, row in top_themes.iterrows()
-                    ) or "—"
-                    st.markdown(
-                        f"<div style='padding:8px 12px;border-left:3px solid #1a7a3e;"
-                        f"background:#fff;border-radius:6px;margin-bottom:8px;"
-                        f"box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
-                        f"<div style='font-weight:700;color:#004A2B;font-size:13px;'>"
-                        f"{(r['PRODUCT_NAME'] or '')[:70]} "
-                        f"<span class='small-muted' style='font-weight:500;'>"
-                        f"({r['ASIN']})</span></div>"
-                        f"<div style='font-size:11.5px;color:#7a6a50;margin-top:2px;'>"
-                        f"{r['REVIEWS']:,} reviews · avg "
-                        f"<b style='color:#1a7a3e;'>{r['AVG_RAT']:.2f}★</b> · "
-                        f"<b>{r['POS_PCT']:.0f}% pos</b></div>"
-                        f"<div style='font-size:11px;color:#1a7a3e;margin-top:4px;'>"
-                        f"Top praise themes: {theme_str}</div></div>",
-                        unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="section-hdr" style="border-left-color:#1a7a3e;">'
+                    'What to market · loudest wins</div>',
+                    unsafe_allow_html=True)
+                if win_list.empty:
+                    st.markdown('<div class="ci-empty">'
+                                 'No ASINs with ≥4★ avg meet the volume threshold yet.'
+                                 '</div>', unsafe_allow_html=True)
+                else:
+                    for _, r in win_list.iterrows():
+                        badge  = _strength(r["POS_PCT"], r["REVIEWS"], r["AVG_RAT"])
+                        sample = _sample_quote(
+                            df[(df["ASIN"] == r["ASIN"]) & df["POSITIVE"]],
+                            low_rating=False)
+                        st.markdown(_card(r, "pos", badge, sample),
+                                     unsafe_allow_html=True)
 
     # ─────────────────────────── 3. PRODUCTS ───────────────────────────
     with t_prod:
