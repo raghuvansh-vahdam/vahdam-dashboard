@@ -3974,15 +3974,22 @@ def render_asin_detail():
 # Domain codes per Keepa REST API: 1=US, 2=UK, 3=DE, 4=FR, 5=JP, 6=CA, 8=IT,
 # 9=ES, 10=IN, 11=MX, 12=BR
 KEEPA_DOMAIN = {"USA": 1, "UK": 2, "DE": 3, "FR": 4, "CA": 6,
-                "IT": 8, "ES": 9, "AUS": 11, "UAE": 1}  # UAE/AUS fallback to US
+                "IT": 8, "ES": 9,
+                # Australia (amazon.com.au) was added by Keepa in 2022.
+                "AUS": 13,
+                # UAE (amazon.ae) added by Keepa later.
+                "UAE": 17}
 # Currency symbol per Keepa domain
 KEEPA_SYMBOL = {1: "$", 2: "£", 3: "€", 4: "€", 6: "C$", 8: "€",
-                9: "€", 10: "₹", 11: "$"}
+                9: "€", 10: "₹", 11: "$",
+                13: "A$",        # AUS
+                17: "AED "}      # UAE — trailing space so it reads "AED 12.50"
 # Marketplace domain per GEO (shown in the tab caption)
 AMAZON_DOMAIN = {
     "USA": "amazon.com", "UK": "amazon.co.uk", "DE": "amazon.de",
     "FR": "amazon.fr",   "IT": "amazon.it",    "ES": "amazon.es",
-    "CA": "amazon.ca",
+    "CA": "amazon.ca",   "AUS": "amazon.com.au",
+    "UAE": "amazon.ae",
 }
 
 # ASINs to track per GEO. Add more here as the user grows the list.
@@ -4115,6 +4122,27 @@ _USA_ASINS = [
     "B0D5MQ8XQM","B0BJL42LJH","B09SZGG4S7",
 ]
 
+_AUS_ASINS = [
+    "B0B293XFM4","B096KWR1PK","B09Y9G1436","B01CXZ86FA","B01M0DB0Z3",
+    "B09Y9BGBTF","B0C7N1F4Y1","B096KTV5QP","B096KZ74F1","B07RGK5QKZ",
+    "B016IL75S4","B0B2928XNH","B07K1WBH4K","B00VBUY3SS","B07MDCXFWQ",
+    "B07RBN3ZMJ","B00VIDY1GC","B0FP5QDGFV","B0BB1LXSPN","B0C8ZDBRGG",
+    "B00VFYPIDO","B00R65SD4C","B07ZB61GXF","B07MNSWD6D","B09DW76XD4",
+    "B017P6DS5A","B01K78VZE4","B0BT7H247Z","B00VFYPK82","B09YY78NFQ",
+    "B0FSDLB9N4","B0C741NRPK",
+]
+
+_UAE_ASINS = [
+    "B07K1WBH4K","B07RGK5QKZ","B00VFYPIDO","B0BB1LXSPN","B096KWR1PK",
+    "B07MDCXFWQ","B07ZB61GXF","B00R65SD4C","B00VG5QV2O","B017P6DS5A",
+    "B07MNSZ61S","B0C7N1F4Y1","B09Y9DYSD6","B01K78VZE4","B0C741NRPK",
+    "B01CXZ86FA","B0B2928XNH","B0B293XFM4","B0FP5QDGFV","B07MNSWD6D",
+    "B07RHN9TDF","B00VFYPK82","B00VFYPG1S","B01M0DB0Z3","B08G2J583H",
+    "B096KZ74F1","B0BT7H247Z","B07RHN6RRX","B09YY78NFQ","B096KTV5QP",
+    "B09Y9G1436","B00VIDY1GC","B07RGK4H2B","B00VBUY3SS","B09K45HC68",
+    "B016IL75S4","B0FSDLB9N4",
+]
+
 PRICE_TRACKER_ASINS = {
     "USA": _USA_ASINS,
     "UK":  _UK_ASINS,
@@ -4123,6 +4151,8 @@ PRICE_TRACKER_ASINS = {
     "IT":  _EU_ASINS,
     "ES":  _EU_ASINS,
     "CA":  _CA_ASINS,
+    "AUS": _AUS_ASINS,
+    "UAE": _UAE_ASINS,
 }
 
 # Budgeted (target) selling price per GEO per ASIN, in the marketplace's
