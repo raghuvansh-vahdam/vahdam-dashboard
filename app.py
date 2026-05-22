@@ -4290,6 +4290,8 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
             "amazon_pts":       amazon_pts,
             "new_pts":          new_pts,
             "buybox_pts":       buybox_pts,
+            "rating_pts":       rating_pts,
+            "reviews_pts":      reviews_pts,
             "last_amazon":      _last(amazon_pts),
             "last_new":         _last(new_pts),
             "last_buybox":      _last(buybox_pts),
@@ -4407,6 +4409,26 @@ def render_price_tracker():
                 st.error(data["_error"])
                 continue
 
+            # ── Keepa quota / refresh-cadence info bar ──
+            tl    = data.get("_tokens_left")
+            rate  = data.get("_refill_rate")
+            bits  = []
+            if tl is not None:
+                bits.append(f"🪙 <b>{int(tl):,}</b> tokens left")
+            if rate:
+                bits.append(f"refill <b>{rate}</b>/min")
+            bits.append(
+                "data refreshes every <b>24 h</b> "
+                "(use sidebar <i>Refresh data</i> to force-update)"
+            )
+            st.markdown(
+                '<div style="background:#faf5ea;border:1px solid #e8dfc9;'
+                'border-radius:6px;padding:6px 12px;margin:4px 0 10px 0;'
+                'font-size:11.5px;color:#5a4d35;">'
+                + " &nbsp;·&nbsp; ".join(bits) +
+                '</div>',
+                unsafe_allow_html=True)
+
             # ── Buybox-missing summary (based on YESTERDAY) ──
             missing_buybox = []
             not_found = []
@@ -4473,26 +4495,57 @@ def render_price_tracker():
                 if a.get("flag"):
                     anomalies.append((asin, d, a))
 
+            # Severe = |dev| >= 25%, warning = 15-25%
+            severe_count = sum(1 for _, _, a in anomalies
+                                if abs(a.get("change_pct") or 0) >= 25)
             if anomalies:
+                banner_bits = [
+                    f"⚠️ {len(anomalies)} price "
+                    f'{"anomaly" if len(anomalies) == 1 else "anomalies"}'
+                ]
+                if severe_count:
+                    banner_bits.append(
+                        f"🔥 {severe_count} severe (&ge;25%)")
                 st.markdown(
                     f'<div class="alerts-row">'
-                    f'<div class="alert-banner alert-warn">⚠️ {len(anomalies)} '
-                    f'price {"anomaly" if len(anomalies) == 1 else "anomalies"} '
-                    f'— review below.</div></div>',
+                    f'<div class="alert-banner alert-warn">'
+                    + " · ".join(banner_bits) +
+                    "</div></div>",
                     unsafe_allow_html=True)
-                with st.expander(f"⚠️ {len(anomalies)} anomalies — show details",
-                                 expanded=True):
-                    for asin, d, a in anomalies:
+                # Default to CLOSED so the page loads compact; user expands
+                # if they want details.
+                with st.expander(
+                    f"⚠️ {len(anomalies)} anomalies — show details "
+                    f"({severe_count} severe)" if severe_count
+                    else f"⚠️ {len(anomalies)} anomalies — show details",
+                    expanded=False):
+                    # Sort severe first
+                    anomalies_sorted = sorted(
+                        anomalies,
+                        key=lambda x: abs(x[2].get("change_pct") or 0),
+                        reverse=True)
+                    for asin, d, a in anomalies_sorted:
+                        chg = abs(a.get("change_pct") or 0)
                         arrow = "▲" if a["direction"] == "up" else "▼"
+                        # Severity colouring: |>=25%| red bold pill,
+                        # |15-25%| amber, else default
+                        if chg >= 25:
+                            pill = ('<span style="background:#fde8e8;'
+                                    'color:#8b1a1a;font-weight:800;'
+                                    'padding:2px 8px;border-radius:999px;'
+                                    'font-size:10.5px;letter-spacing:0.5px;'
+                                    'margin-right:6px;">SEVERE</span>')
+                        else:
+                            pill = ""
                         color = "#1a7a3e" if a["direction"] == "up" else "#8b1a1a"
                         title = d['title'][:70]
                         basis_lbl = ("vs budget" if a.get("basis") == "budget"
                                      else "vs 7-day avg")
                         st.markdown(
                             f"<div style='padding:6px 0;border-bottom:1px dashed #ede4d0;'>"
-                            f"<b>{asin}</b> &nbsp;·&nbsp; "
+                            f"{pill}<b>{asin}</b> &nbsp;·&nbsp; "
                             f"<span style='color:{color};font-weight:700;'>"
-                            f"{arrow} {abs(a['change_pct']):.1f}%</span> "
+                            f"{arrow} {chg:.1f}%</span> "
                             f"<span class='small-muted' style='font-size:10.5px;'>"
                             f"{basis_lbl}</span> "
                             f"&nbsp;<span class='small-muted'>"
@@ -4504,58 +4557,295 @@ def render_price_tracker():
             else:
                 st.success("✓ No price anomalies detected.")
 
-            # ── ASIN search / picker ──
-            st.markdown('<div class="section-hdr" style="margin-top:18px;">'
-                        'Price history (Amazon + New offer)</div>',
-                        unsafe_allow_html=True)
-
-            # Build a label map: "ASIN — Title" for each ASIN that came back.
-            # Anomalies / buybox-missing bubble to the top of the dropdown.
+            # Helpers used by both the deep-dive and the multi-pick charts
+            anomaly_set = {a[0] for a in anomalies}
+            missing_set = {a[0] for a in missing_buybox}
             def _label_for(a):
                 t = (data.get(a, {}).get("title") or "")[:60]
                 return f"{a} — {t}" if t else a
-            anomaly_set = {a[0] for a in anomalies}
-            missing_set = {a[0] for a in missing_buybox}
             def _sort_key(a):
                 # 0 = anomaly, 1 = missing buybox, 2 = rest
                 if a in anomaly_set: return (0, a)
                 if a in missing_set: return (1, a)
                 return (2, a)
-            options = sorted(asins, key=_sort_key)
-            search_q = st.text_input(
-                "🔍 Search ASIN or title",
-                key=f"price_search_{geo}",
-                placeholder="e.g. B0BJK5GPRD or 'masala chai'",
-            ).strip().lower()
-            if search_q:
-                options = [
-                    a for a in options
-                    if search_q in a.lower()
-                    or search_q in (data.get(a, {}).get("title") or "").lower()
-                ]
-                if not options:
-                    st.info(f"No ASINs matched “{search_q}”.")
-                    continue
-            # Default: any anomaly / missing-buybox ASINs (capped at 6), else
-            # the first 3 ASINs so the page loads quickly.
-            default_picks = [a for a in options
-                             if a in anomaly_set or a in missing_set][:6]
-            if not default_picks:
-                default_picks = options[:3]
-            picks = st.multiselect(
-                f"Select ASINs to chart ({len(options)} available)",
-                options=options,
-                default=default_picks,
-                format_func=_label_for,
-                key=f"price_picks_{geo}",
-            )
-            if not picks:
-                st.info("Pick one or more ASINs above to see their price charts.")
-                continue
 
-            # ── Per-ASIN price charts (3 per row) ──
+            # ── ASIN deep-dive (Keepa-style granular chart) ──
             import datetime as _d
             two_years_ago = _d.datetime.utcnow() - _d.timedelta(days=730)
+
+            with st.expander(
+                "🔍 Deep-dive on one ASIN — granular price / rating / "
+                "reviews charts", expanded=False):
+                dd_options = sorted(asins, key=_sort_key)
+                dd_pick = st.selectbox(
+                    "Pick an ASIN",
+                    dd_options,
+                    format_func=_label_for,
+                    key=f"price_dd_{geo}",
+                )
+                if dd_pick and dd_pick in data:
+                    dd = data[dd_pick]
+                    cur_p = (dd.get("last_amazon") or dd.get("last_new")
+                              or dd.get("last_buybox"))
+                    bb_y  = dd.get("buybox_yesterday")
+                    rat   = dd.get("rating")
+                    rev   = dd.get("reviews_count")
+                    bbp   = dd.get("buybox_present")
+                    bp    = budgets.get(dd_pick)
+
+                    # Stat strip
+                    s1, s2, s3, s4, s5 = st.columns(5, gap="small")
+                    s1.markdown(strip_card(
+                        "Current price",
+                        f"{dd['currency']}{cur_p:.2f}" if cur_p else "—",
+                        f"Buy Box yest: {dd['currency']}{bb_y:.2f}" if bb_y
+                        else ("Buy Box missing yest." if bbp is False else None),
+                    ), unsafe_allow_html=True)
+                    s2.markdown(strip_card(
+                        "Rating",
+                        f"{rat:.2f} ★" if rat else "—",
+                        f"{rev:,} reviews" if rev else None,
+                    ), unsafe_allow_html=True)
+                    if bp:
+                        s3.markdown(strip_card(
+                            "Budget price",
+                            f"{dd['currency']}{bp:.2f}",
+                            f"vs current "
+                            f"{(cur_p/bp*100 - 100):+.1f}%"
+                            if cur_p else None,
+                        ), unsafe_allow_html=True)
+                    else:
+                        s3.markdown(strip_card(
+                            "Budget price", "—",
+                            "Set via PRICE_BUDGETS in app.py"
+                        ), unsafe_allow_html=True)
+                    # 7d / 30d / 90d averages
+                    pts = dd.get("amazon_pts") or dd.get("new_pts") or []
+                    def _avg_over(days):
+                        if not pts: return None
+                        cutoff = pts[-1][0] - _d.timedelta(days=days)
+                        vals = [p for d_, p in pts if d_ >= cutoff]
+                        return (sum(vals)/len(vals)) if vals else None
+                    avg7  = _avg_over(7)
+                    avg30 = _avg_over(30)
+                    avg90 = _avg_over(90)
+                    s4.markdown(strip_card(
+                        "7d avg",
+                        f"{dd['currency']}{avg7:.2f}" if avg7 else "—",
+                        (f"30d {dd['currency']}{avg30:.2f}" if avg30 else "—")
+                    ), unsafe_allow_html=True)
+                    s5.markdown(strip_card(
+                        "90d avg",
+                        f"{dd['currency']}{avg90:.2f}" if avg90 else "—",
+                        ("All-time low / high in chart"
+                         if pts else "No history")
+                    ), unsafe_allow_html=True)
+                    st.markdown("")
+
+                    # Big Plotly price chart with rangeselector + rangeslider
+                    if HAS_PLOTLY and pts:
+                        fig = go.Figure()
+                        # Amazon line
+                        if dd.get("amazon_pts"):
+                            xs, ys = zip(*dd["amazon_pts"])
+                            fig.add_trace(go.Scatter(
+                                x=xs, y=ys, mode="lines",
+                                name="Amazon",
+                                line=dict(color="#004A2B", width=1.8),
+                                hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
+                                               f"Amazon: {dd['currency']}%{{y:.2f}}"
+                                               "<extra></extra>")))
+                        if dd.get("new_pts"):
+                            xs, ys = zip(*dd["new_pts"])
+                            fig.add_trace(go.Scatter(
+                                x=xs, y=ys, mode="lines",
+                                name="New offer",
+                                line=dict(color="#AB8743", width=1.4,
+                                          dash="dot"),
+                                hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
+                                               f"New: {dd['currency']}%{{y:.2f}}"
+                                               "<extra></extra>")))
+                        if dd.get("buybox_pts"):
+                            xs, ys = zip(*dd["buybox_pts"])
+                            fig.add_trace(go.Scatter(
+                                x=xs, y=ys, mode="lines",
+                                name="Buy Box",
+                                line=dict(color="#8b1a1a", width=1.2,
+                                          dash="dash"),
+                                hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
+                                               f"Buy Box: {dd['currency']}%{{y:.2f}}"
+                                               "<extra></extra>")))
+                        if bp:
+                            fig.add_hline(
+                                y=bp,
+                                line=dict(color="#8b1a1a", width=1.1,
+                                          dash="dash"),
+                                annotation_text=(f"Budget {dd['currency']}"
+                                                 f"{bp:.2f}"),
+                                annotation_position="top left",
+                                annotation_font=dict(size=10,
+                                                     color="#8b1a1a"))
+                        fig.update_layout(
+                            plot_bgcolor="#FBF5EA",
+                            paper_bgcolor="#FBF5EA",
+                            height=380,
+                            margin=dict(l=40, r=20, t=20, b=10),
+                            hovermode="x unified",
+                            legend=dict(orientation="h", y=1.06,
+                                        xanchor="center", x=0.5),
+                            hoverlabel=dict(bgcolor="#ffffff",
+                                            bordercolor="#004A2B",
+                                            font=dict(size=11,
+                                                      color="#171717")),
+                        )
+                        fig.update_xaxes(
+                            gridcolor="rgba(171,135,67,0.18)",
+                            rangeselector=dict(
+                                buttons=[
+                                    dict(count=1,  label="1m",  step="month",
+                                         stepmode="backward"),
+                                    dict(count=3,  label="3m",  step="month",
+                                         stepmode="backward"),
+                                    dict(count=6,  label="6m",  step="month",
+                                         stepmode="backward"),
+                                    dict(count=1,  label="1y",  step="year",
+                                         stepmode="backward"),
+                                    dict(count=2,  label="2y",  step="year",
+                                         stepmode="backward"),
+                                    dict(step="all", label="All"),
+                                ],
+                                bgcolor="#faf5ea",
+                                activecolor="#004A2B",
+                                bordercolor="#d6ccba",
+                                font=dict(size=10, color="#5a4d35"),
+                            ),
+                            rangeslider=dict(visible=True, thickness=0.06),
+                            type="date",
+                        )
+                        fig.update_yaxes(
+                            gridcolor="rgba(171,135,67,0.18)",
+                            tickprefix=dd["currency"],
+                        )
+                        st.plotly_chart(fig, use_container_width=True,
+                                        config={"displayModeBar": True,
+                                                "modeBarButtonsToRemove":
+                                                ["lasso2d", "select2d"]})
+                    elif not pts:
+                        st.caption("No price history available for this ASIN.")
+
+                    # Rating + Reviews sub-charts (history)
+                    rat_pts = dd.get("rating_pts") or []
+                    rev_pts = dd.get("reviews_pts") or []
+                    if HAS_PLOTLY and (rat_pts or rev_pts):
+                        rc1, rc2 = st.columns(2, gap="medium")
+                        with rc1:
+                            st.markdown(
+                                '<div class="section-hdr" '
+                                'style="margin-top:8px;">Rating over time</div>',
+                                unsafe_allow_html=True)
+                            if rat_pts:
+                                xs, ys = zip(*rat_pts)
+                                fig_r = go.Figure(go.Scatter(
+                                    x=xs, y=ys, mode="lines",
+                                    line=dict(color="#AB8743", width=1.6),
+                                    fill="tozeroy",
+                                    fillcolor="rgba(171,135,67,0.10)",
+                                    hovertemplate=(
+                                        "<b>%{x|%d %b %Y}</b><br>"
+                                        "%{y:.2f} ★<extra></extra>"
+                                    )))
+                                fig_r.update_layout(
+                                    plot_bgcolor="#FBF5EA",
+                                    paper_bgcolor="#FBF5EA",
+                                    height=200,
+                                    margin=dict(l=30, r=10, t=10, b=20),
+                                )
+                                fig_r.update_yaxes(
+                                    range=[0, 5],
+                                    gridcolor="rgba(171,135,67,0.18)",
+                                    tickformat=".1f",
+                                    ticksuffix=" ★")
+                                fig_r.update_xaxes(
+                                    gridcolor="rgba(171,135,67,0.10)")
+                                st.plotly_chart(
+                                    fig_r, use_container_width=True,
+                                    config={"displayModeBar": False})
+                            else:
+                                st.caption("No rating history for this ASIN.")
+                        with rc2:
+                            st.markdown(
+                                '<div class="section-hdr" '
+                                'style="margin-top:8px;">'
+                                'Review count growth</div>',
+                                unsafe_allow_html=True)
+                            if rev_pts:
+                                xs, ys = zip(*rev_pts)
+                                fig_v = go.Figure(go.Scatter(
+                                    x=xs, y=ys, mode="lines",
+                                    line=dict(color="#004A2B", width=1.6),
+                                    fill="tozeroy",
+                                    fillcolor="rgba(0,74,43,0.08)",
+                                    hovertemplate=(
+                                        "<b>%{x|%d %b %Y}</b><br>"
+                                        "%{y:,.0f} reviews<extra></extra>"
+                                    )))
+                                fig_v.update_layout(
+                                    plot_bgcolor="#FBF5EA",
+                                    paper_bgcolor="#FBF5EA",
+                                    height=200,
+                                    margin=dict(l=40, r=10, t=10, b=20),
+                                )
+                                fig_v.update_yaxes(
+                                    gridcolor="rgba(171,135,67,0.18)",
+                                    tickformat=",.0f")
+                                fig_v.update_xaxes(
+                                    gridcolor="rgba(171,135,67,0.10)")
+                                st.plotly_chart(
+                                    fig_v, use_container_width=True,
+                                    config={"displayModeBar": False})
+                            else:
+                                st.caption("No review history for this ASIN.")
+
+            # ── ASIN multi-pick chart grid (collapsed by default) ──
+            picks: list = []
+            with st.expander(
+                "📊 Compare multiple ASINs — mini-chart grid", expanded=False):
+                st.markdown(
+                    '<div style="font-size:11.5px;color:#7a6a50;'
+                    'margin-bottom:6px;">Three charts per row · last 2 years '
+                    'of price history.</div>',
+                    unsafe_allow_html=True)
+                options = sorted(asins, key=_sort_key)
+                search_q = st.text_input(
+                    "🔍 Search ASIN or title",
+                    key=f"price_search_{geo}",
+                    placeholder="e.g. B0BJK5GPRD or 'masala chai'",
+                ).strip().lower()
+                if search_q:
+                    options = [
+                        a for a in options
+                        if search_q in a.lower()
+                        or search_q in (data.get(a, {}).get("title") or "").lower()
+                    ]
+                    if not options:
+                        st.info(f"No ASINs matched “{search_q}”.")
+                # Empty default so the chart grid stays empty until the user
+                # explicitly opens this expander and picks ASINs. Avoids
+                # auto-rendering ~6 charts every page load.
+                picks = st.multiselect(
+                    f"Select ASINs to chart ({len(options)} available)",
+                    options=options,
+                    default=[],
+                    format_func=_label_for,
+                    key=f"price_picks_{geo}",
+                    placeholder="Pick one or more ASINs…",
+                ) if options else []
+                if not picks:
+                    st.info(
+                        "Pick one or more ASINs above to populate the "
+                        "chart grid. Use the Deep-dive section above for a "
+                        "single-ASIN granular view."
+                    )
 
             ROW = 3
             for row_start in range(0, len(picks), ROW):
@@ -4741,6 +5031,7 @@ def render_price_tracker():
                         "Product Name": "— not found in Keepa —",
                         "Current Price": None,
                         "% Dev from 7d avg": None,
+                        "Buy Box":      "—",
                         "Rating":       None,
                         "Reviews":      None,
                     })
@@ -4750,6 +5041,10 @@ def render_price_tracker():
                 if last_price is None:
                     last_price = (d.get("last_amazon") or d.get("last_new")
                                   or d.get("last_buybox"))
+                bbp = d.get("buybox_present")
+                bb_label = ("✓ Present"  if bbp is True
+                            else "✗ Missing" if bbp is False
+                            else "—")
                 tbl_rows.append({
                     "ASIN":         asin,
                     "Product Name": (d.get("title") or "")[:90],
@@ -4757,6 +5052,7 @@ def render_price_tracker():
                                        if last_price is not None else None),
                     "% Dev from 7d avg": (float(dev_pct)
                                            if dev_pct is not None else None),
+                    "Buy Box":      bb_label,
                     "Rating":       (float(d.get("rating"))
                                        if d.get("rating") is not None else None),
                     "Reviews":      (int(d.get("reviews_count"))
@@ -4764,17 +5060,32 @@ def render_price_tracker():
                 })
             tbl_df = pd.DataFrame(tbl_rows)
 
-            # Highlight rows that deviate >= 15% — same threshold as anomaly logic
+            # Style: |dev| >= 25% → red background; 15-25% → amber tint;
+            # Buy Box "Missing" → red column highlight.
             _dev_n = pd.to_numeric(tbl_df["% Dev from 7d avg"], errors="coerce")
+            _bb_s  = tbl_df["Buy Box"].astype(str)
             def _style_summary(row):
                 s = [""] * len(row)
                 idx = row.index.tolist()
                 v = _f(_dev_n.iloc[row.name])
-                if v is not None and abs(v) >= 15:
-                    color = "#8b1a1a" if v < 0 else "#1a7a3e"
-                    if "% Dev from 7d avg" in idx:
+                if v is not None and "% Dev from 7d avg" in idx:
+                    av = abs(v)
+                    if av >= 25:
                         s[idx.index("% Dev from 7d avg")] = (
-                            f"color:{color};font-weight:700;")
+                            "background-color:#fde8e8;color:#8b1a1a;"
+                            "font-weight:800;")
+                    elif av >= 15:
+                        s[idx.index("% Dev from 7d avg")] = (
+                            "background-color:#fef3d6;color:#7a5c00;"
+                            "font-weight:700;")
+                bb_val = _bb_s.iloc[row.name]
+                if bb_val == "✗ Missing" and "Buy Box" in idx:
+                    s[idx.index("Buy Box")] = (
+                        "background-color:#fde8e8;color:#8b1a1a;"
+                        "font-weight:800;")
+                elif bb_val == "✓ Present" and "Buy Box" in idx:
+                    s[idx.index("Buy Box")] = (
+                        "color:#1a7a3e;font-weight:600;")
                 return s
 
             currency_sym = next((d["currency"] for d in data.values()
@@ -4793,7 +5104,10 @@ def render_price_tracker():
                         "% Dev from 7d avg",
                         format="%+.1f%%",
                         help="Latest price vs prior-7-day average. "
-                             "Highlighted when |deviation| ≥ 15%."),
+                             "Amber when |dev| ≥ 15%, red when ≥ 25%."),
+                    "Buy Box":       st.column_config.TextColumn(
+                        "Buy Box",
+                        help="Whether the Buy Box was present as of yesterday."),
                     "Rating":        st.column_config.NumberColumn(
                         "Rating", format="%.2f ★"),
                     "Reviews":       st.column_config.NumberColumn(
