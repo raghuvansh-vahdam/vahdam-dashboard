@@ -4577,12 +4577,37 @@ def render_price_tracker():
                 "🔍 Deep-dive on one ASIN — granular price / rating / "
                 "reviews charts", expanded=False):
                 dd_options = sorted(asins, key=_sort_key)
-                dd_pick = st.selectbox(
-                    "Pick an ASIN",
-                    dd_options,
-                    format_func=_label_for,
-                    key=f"price_dd_{geo}",
-                )
+                ddc1, ddc2 = st.columns([3, 2])
+                with ddc1:
+                    dd_pick_sel = st.selectbox(
+                        "Pick an ASIN",
+                        dd_options,
+                        format_func=_label_for,
+                        key=f"price_dd_{geo}",
+                    )
+                with ddc2:
+                    dd_typed = st.text_input(
+                        "…or type / paste an ASIN",
+                        key=f"price_dd_typed_{geo}",
+                        placeholder="e.g. B07RGK5QKZ",
+                        help="Overrides the dropdown when filled. Must be one "
+                             "of this GEO's tracked ASINs (Keepa data is only "
+                             "fetched for the configured list).",
+                    ).strip().upper()
+                # The typed value wins if it matches a tracked ASIN; otherwise
+                # fall back to the dropdown.
+                if dd_typed and dd_typed in data:
+                    dd_pick = dd_typed
+                elif dd_typed and dd_typed not in data:
+                    st.warning(
+                        f"ASIN `{dd_typed}` isn't in the tracked list for "
+                        f"{geo}. Add it to PRICE_TRACKER_ASINS in app.py, "
+                        f"or pick one of the {len(dd_options)} available "
+                        f"ASINs above."
+                    )
+                    dd_pick = dd_pick_sel
+                else:
+                    dd_pick = dd_pick_sel
                 if dd_pick and dd_pick in data:
                     dd = data[dd_pick]
                     cur_p = (dd.get("last_amazon") or dd.get("last_new")
@@ -4832,12 +4857,15 @@ def render_price_tracker():
                 # Empty default so the chart grid stays empty until the user
                 # explicitly opens this expander and picks ASINs. Avoids
                 # auto-rendering ~6 charts every page load.
+                # Key suffixed with "_v2" so stale picks from the previous
+                # version of this widget are ignored — guarantees the grid
+                # starts empty on every fresh page load.
                 picks = st.multiselect(
                     f"Select ASINs to chart ({len(options)} available)",
                     options=options,
                     default=[],
                     format_func=_label_for,
-                    key=f"price_picks_{geo}",
+                    key=f"price_picks_v2_{geo}",
                     placeholder="Pick one or more ASINs…",
                 ) if options else []
                 if not picks:
