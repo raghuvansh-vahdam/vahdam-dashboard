@@ -3987,11 +3987,35 @@ AMAZON_DOMAIN = {
 
 # ASINs to track per GEO. Add more here as the user grows the list.
 _UK_ASINS = [
-    "B0BJL537F1", "B0BJK5GPRD", "B0BJK7NW9F", "B0BB1LXSPN", "B0BJK93HN2",
-    "B0BT7H247Z", "B0BFHKDK88", "B0BJK6L1G2", "B0B2928XNH", "B0C9CJ8L3N",
-    "B0BJK5T1QR", "B0C7N1F4Y1", "B0F3CT8RFY", "B09Y9CYXK5", "B0BT7FB4MC",
-    "B0DC52J7YZ", "B0D5D41L6R", "B09YXT3C1L", "B0B292NNQ1", "B0DFM8Y65X",
-    "B095PLTKFV", "B09YXMVQTV", "B074L4MZRY", "B0DC53P9XX", "B0DC52TQSJ",
+    "B0BJL537F1","B0BJK5GPRD","B0BJK7NW9F","B07K1WBH4K","B0BT7H247Z",
+    "B0BB1LXSPN","B0BJK93HN2","B0C9CJ8L3N","B0BFHKDK88","B07MNSWD6D",
+    "B0B2928XNH","B0BJK5T1QR","B0BJK6L1G2","B00R65SD4C","B0D5D41L6R",
+    "B0DC53P9XX","B0DC52J7YZ","B0C7N1F4Y1","B0B526SLMP","B07MD4LB49",
+    "B0F3CT8RFY","B0BT7FB4MC","B0DFM8Y65X","B074L4MZRY","B0B521XZ3Q",
+    "B0DC52TQSJ","B0B52451FP","B09YXT3C1L","B0FS7JTXF3","B00Q6FM6GY",
+    "B07RDK9WTN","B0FP5QDGFV","B0FSDLB9N4","B09YXMVQTV","B0DC52CKC7",
+    "B0B292NNQ1","B09Y9CYXK5","B00VFYPIDO","B08G8SDB6D","B07RGK4H2B",
+    "B016IL75S4","B0BWXVK1RQ","B00XL1E6QO","B00VFYPK82","B0757VW95S",
+    "B07P9SYPJX","B0B525CFT3","B0B525ZTMP","B093663R1Q","B01K78VZE4",
+    "B019FLGKZI","B07RHN9TDF","B00VG5QV2O","B00VFYPG1S","B0186XTAUI",
+    "B0B52559VJ","B0B522F8HD","B017P6DS5A","B00Q6UN3ZM","B01JAK7UAS",
+    "B0BJK8M8J1","B00VIDZ72Y","B01M0DB0Z3","B00MN668VY","B0B524WNZN",
+    "B07K1XSGBK","B08G2J583H","B00VLOCBHE","B096QC2CC7","B07M61PL9K",
+    "B016KQXYZA","B0BWXRSJR4","B09Y9D4WJQ","B0B522VXRH","B0757QHYVK",
+    "B00ZUTOATI","B01M01OIYT","B075XRJB6S","B0F5W48J88","B07RJRJC7V",
+    "B00VIDX8V6","B016IJ0YY8","B08G2J4MVZ","B07583WVRF","B00M56WWX0",
+    "B075XR382W","B0BWXT1NXX","B07MNSZ61S","B07R6MHNMB","B07RLM88NM",
+    "B013P9H1AY","B07RHN6RRX","B097HLWC93","B0B526FTG4","B00VIDXHTO",
+    "B0D54CSMKV","B00VIDYKKE","B07RHN9RVP","B00M59AHAC","B07RKWCXMB",
+    "B01M7RQOE5","B0BJK84KZQ","B0BWXSFDBZ","B01DZOZJNA","B0757M47FW",
+    "B00VK0LF0S","B01NA9WRZF","B0757NZHK7","B07RBN3ZMJ","B013P6ZFHI",
+    "B01J3F13O4","B08LVZV78R","B08LVX5P5G","B00VIDY1GC","B00VBUY3SS",
+    "B08G2LFLCG","B015J3FXOU","B01LZZZVKD","B08LVZ44TS","B0C8ZDBRGG",
+    "B0DBL9384Q","B07ZB61GXF","B08FXWK7LT","B09DW76XD4","B0F5VYH6VX",
+    "B0D676STMS","B0BYK1F7Q8","B0FW4K5MFF","B0FW4RJ282","B0DHCJ1HHR",
+    "B0DHCK1X3X",
+    # Retained from previous list (not in the new dump):
+    "B095PLTKFV",
 ]
 
 # Shared list for the four EU marketplaces (DE, FR, IT, ES).
@@ -4223,15 +4247,21 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
         csv_data = prod.get("csv") or []
         # CSV index reference:
         # 0=AMAZON, 1=NEW, 2=USED, 3=SALES (rank), 7=LIST_PRICE,
+        # 16=RATING (×10), 17=COUNT_REVIEWS,
         # 18=BUY_BOX_SHIPPING (most reliable), 32=BUY_BOX (price-only)
         amazon_arr  = csv_data[0]  if len(csv_data) > 0  else None
         new_arr     = csv_data[1]  if len(csv_data) > 1  else None
+        rating_arr  = csv_data[16] if len(csv_data) > 16 else None
+        reviews_arr = csv_data[17] if len(csv_data) > 17 else None
         buybox_arr  = csv_data[18] if len(csv_data) > 18 else None
         buybox2_arr = csv_data[32] if len(csv_data) > 32 else None
 
-        amazon_pts = _keepa_decode_csv(amazon_arr)
-        new_pts    = _keepa_decode_csv(new_arr)
-        buybox_pts = _keepa_decode_csv(buybox_arr) or _keepa_decode_csv(buybox2_arr)
+        amazon_pts  = _keepa_decode_csv(amazon_arr)
+        new_pts     = _keepa_decode_csv(new_arr)
+        # Rating is stored as integer ×10 (e.g. 45 = 4.5★). Reviews is a count.
+        rating_pts  = _keepa_decode_csv(rating_arr,  divide_by=10)
+        reviews_pts = _keepa_decode_csv(reviews_arr, divide_by=1)
+        buybox_pts  = _keepa_decode_csv(buybox_arr) or _keepa_decode_csv(buybox2_arr)
 
         def _last(pts):
             return pts[-1][1] if pts else None
@@ -4265,6 +4295,8 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
             "last_buybox":      _last(buybox_pts),
             "buybox_present":   buybox_present,
             "buybox_yesterday": buybox_yesterday,
+            "rating":           _last(rating_pts),
+            "reviews_count":    int(_last(reviews_pts)) if _last(reviews_pts) else None,
             "stats":            prod.get("stats", {}),
         }
     return out
@@ -4673,6 +4705,111 @@ def render_price_tracker():
                                             config={"displayModeBar": False})
                         else:
                             st.caption("No history available (last 2 years)")
+
+            # ── End-of-tab: per-ASIN summary table (all ASINs, downloadable) ──
+            st.markdown('<div class="section-hdr" style="margin-top:22px;">'
+                        f'All {geo} ASINs &mdash; summary table</div>',
+                        unsafe_allow_html=True)
+            st.caption(
+                "One row per ASIN. **% Dev from 7d avg** compares the latest "
+                "price to the average of the prior 7 days. Use the ⬇ button "
+                "in the toolbar (or the Download CSV button below) to export."
+            )
+
+            def _dev_from_7d(pts):
+                """Return (last_price, deviation_pct) using a 7-day baseline.
+                Returns (None, None) if there isn't enough history."""
+                if not pts or len(pts) < 2:
+                    return (None, None)
+                import datetime as _d
+                last_dt, last_price = pts[-1]
+                window_start = last_dt - _d.timedelta(days=7)
+                prior = [p for d, p in pts[:-1] if d >= window_start]
+                if not prior:
+                    return (last_price, None)
+                baseline = sum(prior) / len(prior)
+                if baseline == 0:
+                    return (last_price, None)
+                return (last_price, (last_price - baseline) / baseline * 100)
+
+            tbl_rows = []
+            for asin in asins:
+                d = data.get(asin)
+                if not d:
+                    tbl_rows.append({
+                        "ASIN":         asin,
+                        "Product Name": "— not found in Keepa —",
+                        "Current Price": None,
+                        "% Dev from 7d avg": None,
+                        "Rating":       None,
+                        "Reviews":      None,
+                    })
+                    continue
+                price_pts = d["amazon_pts"] or d["new_pts"]
+                last_price, dev_pct = _dev_from_7d(price_pts)
+                if last_price is None:
+                    last_price = (d.get("last_amazon") or d.get("last_new")
+                                  or d.get("last_buybox"))
+                tbl_rows.append({
+                    "ASIN":         asin,
+                    "Product Name": (d.get("title") or "")[:90],
+                    "Current Price": (float(last_price)
+                                       if last_price is not None else None),
+                    "% Dev from 7d avg": (float(dev_pct)
+                                           if dev_pct is not None else None),
+                    "Rating":       (float(d.get("rating"))
+                                       if d.get("rating") is not None else None),
+                    "Reviews":      (int(d.get("reviews_count"))
+                                       if d.get("reviews_count") is not None else None),
+                })
+            tbl_df = pd.DataFrame(tbl_rows)
+
+            # Highlight rows that deviate >= 15% — same threshold as anomaly logic
+            _dev_n = pd.to_numeric(tbl_df["% Dev from 7d avg"], errors="coerce")
+            def _style_summary(row):
+                s = [""] * len(row)
+                idx = row.index.tolist()
+                v = _f(_dev_n.iloc[row.name])
+                if v is not None and abs(v) >= 15:
+                    color = "#8b1a1a" if v < 0 else "#1a7a3e"
+                    if "% Dev from 7d avg" in idx:
+                        s[idx.index("% Dev from 7d avg")] = (
+                            f"color:{color};font-weight:700;")
+                return s
+
+            currency_sym = next((d["currency"] for d in data.values()
+                                  if isinstance(d, dict) and d.get("currency")), "$")
+            st.dataframe(
+                tbl_df.style.apply(_style_summary, axis=1).hide(axis="index"),
+                use_container_width=True, height=420, hide_index=True,
+                column_config={
+                    "ASIN":          st.column_config.TextColumn("ASIN", width="small"),
+                    "Product Name":  st.column_config.TextColumn(
+                        "Product Name", width="large"),
+                    "Current Price": st.column_config.NumberColumn(
+                        "Current Price",
+                        format=f"{currency_sym}%.2f"),
+                    "% Dev from 7d avg": st.column_config.NumberColumn(
+                        "% Dev from 7d avg",
+                        format="%+.1f%%",
+                        help="Latest price vs prior-7-day average. "
+                             "Highlighted when |deviation| ≥ 15%."),
+                    "Rating":        st.column_config.NumberColumn(
+                        "Rating", format="%.2f ★"),
+                    "Reviews":       st.column_config.NumberColumn(
+                        "Reviews", format="%,d"),
+                },
+            )
+            # Dedicated CSV download (in addition to the dataframe toolbar's ⬇)
+            csv_bytes = tbl_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"⬇ Download {geo} CSV",
+                data=csv_bytes,
+                file_name=f"price_tracker_{geo.lower()}_{date.today().isoformat()}.csv",
+                mime="text/csv",
+                key=f"price_dl_{geo}",
+                use_container_width=False,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
