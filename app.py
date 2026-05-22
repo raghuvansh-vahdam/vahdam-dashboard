@@ -4204,9 +4204,14 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
         import urllib.request, urllib.error, urllib.parse, json, gzip, io
         api_key = st.secrets["keepa"]["api_key"]
         asins_csv = ",".join(asins_tuple)
+        # update=24 → if Keepa's server-side cache is older than 24 hours,
+        # they re-scrape from Amazon. Without this, low-traffic ASINs can
+        # be served stale for weeks. Keepa charges +1 token per ASIN that
+        # actually needs re-scraping; ASINs already-fresh on their side
+        # cost nothing extra.
         params = urllib.parse.urlencode({
             "key": api_key, "domain": domain_code,
-            "asin": asins_csv, "stats": 90, "history": 1,
+            "asin": asins_csv, "stats": 90, "history": 1, "update": 24,
         })
         url = f"https://api.keepa.com/product?{params}"
         req = urllib.request.Request(url, headers={
