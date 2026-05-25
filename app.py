@@ -1652,13 +1652,21 @@ def get_pnl_geo(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_sku_lookup(term, d1, d2, sfx):
+    """Search the P&L table by ASIN or product-name fragment.
+
+    Groups by (ASIN, GEO, CHANNEL) so the same product sold in multiple
+    marketplaces or via multiple channels appears on its own row. Without
+    the (GEO, CHANNEL) keys here the lookup silently collapsed every
+    marketplace into a single row.
+    """
     t = term.strip().replace("'", "''")
     return run_query(f"""
         SELECT
             SPLIT_PART(ASIN,' ',1)                                                AS ASIN,
             COALESCE(MAX(NULLIF(COMMON_SKU_DESCRIPTION,'')), MAX(ASIN))           AS PRODUCT,
             MAX(BRAND)                                                             AS BRAND,
-            MAX(GEO)                                                               AS GEO,
+            GEO                                                                    AS GEO,
+            CHANNEL                                                                AS CHANNEL,
             MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'—'))                            AS SUB_CAT,
             ROUND(SUM(SALES_ACTUAL_{sfx}),0)                                      AS ACT_REV,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)                                      AS BUD_REV,
@@ -1668,9 +1676,11 @@ def get_sku_lookup(term, d1, d2, sfx):
         WHERE DAY BETWEEN '{d1}' AND '{d2}' AND {GEO_EXCL}
           AND (UPPER(SPLIT_PART(ASIN,' ',1)) LIKE UPPER('%{t}%')
                OR UPPER(COALESCE(COMMON_SKU_DESCRIPTION,'')) LIKE UPPER('%{t}%'))
-        GROUP BY SPLIT_PART(ASIN,' ',1)
-        ORDER BY SUM(SALES_ACTUAL_{sfx}) DESC NULLS LAST
-        LIMIT 50
+        GROUP BY SPLIT_PART(ASIN,' ',1), GEO, CHANNEL
+        ORDER BY GEO,
+                 CASE CHANNEL WHEN 'TOTAL' THEN 99 ELSE 1 END,
+                 SUM(SALES_ACTUAL_{sfx}) DESC NULLS LAST
+        LIMIT 500
     """)
 
 def forecast_card(sales_act, sales_bud, days_elapsed_v, total_days_v):
@@ -5557,9 +5567,17 @@ if sku_search and sku_search.strip():
             s["Bud Rev"]  = sk["BUD_REV"].apply(fmt_lakhs)
             s["CM2 Abs"]  = sk["CM2_ABS"].apply(fmt_lakhs)
             s["Rev %"]    = sk["REV_PCT"].apply(fmt_pct)
+            # Pretty-print channel name (matches the Overview table)
+            s["Channel"]  = sk["CHANNEL"].astype(str).str.replace(
+                "_", " ", regex=False)
             _rv = pd.to_numeric(sk["REV_PCT"], errors="coerce").reset_index(drop=True)
-            show_sk = s[["ASIN","PRODUCT","BRAND","GEO","SUB_CAT",
+            show_sk = s[["ASIN","PRODUCT","BRAND","GEO","Channel","SUB_CAT",
                           "Act Rev","Bud Rev","Rev %","CM2 Abs"]].reset_index(drop=True)
+            st.caption(
+                f"{len(show_sk):,} matching rows — one per (ASIN × GEO × Channel) "
+                f"combination. The same product can show up multiple times when "
+                f"it sells across marketplaces or channels."
+            )
 
             def style_sk(row):
                 sx  = [""] * len(row)
@@ -5569,7 +5587,7 @@ if sku_search and sku_search.strip():
                 return sx
 
             st.dataframe(show_sk.style.apply(style_sk, axis=1).hide(axis="index"),
-                         use_container_width=True)
+                         use_container_width=True, hide_index=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 5b — DBR (Daily Business Report)
