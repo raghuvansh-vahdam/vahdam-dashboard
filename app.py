@@ -1846,8 +1846,10 @@ _PNL_LINES = [
     ("= CM2",               "total",    "CM2"),
 ]
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def discover_pnl_cols():
+    """Uppercase set of every column in the P&L table. Cached 5 min so
+    schema changes (columns dropped or renamed) propagate quickly."""
     df = run_query("""
         SELECT UPPER(COLUMN_NAME) AS COL
         FROM information_schema.columns
@@ -1867,15 +1869,64 @@ def _pnl_metric_sql(prefixes, sfx, with_alias=True):
             parts.append(f"{expr} AS {pfx}_{short}" if with_alias else expr)
     return ", ".join(parts)
 
+
+def _run_pnl_query(sql_template, retry_on_missing_col=True):
+    """Execute a P&L SQL string. If Snowflake responds with "invalid
+    identifier <COL>", drop that column from the cached column set and
+    rebuild via the caller's template. Used to make P&L queries
+    resilient to schema drift between the cached discover_pnl_cols
+    snapshot and the live table.
+
+    sql_template must contain the literal string already (not a callable).
+    """
+    try:
+        return run_query(sql_template)
+    except Exception as e:
+        msg = str(e)
+        # Snowflake's invalid-identifier message looks like:
+        # "SQL compilation error: error line X at position Y
+        #  invalid identifier 'STORAGE_BUDGET_INR'"
+        import re
+        m = re.search(r"invalid identifier ['\"]([A-Z0-9_]+)['\"]", msg)
+        if m and retry_on_missing_col:
+            bad = m.group(1)
+            # Clear the discover_pnl_cols cache so the next build
+            # re-fetches the real column list. Streamlit caches by
+            # function — we have to clear the function itself.
+            try:
+                discover_pnl_cols.clear()
+            except Exception:
+                pass
+            st.warning(
+                f"P&L column `{bad}` is missing from Snowflake; the "
+                f"dashboard refreshed its column-list cache. Re-run the "
+                f"query if the value should be there.")
+            # Re-raise so the caller can rebuild the SQL with the
+            # refreshed column set. Caller handles retry.
+            raise
+        raise
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_agg(where, sfx):
-    sel = _pnl_metric_sql([p for _, _, p in _PNL_LINES], sfx)
-    return run_query(f"SELECT {sel} FROM {TABLE} WHERE {where}")
+    def _build():
+        sel = _pnl_metric_sql([p for _, _, p in _PNL_LINES], sfx)
+        return f"SELECT {sel} FROM {TABLE} WHERE {where}"
+    try:
+        return _run_pnl_query(_build())
+    except Exception:
+        # Cache was stale → discover_pnl_cols just got cleared in
+        # _run_pnl_query. Rebuild and try once more.
+        return run_query(_build())
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_daily(where, sfx):
-    sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND"], sfx)
-    return run_query(f"SELECT DAY, {sel} FROM {TABLE} WHERE {where} GROUP BY DAY ORDER BY DAY")
+    def _build():
+        sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND"], sfx)
+        return f"SELECT DAY, {sel} FROM {TABLE} WHERE {where} GROUP BY DAY ORDER BY DAY"
+    try:
+        return _run_pnl_query(_build())
+    except Exception:
+        return run_query(_build())
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_category(where, sfx):
