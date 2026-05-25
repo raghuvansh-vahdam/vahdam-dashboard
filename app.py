@@ -5729,22 +5729,86 @@ def _is_new_cat(c):
     return ("coffee" in cl) or ("supplement" in cl)
 
 
+# Shared row-style for DBR mini-tables (peach/green/pink per Type)
+def _dbr_style_row(row):
+    rt = row.get("Type", "")
+    if   rt == "Budget":        bg, lbl = "#fde9c8", "#7a5c00"
+    elif rt == "Actual":        bg, lbl = "#d4ecd4", "#004A2B"
+    elif rt == "% Achievement": bg, lbl = "#f9d6d6", "#8b1a1a"
+    else:                       bg, lbl = "#ffffff", "#171717"
+    styles = [f"background-color:{bg};color:#171717;"] * len(row)
+    idx    = row.index.tolist()
+    for col_name in ("Bucket", "Type"):
+        if col_name in idx:
+            styles[idx.index(col_name)] = (
+                f"background-color:{bg};color:{lbl};font-weight:700;"
+            )
+    return styles
+
+
+def _render_dbr_mini_table(blocks, key_suffix=""):
+    """`blocks` is a list of either (label, totals_series) or
+    (label, totals_series, actual_only_bool). Renders one styled
+    dataframe with the same Bucket/Type/metric columns DBR uses."""
+    rows = []
+    for entry in blocks:
+        actual_only = False
+        if len(entry) == 3:
+            label, totals, actual_only = entry
+        else:
+            label, totals = entry
+        rows.extend(
+            [{**r, "Bucket": r.pop("GEO Bucket")}
+             for r in _build_dbr_block(label, totals,
+                                        actual_only=actual_only)]
+        )
+    if not rows:
+        return
+    col_order = ["Bucket", "Type"] + [c[0] for c in _DBR_COLS]
+    df_disp = pd.DataFrame(rows, columns=col_order)
+    n_rows  = len(df_disp)
+    st.dataframe(
+        df_disp.style.apply(_dbr_style_row, axis=1).hide(axis="index"),
+        use_container_width=True,
+        height=min(360, 38 + n_rows * 36),
+        hide_index=True,
+    )
+
+
+def _dbr_expander_title(label, totals, actual_only=False):
+    """Compose an expander label that previews the headline numbers, so
+    the user knows what's inside before clicking."""
+    netrev_a = _f(totals.get("NETREV_ACT")) or 0
+    netrev_b = _f(totals.get("NETREV_BUD")) or 0
+    units_a  = _f(totals.get("UNITS_ACT"))  or 0
+    bits = [f"📦 {fmt_units(units_a)} units"]
+    if actual_only:
+        bits.append(f"💰 {fmt_lakhs(netrev_a)} (actual only)")
+    else:
+        pct = (netrev_a / netrev_b * 100) if netrev_b else None
+        if netrev_b:
+            bits.append(f"💰 {fmt_lakhs(netrev_a)} / {fmt_lakhs(netrev_b)} bud")
+        else:
+            bits.append(f"💰 {fmt_lakhs(netrev_a)}")
+        if pct is not None:
+            badge = "🟢" if pct >= 100 else ("🟡" if pct >= 90 else "🔴")
+            bits.append(f"{badge} {pct:.0f}% vs Bud")
+    return f"{label}  ·  " + "  ·  ".join(bits)
+
+
 def render_dbr():
-    """Daily Business Report — Budget / Actual / % Achievement matrix.
+    """Daily Business Report — hierarchical drill-down.
 
-    One filter at the top — Business Type — defines the scope of the
-    per-GEO breakdown:
-      * Both  : per-GEO covers T&B + Coffee + Supplements (everything)
-      * CORE  : per-GEO covers Teas & Botanicals only
-      * NEW   : per-GEO covers Coffee + Supplements only
+    Layout:
+      * Always-visible top row: Amazon Global Business (Total).
+      * Expandable Amazon Global Business (Core) — inside: Overall + VT + HP.
+      * Expandable Amazon Global Business (New)  — inside: Overall + VT + HP.
+      * Then one expander per GEO. Inside each GEO: country Overall, plus
+        a Core breakdown (Overall/VT/HP) and a New breakdown (Overall/VT/HP)
+        if data is available for that business type in the country.
 
-    Five global aggregate blocks are always shown above the per-GEO
-    breakdown:
-      * (Total) — every GEO, every category, every brand
-      * (Core)  — Teas & Botanicals
-      * (New)   — Coffee + Supplements (Actual only — no budget yet)
-      * VT      — Vahdam brand, every category
-      * HP      — Handpick + Spice Train, every category
+    Business Type radio at the top scopes which breakdowns appear inside
+    each expander (Both / CORE / NEW).
     """
     st.markdown('<div class="page-title">DBR &mdash; Daily Business Report</div>',
                  unsafe_allow_html=True)
@@ -5763,8 +5827,9 @@ def render_dbr():
         "Business Type",
         ["Both", "CORE (T&B)", "NEW (Coffee + Supplements)"],
         index=0, horizontal=True, key="dbr_bt",
-        help="Scopes the per-GEO breakdown. Global blocks above are "
-             "always shown.")
+        help="Filters which breakdowns appear inside the country expanders. "
+             "The Global rows above always reflect the full Total, Core and "
+             "New scopes.")
 
     # ── Fetch once, slice in pandas ──
     with st.spinner("Loading DBR…"):
@@ -5779,100 +5844,129 @@ def render_dbr():
         data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
     data["CATEGORY"] = data["CATEGORY"].fillna("").astype(str).str.upper().str.strip()
 
-    # ── Hard-coded business-type masks ──
+    # ── Masks ──
     core_mask = data["CATEGORY"].apply(_is_core_cat)
     new_mask  = data["CATEGORY"].apply(_is_new_cat)
 
-    if bt == "CORE (T&B)":
-        per_geo_mask = core_mask
-    elif bt == "NEW (Coffee + Supplements)":
-        per_geo_mask = new_mask
-    else:  # Both
-        per_geo_mask = core_mask | new_mask
+    show_core = bt in ("Both", "CORE (T&B)")
+    show_new  = bt in ("Both", "NEW (Coffee + Supplements)")
 
     def _sum(mask) -> pd.Series:
         sub = data[mask]
         return (sub[numeric_cols].sum() if not sub.empty
                 else pd.Series({c: 0 for c in numeric_cols}))
 
-    rows = []
-    # ── Five global blocks — always shown ──
-    rows.extend(_build_dbr_block("Amazon Global Business (Total)",
-                                  _sum(pd.Series([True] * len(data)))))
-    rows.extend(_build_dbr_block("Amazon Global Business (Core)",
-                                  _sum(core_mask)))
-    rows.extend(_build_dbr_block("Amazon Global Business (New)",
-                                  _sum(new_mask), actual_only=True))
-    rows.extend(_build_dbr_block("Amazon Global Business VT",
-                                  _sum(data["BRAND_BUCKET"] == "VT")))
-    rows.extend(_build_dbr_block("Amazon Global Business HP",
-                                  _sum(data["BRAND_BUCKET"] == "HP")))
+    # ── Top-level Total (always visible) ──
+    st.markdown(
+        '<div class="section-hdr" style="margin-top:14px;">'
+        'Amazon Global Business</div>', unsafe_allow_html=True)
+    total_s = _sum(pd.Series([True] * len(data)))
+    _render_dbr_mini_table([("Amazon Global Business (Total)", total_s)])
 
-    # ── Per-GEO blocks scoped by Business Type ──
-    scoped = data[per_geo_mask]
-    geos_in_scope = scoped["GEO"].unique().tolist()
+    # ── Global Core (expandable) ──
+    if show_core:
+        core_s    = _sum(core_mask)
+        core_vt_s = _sum(core_mask & (data["BRAND_BUCKET"] == "VT"))
+        core_hp_s = _sum(core_mask & (data["BRAND_BUCKET"] == "HP"))
+        with st.expander(
+            _dbr_expander_title("Amazon Global Business (Core)", core_s),
+            expanded=False):
+            _render_dbr_mini_table([
+                ("Overall (Core)", core_s),
+                ("VT (Core)",      core_vt_s),
+                ("HP (Core)",      core_hp_s),
+            ])
+
+    # ── Global New (expandable, actual-only) ──
+    if show_new:
+        new_s    = _sum(new_mask)
+        new_vt_s = _sum(new_mask & (data["BRAND_BUCKET"] == "VT"))
+        new_hp_s = _sum(new_mask & (data["BRAND_BUCKET"] == "HP"))
+        with st.expander(
+            _dbr_expander_title("Amazon Global Business (New)",
+                                 new_s, actual_only=True),
+            expanded=False):
+            _render_dbr_mini_table([
+                ("Overall (New)", new_s,    True),
+                ("VT (New)",      new_vt_s, True),
+                ("HP (New)",      new_hp_s, True),
+            ])
+
+    # ── Per-country drill-down ──
+    if show_core and show_new:
+        per_geo_mask = core_mask | new_mask
+    elif show_core:
+        per_geo_mask = core_mask
+    else:
+        per_geo_mask = new_mask
+    geos_in_scope = data[per_geo_mask]["GEO"].unique().tolist()
     geo_order = [g for g in GEO_ORDER if g in geos_in_scope]
     geo_order += [g for g in geos_in_scope if g not in geo_order]
+
+    if geo_order:
+        st.markdown(
+            '<div class="section-hdr" style="margin-top:18px;">'
+            'Country breakdown — click any country to drill into '
+            'CORE / NEW × VT / HP</div>', unsafe_allow_html=True)
+
     for geo in geo_order:
-        sub = scoped[scoped["GEO"] == geo]
-        if sub.empty: continue
-        overall = sub[numeric_cols].sum()
-        vt = (sub[sub["BRAND_BUCKET"] == "VT"][numeric_cols].sum()
-              if (sub["BRAND_BUCKET"] == "VT").any()
-              else pd.Series({c: 0 for c in numeric_cols}))
-        hp = (sub[sub["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
-              if (sub["BRAND_BUCKET"] == "HP").any()
-              else pd.Series({c: 0 for c in numeric_cols}))
-        rows.extend(_build_dbr_block(f"{geo} Overall", overall))
-        rows.extend(_build_dbr_block(f"{geo} VT", vt))
-        rows.extend(_build_dbr_block(f"{geo} HP", hp))
+        sub_all = data[per_geo_mask & (data["GEO"] == geo)]
+        if sub_all.empty:
+            continue
+        overall_s = sub_all[numeric_cols].sum()
+        with st.expander(
+            _dbr_expander_title(f"{geo} Overall", overall_s),
+            expanded=False):
+            blocks = [(f"{geo} Overall", overall_s)]
 
-    if not rows:
-        st.info("📭 No rows produced.")
-        return
+            # Core breakdown
+            if show_core:
+                geo_core = data[core_mask & (data["GEO"] == geo)]
+                if not geo_core.empty:
+                    geo_core_s    = geo_core[numeric_cols].sum()
+                    geo_core_vt_s = (
+                        geo_core[geo_core["BRAND_BUCKET"] == "VT"][numeric_cols].sum()
+                        if (geo_core["BRAND_BUCKET"] == "VT").any()
+                        else pd.Series({c: 0 for c in numeric_cols}))
+                    geo_core_hp_s = (
+                        geo_core[geo_core["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
+                        if (geo_core["BRAND_BUCKET"] == "HP").any()
+                        else pd.Series({c: 0 for c in numeric_cols}))
+                    blocks.extend([
+                        (f"{geo} Overall (Core)", geo_core_s),
+                        (f"{geo} VT (Core)",      geo_core_vt_s),
+                        (f"{geo} HP (Core)",      geo_core_hp_s),
+                    ])
 
-    # Column order: GEO Bucket, Type, then every metric col in _DBR_COLS order
-    col_order = ["GEO Bucket", "Type"] + [c[0] for c in _DBR_COLS]
-    df_disp = pd.DataFrame(rows, columns=col_order)
+            # New breakdown
+            if show_new:
+                geo_new = data[new_mask & (data["GEO"] == geo)]
+                if not geo_new.empty:
+                    geo_new_s    = geo_new[numeric_cols].sum()
+                    geo_new_vt_s = (
+                        geo_new[geo_new["BRAND_BUCKET"] == "VT"][numeric_cols].sum()
+                        if (geo_new["BRAND_BUCKET"] == "VT").any()
+                        else pd.Series({c: 0 for c in numeric_cols}))
+                    geo_new_hp_s = (
+                        geo_new[geo_new["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
+                        if (geo_new["BRAND_BUCKET"] == "HP").any()
+                        else pd.Series({c: 0 for c in numeric_cols}))
+                    blocks.extend([
+                        (f"{geo} Overall (New)", geo_new_s,    True),
+                        (f"{geo} VT (New)",      geo_new_vt_s, True),
+                        (f"{geo} HP (New)",      geo_new_hp_s, True),
+                    ])
 
-    # Stripe + row-type colouring. Each ROW gets a background based on Type,
-    # and the leftmost columns (GEO Bucket / Type) get a slightly stronger
-    # tint so they read as row labels.
-    def _style_dbr(row):
-        rt = row.get("Type", "")
-        if   rt == "Budget":        bg, lbl = "#fde9c8", "#7a5c00"
-        elif rt == "Actual":        bg, lbl = "#d4ecd4", "#004A2B"
-        elif rt == "% Achievement": bg, lbl = "#f9d6d6", "#8b1a1a"
-        else:                       bg, lbl = "#ffffff", "#171717"
-        styles = [f"background-color:{bg};color:#171717;"] * len(row)
-        idx    = row.index.tolist()
-        # Stronger left-side accent on the label cells
-        for col_name in ("GEO Bucket", "Type"):
-            if col_name in idx:
-                styles[idx.index(col_name)] = (
-                    f"background-color:{bg};color:{lbl};font-weight:700;"
-                )
-        return styles
-
-    # The big horizontal table is wider than the screen — let st.dataframe
-    # scroll. height tuned to fit one normal viewport. hide_index=True
-    # suppresses Streamlit's row-number column on the left.
-    n_rows = len(df_disp)
-    table_height = min(800, 38 + n_rows * 36)
-    st.dataframe(
-        df_disp.style.apply(_style_dbr, axis=1).hide(axis="index"),
-        use_container_width=True, height=table_height,
-        hide_index=True,
-    )
+            _render_dbr_mini_table(blocks, key_suffix=geo)
 
     # ── Compact legend ──
     st.caption(
         "Rows: **Budget** (peach), **Actual** (green), "
         "**% Achievement** (pink, Actual ÷ Budget). "
-        "Per-GEO scope follows the Business Type filter above. "
-        "CM1% / ACoS% / CM2% Budget and Actual cells are expressed as a "
-        "percent of Net Revenue; their % Achievement column repeats the "
-        "absolute ratio for that line."
+        "Each country expander shows that GEO's own Overall first, then "
+        "Core (VT/HP) and New (VT/HP) breakdowns when data is available. "
+        "CM1% / ACoS% / CM2% are expressed as a percent of Net Revenue; "
+        "the % Achievement column repeats the absolute ratio."
     )
 
 
