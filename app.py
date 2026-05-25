@@ -1558,30 +1558,82 @@ def get_asin_data(where, geo, sub_cat, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
-    """One row per ASIN in the given GEO with everything the CR Tracker
-    table needs:
+    """One row per ASIN in the given GEO with:
       * Identity         : ASIN, Product Name, Brand, Category
       * Velocity windows : Yesterday units, 7d-avg, 14d-avg, 30d-avg
-                           (always last-30-days, independent of page range)
-      * Inventory        : FBA Inv, ADW Inv, Total Inv (USA = FBA+ADW;
-                           others = FBA), Cover Days
-      * Period totals    : Bud/Act Units + Lag(U),
+      * Inventory        : FBA, ADW (USA), Total, Cover Days
+      * Current period   : Bud/Act Sessions, CR%
+                           Bud/Act Units + Lag(U), ASP Bud/Act
                            Bud/Act Revenue + Lag(R)
-      * Margin %         : Bud/Act CM1%, Bud/Act ACoS%, Bud/Act CM2%
-
-    P&L and inventory are aggregated separately and joined post-grouping
-    so multi-row campaign data never multiplies the budget figures.
+                           Bud/Act CM1%, ACoS%, CM2%
+      * Previous month   : Sessions, CR%, Units, ACoS%  (full calendar month
+                           anchored to today)
+      * Previous-1 month : Sessions, CR%, Units, ACoS%
     """
     today_ = date.today()
     d_30 = today_ - timedelta(days=29)
     d_14 = today_ - timedelta(days=13)
     d_7  = today_ - timedelta(days=6)
     d_y  = today_ - timedelta(days=1)
+    # Previous full calendar month and the one before it
+    prev_m_end   = today_.replace(day=1) - timedelta(days=1)
+    prev_m_start = prev_m_end.replace(day=1)
+    prev_m1_end   = prev_m_start - timedelta(days=1)
+    prev_m1_start = prev_m1_end.replace(day=1)
+
     is_usa = (geo or "").upper() == "USA"
     total_inv_expr = (
         "(COALESCE(i.FBA_INV,0) + COALESCE(i.ADW_INV,0))" if is_usa
         else "COALESCE(i.FBA_INV,0)"
     )
+
+    # Sessions column probing — VAHDAM_AMAZON_SALES_MARKETING may store
+    # sessions under one of several names depending on source export.
+    sess_col = _sales_mkt_col(
+        "SESSIONS", "SESSIONS_TOTAL", "BROWSER_SESSIONS",
+        "TOTAL_SESSIONS", "SESSIONS_B2C", "ORDERED_SESSIONS",
+    )
+    if sess_col:
+        sess_ctes = f"""
+        ,sess_cur AS (
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   COALESCE(SUM({sess_col}), 0) AS SESS
+            FROM {SALES_MKT}
+            WHERE DAY BETWEEN '{d_from_}' AND '{d_to_}'
+              AND GEO = '{geo}' AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        sess_pm AS (
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   COALESCE(SUM({sess_col}), 0) AS SESS
+            FROM {SALES_MKT}
+            WHERE DAY BETWEEN '{prev_m_start}' AND '{prev_m_end}'
+              AND GEO = '{geo}' AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        sess_pm1 AS (
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   COALESCE(SUM({sess_col}), 0) AS SESS
+            FROM {SALES_MKT}
+            WHERE DAY BETWEEN '{prev_m1_start}' AND '{prev_m1_end}'
+              AND GEO = '{geo}' AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        )
+        """
+        sess_joins = (
+            "LEFT JOIN sess_cur sc  ON p.ASIN_KEY = sc.ASIN_KEY\n"
+            "        LEFT JOIN sess_pm  spm ON p.ASIN_KEY = spm.ASIN_KEY\n"
+            "        LEFT JOIN sess_pm1 spm1 ON p.ASIN_KEY = spm1.ASIN_KEY"
+        )
+        sess_cur_n_expr = "COALESCE(sc.SESS, 0)"
+        sess_pm_expr    = "COALESCE(spm.SESS, 0)"
+        sess_pm1_expr   = "COALESCE(spm1.SESS, 0)"
+    else:
+        sess_ctes  = ""
+        sess_joins = ""
+        sess_cur_n_expr = "CAST(NULL AS NUMBER)"
+        sess_pm_expr    = "CAST(NULL AS NUMBER)"
+        sess_pm1_expr   = "CAST(NULL AS NUMBER)"
 
     return run_query(f"""
         WITH pnl AS (
@@ -1633,7 +1685,32 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
               AND UPPER(ASIN) NOT IN ('ASIN', '')
               AND DATE <> 'Date'
             GROUP BY UPPER(SPLIT_PART(ASIN, ' ', 1))
+        ),
+        pm AS (
+            -- Previous full calendar month
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   SUM(QTY_ACTUAL)                AS UNITS,
+                   SUM(SALES_ACTUAL_{sfx})        AS REVENUE,
+                   SUM(PM_SPEND_ACTUAL_{sfx})     AS SPEND
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{prev_m_start}' AND '{prev_m_end}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        pm1 AS (
+            -- Previous-1 (two months ago) full calendar month
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   SUM(QTY_ACTUAL)                AS UNITS,
+                   SUM(SALES_ACTUAL_{sfx})        AS REVENUE,
+                   SUM(PM_SPEND_ACTUAL_{sfx})     AS SPEND
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{prev_m1_start}' AND '{prev_m1_end}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
         )
+        {sess_ctes}
         SELECT
             p.ASIN_KEY                                                              AS ASIN,
             p.PRODUCT_NAME                                                          AS PRODUCT_NAME,
@@ -1661,10 +1738,17 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 ), 1)
                 ELSE NULL
             END                                                                     AS COVER_DAYS,
+            -- ── Current period: Sessions + CR% ──
+            {sess_cur_n_expr}                                                       AS SESSIONS,
+            ROUND(p.ACT_UNITS_RAW
+                    / NULLIF({sess_cur_n_expr}, 0) * 100, 2)                        AS CR_PCT,
             -- Period totals (selected date range)
             ROUND(COALESCE(p.BUD_UNITS_RAW, 0), 0)                                  AS BUD_UNITS,
             ROUND(COALESCE(p.ACT_UNITS_RAW, 0), 0)                                  AS ACT_UNITS,
             ROUND(COALESCE(p.BUD_UNITS_RAW, 0) - COALESCE(p.ACT_UNITS_RAW, 0), 0)   AS LAG_UNITS,
+            -- ── ASP (Avg Selling Price) ──
+            ROUND(p.BUD_REVENUE_RAW / NULLIF(p.BUD_UNITS_RAW, 0), 2)                AS BUD_ASP,
+            ROUND(p.ACT_REVENUE_RAW / NULLIF(p.ACT_UNITS_RAW, 0), 2)                AS ACT_ASP,
             ROUND(COALESCE(p.BUD_REVENUE_RAW, 0), 0)                                AS BUD_REVENUE,
             ROUND(COALESCE(p.ACT_REVENUE_RAW, 0), 0)                                AS ACT_REVENUE,
             ROUND(COALESCE(p.BUD_REVENUE_RAW, 0) - COALESCE(p.ACT_REVENUE_RAW, 0), 0) AS LAG_REVENUE,
@@ -1674,10 +1758,25 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             ROUND(p.SPEND_BUD_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_ACOS_PCT,
             ROUND(p.SPEND_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_ACOS_PCT,
             ROUND(p.CM2_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM2_PCT,
-            ROUND(p.CM2_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM2_PCT
+            ROUND(p.CM2_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM2_PCT,
+            -- ── Previous full month (anchored to today, all in $sfx) ──
+            {sess_pm_expr}                                                          AS PM_SESSIONS,
+            ROUND(COALESCE(pm.UNITS, 0)
+                    / NULLIF({sess_pm_expr}, 0) * 100, 2)                           AS PM_CR_PCT,
+            ROUND(COALESCE(pm.UNITS, 0), 0)                                         AS PM_UNITS,
+            ROUND(pm.SPEND / NULLIF(pm.REVENUE, 0) * 100, 1)                        AS PM_ACOS_PCT,
+            -- ── Previous-1 full month ──
+            {sess_pm1_expr}                                                         AS PM1_SESSIONS,
+            ROUND(COALESCE(pm1.UNITS, 0)
+                    / NULLIF({sess_pm1_expr}, 0) * 100, 2)                          AS PM1_CR_PCT,
+            ROUND(COALESCE(pm1.UNITS, 0), 0)                                        AS PM1_UNITS,
+            ROUND(pm1.SPEND / NULLIF(pm1.REVENUE, 0) * 100, 1)                      AS PM1_ACOS_PCT
         FROM pnl p
         LEFT JOIN roll r ON p.ASIN_KEY = r.ASIN_KEY
         LEFT JOIN inv  i ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
+        LEFT JOIN pm   pm ON p.ASIN_KEY = pm.ASIN_KEY
+        LEFT JOIN pm1  pm1 ON p.ASIN_KEY = pm1.ASIN_KEY
+        {sess_joins}
         WHERE COALESCE(p.ACT_REVENUE_RAW, 0) > 0
            OR COALESCE(p.BUD_REVENUE_RAW, 0) > 0
         ORDER BY p.ACT_REVENUE_RAW DESC NULLS LAST
@@ -3349,12 +3448,25 @@ def render_subcategory():
         f"🎯 CR Tracker — every ASIN in {geo} "
         f"(velocity · inventory · budget vs actual)",
         expanded=False):
+        # Build a small caption that names the two prev-month windows
+        # the user will actually see in the table.
+        _today    = date.today()
+        _pm_end   = _today.replace(day=1) - timedelta(days=1)
+        _pm_start = _pm_end.replace(day=1)
+        _pm1_end  = _pm_start - timedelta(days=1)
+        _pm1_start= _pm1_end.replace(day=1)
         st.caption(
             "One row per ASIN sold in this GEO (regardless of sub-category). "
             "**Yesterday Units** is the units sold yesterday. "
             "**7d / 14d / 30d** are daily averages (sum ÷ days). "
             "**Cover Days** = Total Inv ÷ max daily run-rate across 7d/14d/30d. "
-            "**Lag** = Budget − Actual (positive = behind plan)."
+            "**Sessions / CR%** for the selected date range. "
+            "**ASP Bud/Act** = Revenue ÷ Units. "
+            "**Lag** = Budget − Actual (positive = behind plan). "
+            f"**PM** = {_pm_start.strftime('%b %Y')} "
+            f"({_pm_start.strftime('%d %b')}–{_pm_end.strftime('%d %b')}). "
+            f"**PM-1** = {_pm1_start.strftime('%b %Y')} "
+            f"({_pm1_start.strftime('%d %b')}–{_pm1_end.strftime('%d %b')})."
         )
         with st.spinner("Loading CR Tracker…"):
             cr = get_cr_tracker_data(geo, d_from, d_to, sfx)
@@ -3362,15 +3474,24 @@ def render_subcategory():
         if cr.empty:
             st.info("📭 No ASIN data found for this GEO in the selected range.")
         else:
-            # Optional brand filter
+            # Brand + Category filters side-by-side
             brand_opts = sorted(b for b in cr["BRAND"].dropna().unique() if str(b).strip())
-            if len(brand_opts) > 1:
+            cat_opts   = sorted(c for c in cr["CATEGORY"].dropna().unique() if str(c).strip())
+            fc1, fc2 = st.columns(2, gap="medium")
+            with fc1:
                 picked_brands = st.multiselect(
                     f"🏷 Filter by Brand ({len(brand_opts)} available)",
                     brand_opts, default=[], placeholder="All brands",
-                    key=f"cr_brand_{geo}")
-                if picked_brands:
-                    cr = cr[cr["BRAND"].isin(picked_brands)].reset_index(drop=True)
+                    key=f"cr_brand_{geo}") if len(brand_opts) > 1 else []
+            with fc2:
+                picked_cats = st.multiselect(
+                    f"🗂 Filter by Category ({len(cat_opts)} available)",
+                    cat_opts, default=[], placeholder="All categories",
+                    key=f"cr_cat_{geo}") if len(cat_opts) > 1 else []
+            if picked_brands:
+                cr = cr[cr["BRAND"].isin(picked_brands)].reset_index(drop=True)
+            if picked_cats:
+                cr = cr[cr["CATEGORY"].isin(picked_cats)].reset_index(drop=True)
 
             # Build column list — USA gets FBA + ADW + Total Inv; others Total only
             inv_cols = ([("FBA_INV", "FBA Inv"),
@@ -3389,9 +3510,15 @@ def render_subcategory():
                 ("UNITS_30D_AVG",   "30d Avg"),
             ] + inv_cols + [
                 ("COVER_DAYS",      "Cover Days"),
+                # Sessions + CR% after Cover Days
+                ("SESSIONS",        "Sessions"),
+                ("CR_PCT",          "CR%"),
                 ("BUD_UNITS",       "Bud Units"),
                 ("ACT_UNITS",       "Act Units"),
                 ("LAG_UNITS",       "Lag (U)"),
+                # ASP after Lag(U)
+                ("BUD_ASP",         "ASP Bud"),
+                ("ACT_ASP",         "ASP Act"),
                 ("BUD_REVENUE",     "Bud Rev"),
                 ("ACT_REVENUE",     "Act Rev"),
                 ("LAG_REVENUE",     "Lag (R)"),
@@ -3401,6 +3528,16 @@ def render_subcategory():
                 ("ACT_ACOS_PCT",    "Act ACoS%"),
                 ("BUD_CM2_PCT",     "Bud CM2%"),
                 ("ACT_CM2_PCT",     "Act CM2%"),
+                # Previous full month
+                ("PM_SESSIONS",     "PM Sessions"),
+                ("PM_CR_PCT",       "PM CR%"),
+                ("PM_UNITS",        "PM Units"),
+                ("PM_ACOS_PCT",     "PM ACoS%"),
+                # Previous-1 full month
+                ("PM1_SESSIONS",    "PM-1 Sessions"),
+                ("PM1_CR_PCT",      "PM-1 CR%"),
+                ("PM1_UNITS",       "PM-1 Units"),
+                ("PM1_ACOS_PCT",    "PM-1 ACoS%"),
             ]
 
             show = pd.DataFrame({
@@ -3473,11 +3610,24 @@ def render_subcategory():
                     format="%.1f",
                     help="Total Inv ÷ max daily run-rate across 7/14/30 days. "
                          "Red < 20 days; amber 20–40."),
+                "Sessions":        st.column_config.NumberColumn(
+                    format="%,d",
+                    help="Sessions for the selected date range (from "
+                         "vahdam_amazon_sales_marketing)."),
+                "CR%":             st.column_config.NumberColumn(
+                    format="%.2f%%",
+                    help="Conversion rate = Actual Units ÷ Sessions × 100."),
                 "Bud Units":       st.column_config.NumberColumn(format="%,d"),
                 "Act Units":       st.column_config.NumberColumn(format="%,d"),
                 "Lag (U)":         st.column_config.NumberColumn(
                     format="%+,d",
                     help="Budget Units − Actual Units. Positive = behind plan."),
+                "ASP Bud":         st.column_config.NumberColumn(
+                    format=f"{currency_sym}%,.2f",
+                    help="Avg Selling Price (Bud Rev ÷ Bud Units)."),
+                "ASP Act":         st.column_config.NumberColumn(
+                    format=f"{currency_sym}%,.2f",
+                    help="Avg Selling Price (Act Rev ÷ Act Units)."),
                 "Bud Rev":         st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
                 "Act Rev":         st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
                 "Lag (R)":         st.column_config.NumberColumn(
@@ -3489,6 +3639,20 @@ def render_subcategory():
                 "Act ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
                 "Bud CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
                 "Act CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
+                # Previous month (anchored to today)
+                "PM Sessions":     st.column_config.NumberColumn(
+                    format="%,d",
+                    help="Sessions for the previous full calendar month."),
+                "PM CR%":          st.column_config.NumberColumn(format="%.2f%%"),
+                "PM Units":        st.column_config.NumberColumn(format="%,d"),
+                "PM ACoS%":        st.column_config.NumberColumn(format="%.1f%%"),
+                # Previous-1 month
+                "PM-1 Sessions":   st.column_config.NumberColumn(
+                    format="%,d",
+                    help="Sessions for the calendar month before the previous one."),
+                "PM-1 CR%":        st.column_config.NumberColumn(format="%.2f%%"),
+                "PM-1 Units":      st.column_config.NumberColumn(format="%,d"),
+                "PM-1 ACoS%":      st.column_config.NumberColumn(format="%.1f%%"),
             }
             if is_usa_geo:
                 column_config["FBA Inv"] = st.column_config.NumberColumn(format="%,d")
