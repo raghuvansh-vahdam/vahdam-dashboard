@@ -3599,8 +3599,12 @@ def render_subcategory():
 
             currency_sym = ("₹" if use_inr else geo_sym(geo))
             column_config = {
-                "ASIN":            st.column_config.TextColumn("ASIN", width="small"),
-                "Product":         st.column_config.TextColumn("Product", width="medium"),
+                # ASIN + Product pinned to the left so they remain visible
+                # while horizontally scrolling through the wide table.
+                "ASIN":            st.column_config.TextColumn(
+                    "ASIN", width="small", pinned=True),
+                "Product":         st.column_config.TextColumn(
+                    "Product", width="medium", pinned=True),
                 "Brand":           st.column_config.TextColumn("Brand", width="small"),
                 "Category":        st.column_config.TextColumn("Category", width="small"),
                 "Yesterday Units": st.column_config.NumberColumn(format="%,d"),
