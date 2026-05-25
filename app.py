@@ -4299,9 +4299,20 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
         # be served stale for weeks. Keepa charges +1 token per ASIN that
         # actually needs re-scraping; ASINs already-fresh on their side
         # cost nothing extra.
+        # rating=1  → required to include csv[16] (RATING) and csv[17]
+        #            (COUNT_REVIEWS) history in the response. Disabled
+        #            by default by Keepa; no extra token cost.
+        #            Note: Amazon stopped publishing review-count history
+        #            on 2025-04-09 so csv[17] only has data prior to that
+        #            date; the latest review count itself still comes
+        #            through via stats.current[17] which we read too.
         params = urllib.parse.urlencode({
-            "key": api_key, "domain": domain_code,
-            "asin": asins_csv, "stats": 90, "history": 1, "update": 24,
+            "key":     api_key, "domain":  domain_code,
+            "asin":    asins_csv,
+            "stats":   90,
+            "history": 1,
+            "rating":  1,
+            "update":  24,
         })
         url = f"https://api.keepa.com/product?{params}"
         req = urllib.request.Request(url, headers={
@@ -4379,6 +4390,25 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
             buybox_present = None  # unknown — no history yet
             buybox_yesterday = None
 
+        # Latest rating + review count — prefer the history series, fall
+        # back to stats.current[16] / stats.current[17]. Amazon dropped
+        # review-count *history* on 2025-04-09, but the live numbers
+        # still surface through stats.current.
+        stats     = prod.get("stats") or {}
+        cur_arr   = stats.get("current") or []
+        def _stats_current(idx, divide_by):
+            if idx < len(cur_arr) and cur_arr[idx] is not None and cur_arr[idx] >= 0:
+                return float(cur_arr[idx]) / divide_by
+            return None
+        rating_hist_last  = _last(rating_pts)
+        reviews_hist_last = _last(reviews_pts)
+        rating_final  = (rating_hist_last
+                          if rating_hist_last is not None
+                          else _stats_current(16, 10))
+        reviews_final = (int(reviews_hist_last) if reviews_hist_last is not None
+                          else (int(_stats_current(17, 1))
+                                 if _stats_current(17, 1) is not None else None))
+
         out[asin] = {
             "title":            prod.get("title", asin),
             "currency":         sym,
@@ -4392,9 +4422,9 @@ def _fetch_keepa_chunk(asins_tuple, domain_code):
             "last_buybox":      _last(buybox_pts),
             "buybox_present":   buybox_present,
             "buybox_yesterday": buybox_yesterday,
-            "rating":           _last(rating_pts),
-            "reviews_count":    int(_last(reviews_pts)) if _last(reviews_pts) else None,
-            "stats":            prod.get("stats", {}),
+            "rating":           rating_final,
+            "reviews_count":    reviews_final,
+            "stats":            stats,
         }
     return out
 
