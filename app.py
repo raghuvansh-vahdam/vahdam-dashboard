@@ -1556,6 +1556,135 @@ def get_asin_data(where, geo, sub_cat, sfx):
         LIMIT 200
     """)
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
+    """One row per ASIN in the given GEO with everything the CR Tracker
+    table needs:
+      * Identity         : ASIN, Product Name, Brand, Category
+      * Velocity windows : Yesterday units, 7d-avg, 14d-avg, 30d-avg
+                           (always last-30-days, independent of page range)
+      * Inventory        : FBA Inv, ADW Inv, Total Inv (USA = FBA+ADW;
+                           others = FBA), Cover Days
+      * Period totals    : Bud/Act Units + Lag(U),
+                           Bud/Act Revenue + Lag(R)
+      * Margin %         : Bud/Act CM1%, Bud/Act ACoS%, Bud/Act CM2%
+
+    P&L and inventory are aggregated separately and joined post-grouping
+    so multi-row campaign data never multiplies the budget figures.
+    """
+    today_ = date.today()
+    d_30 = today_ - timedelta(days=29)
+    d_14 = today_ - timedelta(days=13)
+    d_7  = today_ - timedelta(days=6)
+    d_y  = today_ - timedelta(days=1)
+    is_usa = (geo or "").upper() == "USA"
+    total_inv_expr = (
+        "(COALESCE(i.FBA_INV,0) + COALESCE(i.ADW_INV,0))" if is_usa
+        else "COALESCE(i.FBA_INV,0)"
+    )
+
+    return run_query(f"""
+        WITH pnl AS (
+            SELECT
+                SPLIT_PART(ASIN,' ',1)                                   AS ASIN_KEY,
+                MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))   AS PRODUCT_NAME,
+                MAX(BRAND)                                               AS BRAND,
+                MAX(CATEGORY)                                            AS CATEGORY,
+                SUM(QTY_BUDGET)                                          AS BUD_UNITS_RAW,
+                SUM(QTY_ACTUAL)                                          AS ACT_UNITS_RAW,
+                SUM(SALES_BUDGET_{sfx})                                  AS BUD_REVENUE_RAW,
+                SUM(SALES_ACTUAL_{sfx})                                  AS ACT_REVENUE_RAW,
+                SUM(CM1_BUDGET_{sfx})                                    AS CM1_BUD_RAW,
+                SUM(CM1_ACTUAL_{sfx})                                    AS CM1_ACT_RAW,
+                SUM(PM_SPEND_BUDGET_{sfx})                               AS SPEND_BUD_RAW,
+                SUM(PM_SPEND_ACTUAL_{sfx})                               AS SPEND_ACT_RAW,
+                SUM(CM2_BUDGET_{sfx})                                    AS CM2_BUD_RAW,
+                SUM(CM2_ACTUAL_{sfx})                                    AS CM2_ACT_RAW
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d_from_}' AND '{d_to_}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        roll AS (
+            -- Rolling unit-velocity windows. Always last 30 days from
+            -- TODAY so the run-rate columns are stable regardless of the
+            -- user-selected period.
+            SELECT
+                SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                SUM(CASE WHEN DAY = '{d_y}'                                THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_1D,
+                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_7D,
+                SUM(CASE WHEN DAY BETWEEN '{d_14}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_14D,
+                SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d_30}' AND '{today_}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        inv AS (
+            SELECT
+                UPPER(SPLIT_PART(ASIN, ' ', 1))  AS ASIN_KEY,
+                MAX(FBAINV)                      AS FBA_INV,
+                MAX(ADWINV)                      AS ADW_INV
+            FROM {INV_3P}
+            WHERE UPPER(GEO) = UPPER('{geo}')
+              AND ASIN IS NOT NULL
+              AND UPPER(ASIN) NOT IN ('ASIN', '')
+              AND DATE <> 'Date'
+            GROUP BY UPPER(SPLIT_PART(ASIN, ' ', 1))
+        )
+        SELECT
+            p.ASIN_KEY                                                              AS ASIN,
+            p.PRODUCT_NAME                                                          AS PRODUCT_NAME,
+            p.BRAND                                                                 AS BRAND,
+            p.CATEGORY                                                              AS CATEGORY,
+            -- Velocity (Yesterday absolute, 7/14/30d as daily averages)
+            COALESCE(r.U_1D, 0)                                                     AS UNITS_YESTERDAY,
+            ROUND(COALESCE(r.U_7D, 0)  /  7.0, 1)                                   AS UNITS_7D_AVG,
+            ROUND(COALESCE(r.U_14D, 0) / 14.0, 1)                                   AS UNITS_14D_AVG,
+            ROUND(COALESCE(r.U_30D, 0) / 30.0, 1)                                   AS UNITS_30D_AVG,
+            -- Inventory
+            COALESCE(i.FBA_INV, 0)                                                  AS FBA_INV,
+            COALESCE(i.ADW_INV, 0)                                                  AS ADW_INV,
+            {total_inv_expr}                                                        AS TOTAL_INV,
+            CASE
+                WHEN GREATEST(
+                    COALESCE(r.U_7D,  0) /  7.0,
+                    COALESCE(r.U_14D, 0) / 14.0,
+                    COALESCE(r.U_30D, 0) / 30.0
+                ) > 0
+                THEN ROUND({total_inv_expr}::FLOAT / GREATEST(
+                    COALESCE(r.U_7D,  0) /  7.0,
+                    COALESCE(r.U_14D, 0) / 14.0,
+                    COALESCE(r.U_30D, 0) / 30.0
+                ), 1)
+                ELSE NULL
+            END                                                                     AS COVER_DAYS,
+            -- Period totals (selected date range)
+            ROUND(COALESCE(p.BUD_UNITS_RAW, 0), 0)                                  AS BUD_UNITS,
+            ROUND(COALESCE(p.ACT_UNITS_RAW, 0), 0)                                  AS ACT_UNITS,
+            ROUND(COALESCE(p.BUD_UNITS_RAW, 0) - COALESCE(p.ACT_UNITS_RAW, 0), 0)   AS LAG_UNITS,
+            ROUND(COALESCE(p.BUD_REVENUE_RAW, 0), 0)                                AS BUD_REVENUE,
+            ROUND(COALESCE(p.ACT_REVENUE_RAW, 0), 0)                                AS ACT_REVENUE,
+            ROUND(COALESCE(p.BUD_REVENUE_RAW, 0) - COALESCE(p.ACT_REVENUE_RAW, 0), 0) AS LAG_REVENUE,
+            -- Margin / ad-cost % (ratios of selected-period absolutes)
+            ROUND(p.CM1_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM1_PCT,
+            ROUND(p.CM1_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM1_PCT,
+            ROUND(p.SPEND_BUD_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_ACOS_PCT,
+            ROUND(p.SPEND_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_ACOS_PCT,
+            ROUND(p.CM2_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM2_PCT,
+            ROUND(p.CM2_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM2_PCT
+        FROM pnl p
+        LEFT JOIN roll r ON p.ASIN_KEY = r.ASIN_KEY
+        LEFT JOIN inv  i ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
+        WHERE COALESCE(p.ACT_REVENUE_RAW, 0) > 0
+           OR COALESCE(p.BUD_REVENUE_RAW, 0) > 0
+        ORDER BY p.ACT_REVENUE_RAW DESC NULLS LAST
+        LIMIT 1000
+    """)
+
+
 # ── P&L Statement helpers ────────────────────────────────────────────────────
 _PNL_LINES = [
     ("Sales",               "total",    "SALES"),
@@ -3211,6 +3340,176 @@ def render_subcategory():
         elif clicked == "GRAND TOTAL":
             st.caption("ℹ️ Click a specific sub-category row to drill into ASINs. "
                        "Grand Total isn't drillable.")
+
+    # ────────────────────────────────────────────────────────────────────
+    # CR TRACKER — flat per-ASIN table for the whole GEO
+    # ────────────────────────────────────────────────────────────────────
+    is_usa_geo = (geo or "").upper() == "USA"
+    with st.expander(
+        f"🎯 CR Tracker — every ASIN in {geo} "
+        f"(velocity · inventory · budget vs actual)",
+        expanded=False):
+        st.caption(
+            "One row per ASIN sold in this GEO (regardless of sub-category). "
+            "**Yesterday Units** is the units sold yesterday. "
+            "**7d / 14d / 30d** are daily averages (sum ÷ days). "
+            "**Cover Days** = Total Inv ÷ max daily run-rate across 7d/14d/30d. "
+            "**Lag** = Budget − Actual (positive = behind plan)."
+        )
+        with st.spinner("Loading CR Tracker…"):
+            cr = get_cr_tracker_data(geo, d_from, d_to, sfx)
+
+        if cr.empty:
+            st.info("📭 No ASIN data found for this GEO in the selected range.")
+        else:
+            # Optional brand filter
+            brand_opts = sorted(b for b in cr["BRAND"].dropna().unique() if str(b).strip())
+            if len(brand_opts) > 1:
+                picked_brands = st.multiselect(
+                    f"🏷 Filter by Brand ({len(brand_opts)} available)",
+                    brand_opts, default=[], placeholder="All brands",
+                    key=f"cr_brand_{geo}")
+                if picked_brands:
+                    cr = cr[cr["BRAND"].isin(picked_brands)].reset_index(drop=True)
+
+            # Build column list — USA gets FBA + ADW + Total Inv; others Total only
+            inv_cols = ([("FBA_INV", "FBA Inv"),
+                         ("ADW_INV", "ADW Inv"),
+                         ("TOTAL_INV", "Total Inv")]
+                        if is_usa_geo
+                        else [("TOTAL_INV", "Total Inv")])
+            col_map = [
+                ("ASIN",            "ASIN"),
+                ("PRODUCT_NAME",    "Product"),
+                ("BRAND",           "Brand"),
+                ("CATEGORY",        "Category"),
+                ("UNITS_YESTERDAY", "Yesterday Units"),
+                ("UNITS_7D_AVG",    "7d Avg"),
+                ("UNITS_14D_AVG",   "14d Avg"),
+                ("UNITS_30D_AVG",   "30d Avg"),
+            ] + inv_cols + [
+                ("COVER_DAYS",      "Cover Days"),
+                ("BUD_UNITS",       "Bud Units"),
+                ("ACT_UNITS",       "Act Units"),
+                ("LAG_UNITS",       "Lag (U)"),
+                ("BUD_REVENUE",     "Bud Rev"),
+                ("ACT_REVENUE",     "Act Rev"),
+                ("LAG_REVENUE",     "Lag (R)"),
+                ("BUD_CM1_PCT",     "Bud CM1%"),
+                ("ACT_CM1_PCT",     "Act CM1%"),
+                ("BUD_ACOS_PCT",    "Bud ACoS%"),
+                ("ACT_ACOS_PCT",    "Act ACoS%"),
+                ("BUD_CM2_PCT",     "Bud CM2%"),
+                ("ACT_CM2_PCT",     "Act CM2%"),
+            ]
+
+            show = pd.DataFrame({
+                disp: pd.to_numeric(cr[raw], errors="coerce")
+                       if raw not in ("ASIN","PRODUCT_NAME","BRAND","CATEGORY")
+                       else cr[raw].fillna("").astype(str)
+                for raw, disp in col_map
+            }).reset_index(drop=True)
+
+            # Numeric helper Series for the styler
+            _cover  = pd.to_numeric(show["Cover Days"],  errors="coerce")
+            _lag_u  = pd.to_numeric(show["Lag (U)"],     errors="coerce")
+            _lag_r  = pd.to_numeric(show["Lag (R)"],     errors="coerce")
+            _total  = pd.to_numeric(show["Total Inv"],   errors="coerce")
+            _ac_acos = pd.to_numeric(show["Act ACoS%"],  errors="coerce") - \
+                       pd.to_numeric(show["Bud ACoS%"],  errors="coerce")
+            _ac_cm2  = pd.to_numeric(show["Act CM2%"],   errors="coerce") - \
+                       pd.to_numeric(show["Bud CM2%"],   errors="coerce")
+
+            def _style_cr(row):
+                s = [""] * len(row)
+                idx = row.index.tolist()
+                # Cover days: <20 red, 20-40 amber; OOS (Total Inv=0) red
+                cd = _f(_cover.iloc[row.name])
+                ti = _f(_total.iloc[row.name])
+                if "Cover Days" in idx:
+                    if (ti is not None and ti == 0) or (cd is not None and cd < 20):
+                        s[idx.index("Cover Days")] = (
+                            "background-color:#fde8e8;color:#8b1a1a;font-weight:700;")
+                        if "Total Inv" in idx:
+                            s[idx.index("Total Inv")] = (
+                                "background-color:#fde8e8;color:#8b1a1a;font-weight:700;")
+                    elif cd is not None and cd < 40:
+                        s[idx.index("Cover Days")] = (
+                            "background-color:#fef3d6;color:#7a5c00;font-weight:600;")
+                # Lag (U) and Lag (R): positive = behind plan (red), negative = ahead (green)
+                for lcol, ln in (("Lag (U)", _lag_u), ("Lag (R)", _lag_r)):
+                    if lcol in idx:
+                        v = _f(ln.iloc[row.name])
+                        if v is not None and v != 0:
+                            s[idx.index(lcol)] = (
+                                "color:#8b1a1a;font-weight:700;" if v > 0
+                                else "color:#1a7a3e;font-weight:700;")
+                # Act ACoS% vs Bud: lower is better
+                av = _f(_ac_acos.iloc[row.name])
+                if "Act ACoS%" in idx and av is not None:
+                    s[idx.index("Act ACoS%")] = (
+                        "color:#8b1a1a;font-weight:600;" if av > 0
+                        else "color:#004A2B;font-weight:600;")
+                # Act CM2% vs Bud: higher is better
+                cv = _f(_ac_cm2.iloc[row.name])
+                if "Act CM2%" in idx and cv is not None:
+                    s[idx.index("Act CM2%")] = (
+                        "color:#004A2B;font-weight:600;" if cv > 0
+                        else "color:#8b1a1a;font-weight:600;")
+                return s
+
+            currency_sym = ("₹" if use_inr else geo_sym(geo))
+            column_config = {
+                "ASIN":            st.column_config.TextColumn("ASIN", width="small"),
+                "Product":         st.column_config.TextColumn("Product", width="medium"),
+                "Brand":           st.column_config.TextColumn("Brand", width="small"),
+                "Category":        st.column_config.TextColumn("Category", width="small"),
+                "Yesterday Units": st.column_config.NumberColumn(format="%,d"),
+                "7d Avg":          st.column_config.NumberColumn(format="%.1f"),
+                "14d Avg":         st.column_config.NumberColumn(format="%.1f"),
+                "30d Avg":         st.column_config.NumberColumn(format="%.1f"),
+                "Total Inv":       st.column_config.NumberColumn(format="%,d"),
+                "Cover Days":      st.column_config.NumberColumn(
+                    format="%.1f",
+                    help="Total Inv ÷ max daily run-rate across 7/14/30 days. "
+                         "Red < 20 days; amber 20–40."),
+                "Bud Units":       st.column_config.NumberColumn(format="%,d"),
+                "Act Units":       st.column_config.NumberColumn(format="%,d"),
+                "Lag (U)":         st.column_config.NumberColumn(
+                    format="%+,d",
+                    help="Budget Units − Actual Units. Positive = behind plan."),
+                "Bud Rev":         st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
+                "Act Rev":         st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
+                "Lag (R)":         st.column_config.NumberColumn(
+                    format=f"{currency_sym}%+,.0f",
+                    help="Budget Revenue − Actual Revenue. Positive = behind plan."),
+                "Bud CM1%":        st.column_config.NumberColumn(format="%.1f%%"),
+                "Act CM1%":        st.column_config.NumberColumn(format="%.1f%%"),
+                "Bud ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
+                "Act ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
+                "Bud CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
+                "Act CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
+            }
+            if is_usa_geo:
+                column_config["FBA Inv"] = st.column_config.NumberColumn(format="%,d")
+                column_config["ADW Inv"] = st.column_config.NumberColumn(format="%,d")
+
+            st.dataframe(
+                show.style.apply(_style_cr, axis=1).hide(axis="index"),
+                use_container_width=True, height=560,
+                hide_index=True, column_config=column_config,
+                key=f"cr_tracker_{geo}",
+            )
+            # CSV download
+            csv_bytes = show.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"⬇ Download CR Tracker — {geo} ({date.today().isoformat()}).csv",
+                data=csv_bytes,
+                file_name=(f"cr_tracker_{geo.lower()}_"
+                           f"{d_from.isoformat()}_to_{d_to.isoformat()}.csv"),
+                mime="text/csv",
+                key=f"cr_dl_{geo}",
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
