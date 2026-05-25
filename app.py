@@ -1594,10 +1594,17 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
         "TOTAL_SESSIONS", "SESSIONS_B2C", "ORDERED_SESSIONS",
     )
     if sess_col:
+        # Each session CTE also exposes a `SESS_DAYS` count — the number
+        # of distinct days the ASIN actually had session activity. This
+        # lets us extrapolate sessions to match the day-coverage of unit
+        # sales when session data lags (e.g. session feed is 1–2 days
+        # behind the units feed).
         sess_ctes = f"""
         ,sess_cur AS (
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
-                   COALESCE(SUM({sess_col}), 0) AS SESS
+                   COALESCE(SUM({sess_col}), 0)                            AS SESS,
+                   COUNT(DISTINCT CASE WHEN COALESCE({sess_col},0) > 0
+                                       THEN DAY END)                       AS SESS_DAYS
             FROM {SALES_MKT}
             WHERE DAY BETWEEN '{d_from_}' AND '{d_to_}'
               AND GEO = '{geo}' AND ASIN IS NOT NULL AND ASIN != ''
@@ -1605,7 +1612,9 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
         ),
         sess_pm AS (
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
-                   COALESCE(SUM({sess_col}), 0) AS SESS
+                   COALESCE(SUM({sess_col}), 0)                            AS SESS,
+                   COUNT(DISTINCT CASE WHEN COALESCE({sess_col},0) > 0
+                                       THEN DAY END)                       AS SESS_DAYS
             FROM {SALES_MKT}
             WHERE DAY BETWEEN '{prev_m_start}' AND '{prev_m_end}'
               AND GEO = '{geo}' AND ASIN IS NOT NULL AND ASIN != ''
@@ -1613,7 +1622,9 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
         ),
         sess_pm1 AS (
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
-                   COALESCE(SUM({sess_col}), 0) AS SESS
+                   COALESCE(SUM({sess_col}), 0)                            AS SESS,
+                   COUNT(DISTINCT CASE WHEN COALESCE({sess_col},0) > 0
+                                       THEN DAY END)                       AS SESS_DAYS
             FROM {SALES_MKT}
             WHERE DAY BETWEEN '{prev_m1_start}' AND '{prev_m1_end}'
               AND GEO = '{geo}' AND ASIN IS NOT NULL AND ASIN != ''
@@ -1625,15 +1636,38 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             "        LEFT JOIN sess_pm  spm ON p.ASIN_KEY = spm.ASIN_KEY\n"
             "        LEFT JOIN sess_pm1 spm1 ON p.ASIN_KEY = spm1.ASIN_KEY"
         )
-        sess_cur_n_expr = "COALESCE(sc.SESS, 0)"
-        sess_pm_expr    = "COALESCE(spm.SESS, 0)"
-        sess_pm1_expr   = "COALESCE(spm1.SESS, 0)"
+        # Raw sessions (shown in the table verbatim) AND extrapolated
+        # sessions (used as the denominator for CR%). When session
+        # day-coverage is less than units day-coverage, sessions are
+        # scaled up by the ratio so CR% reflects an apples-to-apples
+        # picture across the full month.
+        sess_cur_n_expr     = "COALESCE(sc.SESS, 0)"
+        sess_pm_expr        = "COALESCE(spm.SESS, 0)"
+        sess_pm1_expr       = "COALESCE(spm1.SESS, 0)"
+        sess_cur_extrap     = (
+            "CASE WHEN sc.SESS_DAYS > 0 AND p.ACT_UNIT_DAYS > sc.SESS_DAYS "
+            "THEN sc.SESS * (p.ACT_UNIT_DAYS::FLOAT / sc.SESS_DAYS) "
+            "ELSE sc.SESS END"
+        )
+        sess_pm_extrap      = (
+            "CASE WHEN spm.SESS_DAYS > 0 AND pm.UNIT_DAYS > spm.SESS_DAYS "
+            "THEN spm.SESS * (pm.UNIT_DAYS::FLOAT / spm.SESS_DAYS) "
+            "ELSE spm.SESS END"
+        )
+        sess_pm1_extrap     = (
+            "CASE WHEN spm1.SESS_DAYS > 0 AND pm1.UNIT_DAYS > spm1.SESS_DAYS "
+            "THEN spm1.SESS * (pm1.UNIT_DAYS::FLOAT / spm1.SESS_DAYS) "
+            "ELSE spm1.SESS END"
+        )
     else:
         sess_ctes  = ""
         sess_joins = ""
         sess_cur_n_expr = "CAST(NULL AS NUMBER)"
         sess_pm_expr    = "CAST(NULL AS NUMBER)"
         sess_pm1_expr   = "CAST(NULL AS NUMBER)"
+        sess_cur_extrap = "CAST(NULL AS NUMBER)"
+        sess_pm_extrap  = "CAST(NULL AS NUMBER)"
+        sess_pm1_extrap = "CAST(NULL AS NUMBER)"
 
     return run_query(f"""
         WITH pnl AS (
@@ -1645,6 +1679,11 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)'))      AS SUB_CATEGORY,
                 SUM(QTY_BUDGET)                                          AS BUD_UNITS_RAW,
                 SUM(QTY_ACTUAL)                                          AS ACT_UNITS_RAW,
+                -- Count of distinct days in the period where this ASIN
+                -- actually sold any units. Used to extrapolate session
+                -- coverage when session data lags actual sales.
+                COUNT(DISTINCT CASE WHEN COALESCE(QTY_ACTUAL,0) > 0
+                                    THEN DAY END)                        AS ACT_UNIT_DAYS,
                 SUM(SALES_BUDGET_{sfx})                                  AS BUD_REVENUE_RAW,
                 SUM(SALES_ACTUAL_{sfx})                                  AS ACT_REVENUE_RAW,
                 SUM(CM1_BUDGET_{sfx})                                    AS CM1_BUD_RAW,
@@ -1691,6 +1730,8 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             -- Previous full calendar month
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
                    SUM(QTY_ACTUAL)                AS UNITS,
+                   COUNT(DISTINCT CASE WHEN COALESCE(QTY_ACTUAL,0) > 0
+                                       THEN DAY END) AS UNIT_DAYS,
                    SUM(SALES_ACTUAL_{sfx})        AS REVENUE,
                    SUM(PM_SPEND_ACTUAL_{sfx})     AS SPEND
             FROM {TABLE}
@@ -1703,6 +1744,8 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             -- Previous-1 (two months ago) full calendar month
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
                    SUM(QTY_ACTUAL)                AS UNITS,
+                   COUNT(DISTINCT CASE WHEN COALESCE(QTY_ACTUAL,0) > 0
+                                       THEN DAY END) AS UNIT_DAYS,
                    SUM(SALES_ACTUAL_{sfx})        AS REVENUE,
                    SUM(PM_SPEND_ACTUAL_{sfx})     AS SPEND
             FROM {TABLE}
@@ -1740,10 +1783,11 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 ), 1)
                 ELSE NULL
             END                                                                     AS COVER_DAYS,
-            -- ── Current period: Sessions + CR% ──
+            -- ── Current period: Sessions (raw) + CR% (sessions
+            --    extrapolated to match unit-day coverage) ──
             {sess_cur_n_expr}                                                       AS SESSIONS,
             ROUND(p.ACT_UNITS_RAW
-                    / NULLIF({sess_cur_n_expr}, 0) * 100, 2)                        AS CR_PCT,
+                    / NULLIF({sess_cur_extrap}, 0) * 100, 2)                        AS CR_PCT,
             -- Period totals (selected date range)
             ROUND(COALESCE(p.BUD_UNITS_RAW, 0), 0)                                  AS BUD_UNITS,
             ROUND(COALESCE(p.ACT_UNITS_RAW, 0), 0)                                  AS ACT_UNITS,
@@ -1761,16 +1805,16 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             ROUND(p.SPEND_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_ACOS_PCT,
             ROUND(p.CM2_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM2_PCT,
             ROUND(p.CM2_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM2_PCT,
-            -- ── Previous full month (anchored to today, all in $sfx) ──
+            -- ── Previous full month (extrapolated sessions in CR%) ──
             {sess_pm_expr}                                                          AS PM_SESSIONS,
             ROUND(COALESCE(pm.UNITS, 0)
-                    / NULLIF({sess_pm_expr}, 0) * 100, 2)                           AS PM_CR_PCT,
+                    / NULLIF({sess_pm_extrap}, 0) * 100, 2)                         AS PM_CR_PCT,
             ROUND(COALESCE(pm.UNITS, 0), 0)                                         AS PM_UNITS,
             ROUND(pm.SPEND / NULLIF(pm.REVENUE, 0) * 100, 1)                        AS PM_ACOS_PCT,
-            -- ── Previous-1 full month ──
+            -- ── Previous-1 full month (extrapolated sessions in CR%) ──
             {sess_pm1_expr}                                                         AS PM1_SESSIONS,
             ROUND(COALESCE(pm1.UNITS, 0)
-                    / NULLIF({sess_pm1_expr}, 0) * 100, 2)                          AS PM1_CR_PCT,
+                    / NULLIF({sess_pm1_extrap}, 0) * 100, 2)                        AS PM1_CR_PCT,
             ROUND(COALESCE(pm1.UNITS, 0), 0)                                        AS PM1_UNITS,
             ROUND(pm1.SPEND / NULLIF(pm1.REVENUE, 0) * 100, 1)                      AS PM1_ACOS_PCT
         FROM pnl p
@@ -3505,7 +3549,7 @@ def render_subcategory():
                 ("ASIN",            "ASIN"),
                 ("PRODUCT_NAME",    "Product"),
                 ("BRAND",           "Brand"),
-                ("CATEGORY",        "Category"),
+                ("SUB_CATEGORY",    "Sub-Category"),
                 ("UNITS_YESTERDAY", "Yesterday Units"),
                 ("UNITS_7D_AVG",    "7d Avg"),
                 ("UNITS_14D_AVG",   "14d Avg"),
@@ -3606,7 +3650,7 @@ def render_subcategory():
                 "Product":         st.column_config.TextColumn(
                     "Product", width="medium", pinned=True),
                 "Brand":           st.column_config.TextColumn("Brand", width="small"),
-                "Category":        st.column_config.TextColumn("Category", width="small"),
+                "Sub-Category":    st.column_config.TextColumn("Sub-Category", width="small"),
                 "Yesterday Units": st.column_config.NumberColumn(format="%,d"),
                 "7d Avg":          st.column_config.NumberColumn(format="%.1f"),
                 "14d Avg":         st.column_config.NumberColumn(format="%.1f"),
