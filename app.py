@@ -2292,12 +2292,21 @@ def build_subcat_perf_chart(view2_df):
 
 
 # ── Variance attribution (#20) ──
-def build_variance_chart(view1_df):
-    """Stacked horizontal bar showing each GEO's contribution to sales variance vs budget."""
+def build_variance_chart(view1_df, metric="SALES", title=None):
+    """Horizontal bar showing each GEO's contribution to variance vs budget
+    for the chosen metric. `metric` selects which Actual/Budget pair to
+    diff: "SALES" → SALES_ACT vs SALES_BUD; "CM2_ABS" → CM2_ABS_ACT vs
+    CM2_ABS_BUD."""
     if not HAS_PLOTLY or view1_df is None or view1_df.empty: return None
+    act_col, bud_col = {
+        "SALES":   ("SALES_ACT",   "SALES_BUD"),
+        "CM2_ABS": ("CM2_ABS_ACT", "CM2_ABS_BUD"),
+    }.get(metric, ("SALES_ACT", "SALES_BUD"))
+    if act_col not in view1_df.columns or bud_col not in view1_df.columns:
+        return None
     totals = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
-    totals["ACT_n"] = pd.to_numeric(totals["SALES_ACT"], errors="coerce")
-    totals["BUD_n"] = pd.to_numeric(totals["SALES_BUD"], errors="coerce")
+    totals["ACT_n"] = pd.to_numeric(totals[act_col], errors="coerce")
+    totals["BUD_n"] = pd.to_numeric(totals[bud_col], errors="coerce")
     totals = totals.dropna(subset=["ACT_n"])
     if totals.empty: return None
     totals["VAR_n"] = totals["ACT_n"].fillna(0) - totals["BUD_n"].fillna(0)
@@ -2312,6 +2321,10 @@ def build_variance_chart(view1_df):
     else:             div, unit = 1, ""
     totals["VAR_scaled"] = totals["VAR_n"] / div
     colors = ["#1a7a3e" if v >= 0 else "#8b1a1a" for v in totals["VAR_n"]]
+    default_title = ("Sales Variance vs Budget by Country"
+                     if metric == "SALES"
+                     else "CM2 Absolute Variance vs Budget by Country")
+    title = title or default_title
     fig = go.Figure(go.Bar(
         x=totals["VAR_scaled"], y=totals["GEO"],
         orientation="h",
@@ -2326,7 +2339,7 @@ def build_variance_chart(view1_df):
                             totals["BUD_n"].apply(fmt_lakhs))),
     ))
     fig.update_layout(
-        title=dict(text=f"<b>Sales Variance vs Budget by Country</b> (₹ {unit})",
+        title=dict(text=f"<b>{title}</b> (₹ {unit})",
                    font=dict(size=14, color="#004A2B")),
         plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
         font=dict(family="Arial", color="#171717"),
@@ -2704,7 +2717,11 @@ def render_ceo():
 
 
 def render_overview():
-    st.markdown('<div class="page-title">Amazon P&amp;L Overview</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-title">Overview '
+        '<span style="font-size:18px;font-weight:500;color:#7a6a50;">'
+        '(wrt Budget &amp; Last Year)</span></div>',
+        unsafe_allow_html=True)
     st.markdown(
         f'<div class="page-sub">{d_from.strftime("%d %b %Y")} &rarr; {d_to.strftime("%d %b %Y")} '
         f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
@@ -2736,79 +2753,76 @@ def render_overview():
         st.markdown(f'<div class="narrative">📊 {narrative}</div>',
                     unsafe_allow_html=True)
 
-    # ── KPI Cards with LM + LY comparisons (#2) ──
-    def _delta_vs(prev_row, key_act, mode="ratio"):
-        """Return delta vs the given prior-period row: ratio = %change, pp = pp diff."""
-        if prev_row is None: return None
-        cur, prev = _f(k.get(key_act)), _f(prev_row.get(key_act))
-        if cur is None or prev is None: return None
-        if mode == "pp":   return cur - prev
-        if prev == 0:      return None
-        return (cur - prev) / abs(prev) * 100
-
+    # ── KPI Cards (Exec-Summary style; default hidden via expander) ──
     is_mtd = st.session_state.get("date_preset") == "MTD"
     lm_label = "LMTD" if is_mtd else "LM"
     ly_label = "LYMTD" if is_mtd else "LY"
 
-    # CM2 Abs achievement % for the badge
-    _cm2_abs_ach = None
-    _cm2_abs_act_v, _cm2_abs_bud_v = _f(k.get("CM2_ABS_ACT")), _f(k.get("CM2_ABS_BUD"))
-    if _cm2_abs_act_v is not None and _cm2_abs_bud_v not in (None, 0):
-        _cm2_abs_ach = _cm2_abs_act_v / _cm2_abs_bud_v * 100
+    def _ratio(act, bud):
+        a, b = _f(act), _f(bud)
+        if a is None or b is None or b == 0: return None
+        return a / b * 100
 
-    cols = st.columns(5, gap="medium")
-    cards = [
-        ("Revenue vs Budget", "REV_BUDGET", fmt_lakhs(k["SALES_ACT"]), f"Bud: {fmt_lakhs(k['SALES_BUD'])}", k["REV_PCT"],
-         kpi_delta(k["REV_DELTA"]),
-         _delta_vs(klm, "SALES_ACT"),     _delta_vs(kly, "SALES_ACT")),
-        ("CM1% vs Budget", "CM1", fmt_pct(k["CM1_ACT"]),    f"Bud: {fmt_pct(k['CM1_BUD'])}",     None,
-         kpi_delta(k["CM1_DELTA"], unit="pp"),
-         _delta_vs(klm, "CM1_ACT", "pp"),  _delta_vs(kly, "CM1_ACT", "pp")),
-        ("ACoS%", "ACOS",              fmt_pct(k["ACOS_ACT"]),   f"Bud: {fmt_pct(k['ACOS_BUD'])}",    None,
-         kpi_delta(k["ACOS_DELTA"], unit="pp", invert=True),
-         _delta_vs(klm, "ACOS_ACT", "pp"), _delta_vs(kly, "ACOS_ACT", "pp")),
-        ("CM2%", "CM2",               fmt_pct(k["CM2_ACT"]),    f"Bud: {fmt_pct(k['CM2_BUD'])}",     None,
-         kpi_delta(k["CM2_DELTA"], unit="pp"),
-         _delta_vs(klm, "CM2_ACT", "pp"),  _delta_vs(kly, "CM2_ACT", "pp")),
-        ("CM2 Absolute", "CM2_ABS",       fmt_lakhs(k["CM2_ABS_ACT"]), f"Bud: {fmt_lakhs(k['CM2_ABS_BUD'])}", _cm2_abs_ach,
-         kpi_delta(k["CM2_ABS_DELTA"]),
-         _delta_vs(klm, "CM2_ABS_ACT"),    _delta_vs(kly, "CM2_ABS_ACT")),
-    ]
-    for col, (label, def_key, actual, budget, pct, delta, d_lm, d_ly) in zip(cols, cards):
-        badge = pct_badge(pct) if pct is not None else ""
+    def _pct_change(cur, prev):
+        c, p = _f(cur), _f(prev)
+        if c is None or p is None or p == 0: return None
+        return (c - p) / abs(p) * 100
 
-        def _delta_line(lbl, val, is_pp):
-            if val is None:
-                return (f'<div class="pop-line"><span class="pop-tag">{lbl}</span>'
-                        f'<span class="pop-val small-muted">—</span></div>')
-            cls = "delta-up" if val >= 0 else "delta-dn"
-            arrow = "▲" if val >= 0 else "▼"
-            unit  = "pp" if is_pp else "%"
-            return (f'<div class="pop-line"><span class="pop-tag">{lbl}</span>'
-                    f'<span class="pop-val {cls}">{arrow} {abs(val):.1f}{unit}</span></div>')
+    def _prev_val(prev_kpi, key):
+        return prev_kpi.get(key) if prev_kpi is not None else None
 
-        is_pp = "%" in label
-        compare_block = (f'<div class="kpi-compare">'
-                         f'{_delta_line(lm_label, d_lm, is_pp)}'
-                         f'{_delta_line(ly_label, d_ly, is_pp)}'
-                         f'</div>')
-
-        tip = METRIC_DEFS.get(def_key, "")
-        label_html = (f'<div class="kpi-label" data-tip="{tip}">{label} ⓘ</div>'
-                      if tip else f'<div class="kpi-label">{label}</div>')
-        inner = "".join([
-            label_html,
-            f'<div class="kpi-actual">{actual}</div>',
-            f'<div class="kpi-budget">{budget}</div>',
-            delta or "",
-            badge or "",
-            compare_block,
-        ])
-        col.markdown(f'<div class="kpi-card">{inner}</div>',
-                     unsafe_allow_html=True)
-    st.caption(f"📅 **{lm_label}** = {lm_d_from.strftime('%d %b %Y')} – "
-               f"{lm_d_to.strftime('%d %b %Y')}  ·  **{ly_label}** = "
-               f"{ly_d_from.strftime('%d %b %Y')} – {ly_d_to.strftime('%d %b %Y')}")
+    with st.expander("📊 KPI cards — Revenue, Quantity, CM1%, ACoS%, "
+                       "CM2%, CM2 Abs (with vs Budget / LM / LY)",
+                       expanded=False):
+        card_defs = [
+            ("Revenue",  fmt_lakhs(k.get("SALES_ACT")),
+                f"Bud: {fmt_lakhs(k.get('SALES_BUD'))}",
+                False, "SALES_ACT",   fmt_lakhs,
+                _ratio(k.get("SALES_ACT"),    k.get("SALES_BUD"))),
+            ("Quantity", fmt_units(k.get("UNITS_ACT")),
+                f"Bud: {fmt_units(k.get('UNITS_BUD'))}",
+                False, "UNITS_ACT",   fmt_units,
+                _ratio(k.get("UNITS_ACT"),    k.get("UNITS_BUD"))),
+            ("CM1%",     fmt_pct(k.get("CM1_ACT")),
+                f"Bud: {fmt_pct(k.get('CM1_BUD'))}",
+                False, "CM1_ACT",     fmt_pct,
+                _ratio(k.get("CM1_ACT"),      k.get("CM1_BUD"))),
+            ("ACoS%",    fmt_pct(k.get("ACOS_ACT")),
+                f"Bud: {fmt_pct(k.get('ACOS_BUD'))}",
+                True,  "ACOS_ACT",    fmt_pct,
+                _ratio(k.get("ACOS_ACT"),     k.get("ACOS_BUD"))),
+            ("CM2%",     fmt_pct(k.get("CM2_ACT")),
+                f"Bud: {fmt_pct(k.get('CM2_BUD'))}",
+                False, "CM2_ACT",     fmt_pct,
+                _ratio(k.get("CM2_ACT"),      k.get("CM2_BUD"))),
+            ("CM2 Abs",  fmt_lakhs(k.get("CM2_ABS_ACT")),
+                f"Bud: {fmt_lakhs(k.get('CM2_ABS_BUD'))}",
+                False, "CM2_ABS_ACT", fmt_lakhs,
+                _ratio(k.get("CM2_ABS_ACT"), k.get("CM2_ABS_BUD"))),
+        ]
+        cols = st.columns(6, gap="medium")
+        for col, (lbl, val, sub, lb, key, fmt, ach) in zip(cols, card_defs):
+            cur     = k.get(key)
+            lm_raw  = _prev_val(klm, key)
+            ly_raw  = _prev_val(kly, key)
+            col.markdown(
+                strip_card(
+                    lbl, val, sub,
+                    delta=_pct_change(cur, lm_raw),
+                    delta_suffix=f"vs {lm_label}",
+                    vs_b_pct=ach,
+                    vs_b_lower_better=lb,
+                    lm_value=fmt(lm_raw) if lm_raw is not None else None,
+                    ly_delta=_pct_change(cur, ly_raw),
+                    ly_value=fmt(ly_raw) if ly_raw is not None else None,
+                ),
+                unsafe_allow_html=True)
+        st.caption(
+            f"📅 **{lm_label}** = {lm_d_from.strftime('%d %b %Y')} – "
+            f"{lm_d_to.strftime('%d %b %Y')}  ·  "
+            f"**{ly_label}** = {ly_d_from.strftime('%d %b %Y')} – "
+            f"{ly_d_to.strftime('%d %b %Y')}"
+        )
 
     st.markdown('<div class="section-hdr">GEO &times; Channel Breakdown</div>', unsafe_allow_html=True)
     st.caption(f"Pro-rata pace: {days_elapsed} of {_total_days} days elapsed this month  "
@@ -2826,16 +2840,46 @@ def render_overview():
     # ── Variance attribution chart (#20) ──
     with st.expander("📐 Variance attribution by Country", expanded=False):
         st.caption("Each bar shows the contribution of one country to the overall "
-                   "sales variance vs budget. Sum of all bars ≈ total variance.")
-        vfig = build_variance_chart(df)
-        if vfig is not None:
-            st.plotly_chart(vfig, use_container_width=True,
-                            config={"displayModeBar": False})
-        else:
-            st.info("Not enough data to compute variance attribution.")
+                   "variance vs budget. Sum of all bars ≈ total variance.")
+        vc1, vc2 = st.columns(2, gap="medium")
+        with vc1:
+            vfig_sales = build_variance_chart(df, metric="SALES")
+            if vfig_sales is not None:
+                st.plotly_chart(vfig_sales, use_container_width=True,
+                                config={"displayModeBar": False})
+            else:
+                st.info("Not enough data to compute sales variance.")
+        with vc2:
+            vfig_cm2 = build_variance_chart(df, metric="CM2_ABS")
+            if vfig_cm2 is not None:
+                st.plotly_chart(vfig_cm2, use_container_width=True,
+                                config={"displayModeBar": False})
+            else:
+                st.info("Not enough data to compute CM2 Abs variance.")
 
     df = df.merge(fm_df[["GEO","CHANNEL","FM_SALES_BUD","FM_CM2_BUD"]],
                   on=["GEO","CHANNEL"], how="left")
+
+    # Prior-period GEO×Channel slices for the Rev LM / Rev LY / ACoS LY
+    # columns. Same GEO breakdown query, shifted date ranges.
+    df_lm = get_view1(where_lm, sfx)
+    df_ly = get_view1(where_ly, sfx)
+    if not df_lm.empty:
+        df = df.merge(
+            df_lm[["GEO","CHANNEL","SALES_ACT","ACOS_ACT"]].rename(columns={
+                "SALES_ACT": "LM_SALES_ACT", "ACOS_ACT": "LM_ACOS_ACT"}),
+            on=["GEO","CHANNEL"], how="left")
+    else:
+        df["LM_SALES_ACT"] = None
+        df["LM_ACOS_ACT"]  = None
+    if not df_ly.empty:
+        df = df.merge(
+            df_ly[["GEO","CHANNEL","SALES_ACT","ACOS_ACT"]].rename(columns={
+                "SALES_ACT": "LY_SALES_ACT", "ACOS_ACT": "LY_ACOS_ACT"}),
+            on=["GEO","CHANNEL"], how="left")
+    else:
+        df["LY_SALES_ACT"] = None
+        df["LY_ACOS_ACT"]  = None
 
     disp = df.copy()
     disp["CHANNEL"]      = disp["CHANNEL"].astype(str).str.replace("_", " ", regex=False)
@@ -2849,10 +2893,13 @@ def render_overview():
 
     disp["Revenue Act"]  = disp.apply(lambda r: _money(r["SALES_ACT"],     r["GEO"]), axis=1)
     disp["Revenue Bud"]  = disp.apply(lambda r: _money(r["SALES_BUD"],     r["GEO"]), axis=1)
+    disp["Rev LM"]       = disp.apply(lambda r: _money(r.get("LM_SALES_ACT"), r["GEO"]), axis=1)
+    disp["Rev LY"]       = disp.apply(lambda r: _money(r.get("LY_SALES_ACT"), r["GEO"]), axis=1)
     disp["CM1% Act"]     = disp["CM1_PCT_ACT"].apply(fmt_pct)
     disp["CM1% Bud"]     = disp["CM1_PCT_BUD"].apply(fmt_pct)
     disp["ACoS% Act"]    = disp["ACOS_ACT"].apply(fmt_pct)
     disp["ACoS% Bud"]    = disp["ACOS_BUD"].apply(fmt_pct)
+    disp["ACoS LY"]      = disp["LY_ACOS_ACT"].apply(fmt_pct)
     disp["CM2% Act"]     = disp["CM2_PCT_ACT"].apply(fmt_pct)
     disp["CM2% Bud"]     = disp["CM2_PCT_BUD"].apply(fmt_pct)
     disp["CM2 Abs Act"]  = disp.apply(lambda r: _money(r["CM2_ABS_ACT"], r["GEO"]), axis=1)
@@ -2885,8 +2932,11 @@ def render_overview():
         return spark_map.get((row["GEO"], row["CHANNEL"]), [])
     disp["Trend"] = disp.apply(_trend, axis=1)
 
-    dcols = ["GEO","CHANNEL","Qty","Trend","Revenue Act","Revenue Bud","Rev % Achvd","Rev vs Plan",
-             "CM1% Act","CM1% Bud","ACoS% Act","ACoS% Bud",
+    dcols = ["GEO","CHANNEL","Qty","Trend",
+             "Revenue Act","Revenue Bud","Rev LM","Rev LY",
+             "Rev % Achvd","Rev vs Plan",
+             "CM1% Act","CM1% Bud",
+             "ACoS% Act","ACoS% Bud","ACoS LY",
              "CM2% Act","CM2% Bud","CM2 Abs Act","CM2 Abs Bud","CM2 Abs %","CM2 Var"]
 
     table_df = disp[dcols].reset_index(drop=True)
