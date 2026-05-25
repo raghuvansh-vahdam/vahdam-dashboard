@@ -4524,6 +4524,118 @@ def render_price_tracker():
                 '</div>',
                 unsafe_allow_html=True)
 
+            # ── 🐛 Debug: raw Keepa dump for one ASIN ──
+            # Lets the user verify rating / reviews / buybox arrays are
+            # actually being returned by Keepa for a chosen test ASIN
+            # before we wire those fields into the production table.
+            with st.expander(
+                "🐛 Debug — raw Keepa response for one ASIN "
+                "(rating / reviews / buybox / stats)", expanded=False):
+                st.caption(
+                    "Pick any tracked ASIN. This shows what Keepa is "
+                    "actually sending back so we can confirm whether "
+                    "rating, review count, and buy-box data is available. "
+                    "Uses the SAME cached fetch as the rest of the page "
+                    "(no extra Keepa tokens spent)."
+                )
+                dbg_asin = st.selectbox(
+                    "Test ASIN",
+                    options=asins,
+                    index=0,
+                    key=f"price_dbg_asin_{geo}",
+                )
+                if dbg_asin and dbg_asin in data:
+                    dd = data[dbg_asin]
+                    c1, c2, c3 = st.columns(3, gap="medium")
+                    c1.metric("Rating (last)",
+                              f"{dd.get('rating'):.2f} ★"
+                              if dd.get('rating') is not None else "None")
+                    c2.metric("Reviews (last)",
+                              f"{dd.get('reviews_count'):,}"
+                              if dd.get('reviews_count') is not None else "None")
+                    bbp = dd.get('buybox_present')
+                    c3.metric("Buy Box (yest.)",
+                              "✓ Present" if bbp is True
+                              else "✗ Missing" if bbp is False
+                              else "None")
+                    bb_y = dd.get('buybox_yesterday')
+                    if bb_y:
+                        st.caption(f"Buy Box price yesterday: "
+                                    f"{dd['currency']}{bb_y:.2f}")
+
+                    st.markdown("**History array lengths** "
+                                  "(number of decoded data points):")
+                    arr_lens = {
+                        "amazon_pts (csv[0])":   len(dd.get("amazon_pts", [])),
+                        "new_pts (csv[1])":      len(dd.get("new_pts", [])),
+                        "rating_pts (csv[16])":  len(dd.get("rating_pts", [])),
+                        "reviews_pts (csv[17])": len(dd.get("reviews_pts", [])),
+                        "buybox_pts (csv[18])":  len(dd.get("buybox_pts", [])),
+                    }
+                    st.json(arr_lens, expanded=True)
+
+                    # Show last 5 entries of each so the user can see the
+                    # actual values + most recent timestamps.
+                    def _last_n(pts, n=5):
+                        if not pts:
+                            return []
+                        return [
+                            {"date": d.strftime("%Y-%m-%d %H:%M"),
+                              "value": round(v, 2)}
+                            for d, v in pts[-n:]
+                        ]
+                    st.markdown("**Last 5 rating points** (★, decoded ÷10):")
+                    st.json(_last_n(dd.get("rating_pts", [])), expanded=False)
+                    st.markdown("**Last 5 reviews-count points**:")
+                    st.json(_last_n(dd.get("reviews_pts", [])), expanded=False)
+                    st.markdown("**Last 5 buybox-price points** "
+                                  "(csv[18] decoded, -1 raw = no buybox):")
+                    st.json(_last_n(dd.get("buybox_pts", [])), expanded=False)
+
+                    # Stats object Keepa returned (current snapshot)
+                    stats = dd.get("stats") or {}
+                    cur   = stats.get("current") or []
+                    if cur:
+                        st.markdown(
+                            "**stats.current** — index → raw value "
+                            "(from Keepa, before our /100, /10 decode):")
+                        # Map the indices we care about for readability.
+                        labelled = {
+                            f"[{i}]": v for i, v in enumerate(cur)
+                        }
+                        # Friendly aliases for the ones we care about.
+                        useful_keys = {
+                            0:  "AMAZON",
+                            1:  "NEW",
+                            7:  "LIST_PRICE",
+                            16: "RATING (÷10 → stars)",
+                            17: "COUNT_REVIEWS",
+                            18: "BUY_BOX_SHIPPING",
+                            32: "BUY_BOX",
+                        }
+                        friendly = {
+                            f"[{i}] {useful_keys.get(i, '')}".strip():
+                                (v if v != -1 else "-1 (no data)")
+                            for i, v in enumerate(cur)
+                            if i in useful_keys
+                        }
+                        st.markdown("**Key indices only**:")
+                        st.json(friendly, expanded=True)
+                        with st.expander("Full stats.current array (all indices)",
+                                          expanded=False):
+                            st.json(labelled, expanded=False)
+                    else:
+                        st.warning(
+                            "No `stats.current` array returned by Keepa for "
+                            "this ASIN — that's unusual. Rating and review "
+                            "count come from this object. If empty across "
+                            "all ASINs, the Keepa plan may not include "
+                            "rating data or the API params need adjustment."
+                        )
+                elif dbg_asin:
+                    st.warning(f"ASIN {dbg_asin} not found in Keepa "
+                                 f"response for this GEO.")
+
             # ── Buybox-missing summary (based on YESTERDAY) ──
             missing_buybox = []
             not_found = []
