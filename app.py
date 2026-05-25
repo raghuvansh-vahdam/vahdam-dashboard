@@ -5606,12 +5606,17 @@ def get_dbr_data(d_from, d_to, sfx):
             CASE
                 -- Robust matching to handle case + spacing + underscore
                 -- variants like "Vahdam Wellness", "Spicetrain",
-                -- "Spice_Train", "SpiceTrain", etc.
-                WHEN UPPER(TRIM(BRAND)) LIKE '%VAHDAM%'                       THEN 'VT'
+                -- "Spice_Train", "SpiceTrain", "Handpick by Vahdam", etc.
+                -- HP patterns are checked FIRST so "Handpick by Vahdam"
+                -- (if it exists) doesn't accidentally bucket as VT.
                 WHEN UPPER(TRIM(BRAND)) LIKE '%HANDPICK%'                     THEN 'HP'
                 WHEN UPPER(REPLACE(REPLACE(TRIM(BRAND),' ',''),'_','')) LIKE '%SPICETRAIN%' THEN 'HP'
+                WHEN UPPER(TRIM(BRAND)) LIKE '%VAHDAM%'                       THEN 'VT'
                 ELSE 'OTHER'
             END AS BRAND_BUCKET,
+            -- Keep the original BRAND verbatim too so the debug expander
+            -- can show exactly what's in the source data.
+            UPPER(TRIM(BRAND))                                    AS BRAND_RAW,
             COALESCE(SUM(QTY_BUDGET), 0)                          AS UNITS_BUD,
             COALESCE(SUM(QTY_ACTUAL), 0)                          AS UNITS_ACT,
             COALESCE(SUM(SALES_BUDGET_{sfx}),  0)                 AS NETREV_BUD,
@@ -5639,7 +5644,7 @@ def get_dbr_data(d_from, d_to, sfx):
           AND GEO IS NOT NULL AND TRIM(GEO) <> ''
           AND CATEGORY IS NOT NULL AND TRIM(CATEGORY) <> ''
           AND {GEO_EXCL}
-        GROUP BY GEO, UPPER(TRIM(CATEGORY)), BRAND_BUCKET
+        GROUP BY GEO, UPPER(TRIM(CATEGORY)), BRAND_BUCKET, UPPER(TRIM(BRAND))
     """)
 
 
@@ -5875,7 +5880,7 @@ def render_dbr():
         return
 
     numeric_cols = [c for c in data.columns
-                    if c not in ("GEO", "CATEGORY", "BRAND_BUCKET")]
+                    if c not in ("GEO", "CATEGORY", "BRAND_BUCKET", "BRAND_RAW")]
     for df_ in (data, fmb_data):
         if df_.empty:
             continue
@@ -5883,6 +5888,8 @@ def render_dbr():
             df_[c] = pd.to_numeric(df_[c], errors="coerce").fillna(0)
         df_["CATEGORY"] = (df_["CATEGORY"].fillna("")
                                               .astype(str).str.upper().str.strip())
+        if "BRAND_RAW" in df_.columns:
+            df_["BRAND_RAW"] = df_["BRAND_RAW"].fillna("").astype(str)
 
     # ── Masks (date-range slice + FMB slice in parallel) ──
     core_mask     = data["CATEGORY"].apply(_is_core_cat)
@@ -6059,6 +6066,70 @@ def render_dbr():
         "CM1% / ACoS% / CM2% are expressed as a percent of Net Revenue; "
         "the % Achievement column repeats the absolute ratio."
     )
+
+    # ── Debug: brand-bucket assignment + FMB Net Revenue per brand ──
+    if not fmb_data.empty and "BRAND_RAW" in fmb_data.columns:
+        with st.expander(
+            "🛠 Debug — brand → bucket mapping (full month "
+            f"{month_start.strftime('%b %Y')})",
+            expanded=False):
+            st.caption(
+                "Every distinct BRAND value in the source data with its "
+                "assigned BRAND_BUCKET and FMB Net Revenue total. Useful "
+                "for spotting brands that fell into OTHER and shouldn't "
+                "have. Send the list back to me if anything looks wrong."
+            )
+            br = (fmb_data.groupby(["BRAND_RAW", "BRAND_BUCKET"])
+                          .agg(NETREV_BUD=("NETREV_BUD", "sum"),
+                                ROWS=("NETREV_BUD", "size"))
+                          .reset_index()
+                          .sort_values(["BRAND_BUCKET", "NETREV_BUD"],
+                                        ascending=[True, False]))
+            # Pretty-print the budget
+            br["NetRev Budget"] = br["NETREV_BUD"].apply(
+                lambda v: f"{int(v):,}" if v else "—")
+            br_disp = br.rename(columns={
+                "BRAND_RAW":    "BRAND (raw)",
+                "BRAND_BUCKET": "Bucket",
+                "ROWS":         "Row count",
+            })[["BRAND (raw)", "Bucket", "NetRev Budget", "Row count"]]
+
+            # Color-code rows by bucket so OTHER stands out
+            def _style_br(row):
+                rt = row.get("Bucket", "")
+                if   rt == "VT":    bg = "#d6ece1"
+                elif rt == "HP":    bg = "#fdf0d6"
+                elif rt == "OTHER": bg = "#fde8e8"
+                else:               bg = "#ffffff"
+                return [f"background-color:{bg};color:#171717;"] * len(row)
+            st.dataframe(
+                br_disp.style.apply(_style_br, axis=1).hide(axis="index"),
+                use_container_width=True, hide_index=True,
+            )
+            # Bucket totals — the quick numbers
+            tot = (fmb_data.groupby("BRAND_BUCKET")["NETREV_BUD"]
+                            .sum().to_dict())
+            colA, colB, colC = st.columns(3, gap="medium")
+            colA.markdown(strip_card(
+                "VT total (FMB)",
+                f"₹{int(tot.get('VT', 0)):,}" if tot.get('VT') else "—",
+                "Vahdam, all categories, full month"),
+                unsafe_allow_html=True)
+            colB.markdown(strip_card(
+                "HP total (FMB)",
+                f"₹{int(tot.get('HP', 0)):,}" if tot.get('HP') else "—",
+                "Handpick + Spice Train, all cats, full month"),
+                unsafe_allow_html=True)
+            colC.markdown(strip_card(
+                "OTHER total (FMB)",
+                f"₹{int(tot.get('OTHER', 0)):,}" if tot.get('OTHER') else "—",
+                "Brands not bucketed as VT or HP"),
+                unsafe_allow_html=True)
+            st.caption(
+                f"Expected HP total per your sheet: **₹69,658,639**. "
+                f"If the displayed HP total differs, the missing amount "
+                f"is in the OTHER bucket — check those brand strings above."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
