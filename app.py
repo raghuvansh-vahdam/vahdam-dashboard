@@ -5673,12 +5673,18 @@ def _dbr_fmt_pct(v):
     return f"{n:.2f}%"
 
 
-def _build_dbr_block(label, slice_totals, actual_only=False):
+def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
     """Return Budget / Actual / % Achievement dict rows for one bucket
-    given a Series-like with the SUM totals. When `actual_only=True`
-    (or when the block has no budget at all), only the Actual row is
-    emitted — used for the "Amazon Global Business (New)" block where
-    new launches don't yet have a budget set."""
+    given a Series-like with the SUM totals.
+
+    When `fmb_totals` is provided, an additional **FMB** (Full Month Budget)
+    row is prepended at the top of the block. The FMB row shows the
+    full-current-month budget figures unscaled by the page's date range,
+    so users can see how much of the month's total budget remains.
+
+    When `actual_only=True` (or when the block has no budget at all),
+    only the Actual row is emitted — used for the "Amazon Global
+    Business (New)" block where new launches don't yet have a budget."""
     netrev_b = _f(slice_totals.get("NETREV_BUD")) or 0
     netrev_a = _f(slice_totals.get("NETREV_ACT")) or 0
 
@@ -5707,8 +5713,23 @@ def _build_dbr_block(label, slice_totals, actual_only=False):
             return "—"
         return _dbr_fmt_pct(av / bv * 100)
 
-    kinds = ("Actual",) if actual_only else ("Budget", "Actual", "% Achievement")
     rows = []
+    # FMB row prepended when fmb_totals is provided
+    if fmb_totals is not None:
+        fmb_netrev_b = _f(fmb_totals.get("NETREV_BUD")) or 0
+        fmb_row = {"GEO Bucket": label, "Type": "FMB"}
+        for col_label, b_col, _a_col, fmt in _DBR_COLS:
+            fmb_bv = _f(fmb_totals.get(b_col)) or 0
+            if fmt == "pct_rev":
+                fmb_row[col_label] = (
+                    _dbr_fmt_pct(fmb_bv / fmb_netrev_b * 100)
+                    if fmb_netrev_b else "—"
+                )
+            else:
+                fmb_row[col_label] = _dbr_fmt_int(fmb_bv)
+        rows.append(fmb_row)
+
+    kinds = ("Actual",) if actual_only else ("Budget", "Actual", "% Achievement")
     for kind in kinds:
         row = {"GEO Bucket": label, "Type": kind}
         for col_label, b_col, a_col, fmt in _DBR_COLS:
@@ -5729,10 +5750,11 @@ def _is_new_cat(c):
     return ("coffee" in cl) or ("supplement" in cl)
 
 
-# Shared row-style for DBR mini-tables (peach/green/pink per Type)
+# Shared row-style for DBR mini-tables (FMB blue + peach/green/pink per Type)
 def _dbr_style_row(row):
     rt = row.get("Type", "")
-    if   rt == "Budget":        bg, lbl = "#fde9c8", "#7a5c00"
+    if   rt == "FMB":           bg, lbl = "#e3eef8", "#0b4a6b"   # light blue
+    elif rt == "Budget":        bg, lbl = "#fde9c8", "#7a5c00"
     elif rt == "Actual":        bg, lbl = "#d4ecd4", "#004A2B"
     elif rt == "% Achievement": bg, lbl = "#f9d6d6", "#8b1a1a"
     else:                       bg, lbl = "#ffffff", "#171717"
@@ -5747,20 +5769,27 @@ def _dbr_style_row(row):
 
 
 def _render_dbr_mini_table(blocks, key_suffix=""):
-    """`blocks` is a list of either (label, totals_series) or
-    (label, totals_series, actual_only_bool). Renders one styled
-    dataframe with the same Bucket/Type/metric columns DBR uses."""
+    """`blocks` is a list of:
+        (label, totals)                                        — 2-tuple
+        (label, totals, actual_only)                           — 3-tuple
+        (label, totals, actual_only, fmb_totals)               — 4-tuple
+    Renders one styled dataframe with Bucket / Type / metric columns.
+    When the 4th element is supplied, an FMB row is prepended above
+    the Budget row."""
     rows = []
     for entry in blocks:
-        actual_only = False
-        if len(entry) == 3:
+        actual_only, fmb_totals = False, None
+        if len(entry) == 4:
+            label, totals, actual_only, fmb_totals = entry
+        elif len(entry) == 3:
             label, totals, actual_only = entry
         else:
             label, totals = entry
         rows.extend(
             [{**r, "Bucket": r.pop("GEO Bucket")}
              for r in _build_dbr_block(label, totals,
-                                        actual_only=actual_only)]
+                                        actual_only=actual_only,
+                                        fmb_totals=fmb_totals)]
         )
     if not rows:
         return
@@ -5770,7 +5799,7 @@ def _render_dbr_mini_table(blocks, key_suffix=""):
     st.dataframe(
         df_disp.style.apply(_dbr_style_row, axis=1).hide(axis="index"),
         use_container_width=True,
-        height=min(360, 38 + n_rows * 36),
+        height=min(440, 38 + n_rows * 36),
         hide_index=True,
     )
 
@@ -5831,65 +5860,96 @@ def render_dbr():
              "The Global rows above always reflect the full Total, Core and "
              "New scopes.")
 
-    # ── Fetch once, slice in pandas ──
+    # ── Fetch once, slice in pandas. Pull the SELECTED-range data AND
+    # the FULL-MONTH range so we can show FMB rows. The two share an
+    # identical shape, so the same slicing helpers work on both. ──
     with st.spinner("Loading DBR…"):
-        data = get_dbr_data(d_from, d_to, sfx)
+        data     = get_dbr_data(d_from, d_to, sfx)
+        fmb_data = get_dbr_data(month_start, month_end, sfx)
     if data.empty:
         st.info("📭 No data for the selected date range.")
         return
 
     numeric_cols = [c for c in data.columns
                     if c not in ("GEO", "CATEGORY", "BRAND_BUCKET")]
-    for c in numeric_cols:
-        data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
-    data["CATEGORY"] = data["CATEGORY"].fillna("").astype(str).str.upper().str.strip()
+    for df_ in (data, fmb_data):
+        if df_.empty:
+            continue
+        for c in numeric_cols:
+            df_[c] = pd.to_numeric(df_[c], errors="coerce").fillna(0)
+        df_["CATEGORY"] = (df_["CATEGORY"].fillna("")
+                                              .astype(str).str.upper().str.strip())
 
-    # ── Masks ──
-    core_mask = data["CATEGORY"].apply(_is_core_cat)
-    new_mask  = data["CATEGORY"].apply(_is_new_cat)
+    # ── Masks (date-range slice + FMB slice in parallel) ──
+    core_mask     = data["CATEGORY"].apply(_is_core_cat)
+    new_mask      = data["CATEGORY"].apply(_is_new_cat)
+    if fmb_data.empty:
+        fmb_core_mask = fmb_new_mask = None
+    else:
+        fmb_core_mask = fmb_data["CATEGORY"].apply(_is_core_cat)
+        fmb_new_mask  = fmb_data["CATEGORY"].apply(_is_new_cat)
 
     show_core = bt in ("Both", "CORE (T&B)")
     show_new  = bt in ("Both", "NEW (Coffee + Supplements)")
 
-    def _sum(mask) -> pd.Series:
-        sub = data[mask]
+    def _sum(df_, mask, cols=None) -> pd.Series:
+        if df_ is None or df_.empty:
+            return pd.Series({c: 0 for c in (cols or numeric_cols)})
+        sub = df_[mask] if mask is not None else df_
         return (sub[numeric_cols].sum() if not sub.empty
                 else pd.Series({c: 0 for c in numeric_cols}))
 
-    # ── Top-level Total (always visible) ──
+    # ── Top-level Total (always visible) — with FMB row ──
     st.markdown(
         '<div class="section-hdr" style="margin-top:14px;">'
         'Amazon Global Business</div>', unsafe_allow_html=True)
-    total_s = _sum(pd.Series([True] * len(data)))
-    _render_dbr_mini_table([("Amazon Global Business (Total)", total_s)])
+    st.caption(
+        f"FMB = full-month budget for {month_start.strftime('%b %Y')} "
+        f"(not scaled to the selected date range)."
+    )
+    total_s     = _sum(data,     pd.Series([True] * len(data)))
+    total_fmb_s = _sum(fmb_data, None) if not fmb_data.empty else None
+    _render_dbr_mini_table([
+        ("Amazon Global Business (Total)", total_s, False, total_fmb_s),
+    ])
 
-    # ── Global Core (expandable) ──
+    # ── Global Core (expandable) — FMB row included ──
     if show_core:
-        core_s    = _sum(core_mask)
-        core_vt_s = _sum(core_mask & (data["BRAND_BUCKET"] == "VT"))
-        core_hp_s = _sum(core_mask & (data["BRAND_BUCKET"] == "HP"))
+        core_s    = _sum(data, core_mask)
+        core_vt_s = _sum(data, core_mask & (data["BRAND_BUCKET"] == "VT"))
+        core_hp_s = _sum(data, core_mask & (data["BRAND_BUCKET"] == "HP"))
+        core_fmb_s    = _sum(fmb_data, fmb_core_mask)
+        core_vt_fmb_s = _sum(fmb_data, fmb_core_mask & (fmb_data["BRAND_BUCKET"] == "VT")) \
+                        if fmb_core_mask is not None else None
+        core_hp_fmb_s = _sum(fmb_data, fmb_core_mask & (fmb_data["BRAND_BUCKET"] == "HP")) \
+                        if fmb_core_mask is not None else None
         with st.expander(
             _dbr_expander_title("Amazon Global Business (Core)", core_s),
             expanded=False):
             _render_dbr_mini_table([
-                ("Overall (Core)", core_s),
-                ("VT (Core)",      core_vt_s),
-                ("HP (Core)",      core_hp_s),
+                ("Overall (Core)", core_s,    False, core_fmb_s),
+                ("VT (Core)",      core_vt_s, False, core_vt_fmb_s),
+                ("HP (Core)",      core_hp_s, False, core_hp_fmb_s),
             ])
 
-    # ── Global New (expandable, actual-only) ──
+    # ── Global New (expandable, actual-only) — FMB row included ──
     if show_new:
-        new_s    = _sum(new_mask)
-        new_vt_s = _sum(new_mask & (data["BRAND_BUCKET"] == "VT"))
-        new_hp_s = _sum(new_mask & (data["BRAND_BUCKET"] == "HP"))
+        new_s    = _sum(data, new_mask)
+        new_vt_s = _sum(data, new_mask & (data["BRAND_BUCKET"] == "VT"))
+        new_hp_s = _sum(data, new_mask & (data["BRAND_BUCKET"] == "HP"))
+        new_fmb_s    = _sum(fmb_data, fmb_new_mask)
+        new_vt_fmb_s = _sum(fmb_data, fmb_new_mask & (fmb_data["BRAND_BUCKET"] == "VT")) \
+                       if fmb_new_mask is not None else None
+        new_hp_fmb_s = _sum(fmb_data, fmb_new_mask & (fmb_data["BRAND_BUCKET"] == "HP")) \
+                       if fmb_new_mask is not None else None
         with st.expander(
             _dbr_expander_title("Amazon Global Business (New)",
                                  new_s, actual_only=True),
             expanded=False):
             _render_dbr_mini_table([
-                ("Overall (New)", new_s,    True),
-                ("VT (New)",      new_vt_s, True),
-                ("HP (New)",      new_hp_s, True),
+                ("Overall (New)", new_s,    True, new_fmb_s),
+                ("VT (New)",      new_vt_s, True, new_vt_fmb_s),
+                ("HP (New)",      new_hp_s, True, new_hp_fmb_s),
             ])
 
     # ── Per-country drill-down ──
@@ -5909,15 +5969,37 @@ def render_dbr():
             'Country breakdown — click any country to drill into '
             'CORE / NEW × VT / HP</div>', unsafe_allow_html=True)
 
+    def _sum_geo(df_, mask_within, geo_):
+        """Sum numeric_cols for rows matching mask_within within a single
+        GEO. Returns a zero-Series if df_ is empty or there are no rows."""
+        if df_ is None or df_.empty:
+            return pd.Series({c: 0 for c in numeric_cols})
+        sub = df_[mask_within & (df_["GEO"] == geo_)] \
+              if mask_within is not None else df_[df_["GEO"] == geo_]
+        if sub.empty:
+            return pd.Series({c: 0 for c in numeric_cols})
+        return sub[numeric_cols].sum()
+
     for geo in geo_order:
         sub_all = data[per_geo_mask & (data["GEO"] == geo)]
         if sub_all.empty:
             continue
         overall_s = sub_all[numeric_cols].sum()
+        # Country-level FMB overall: respect the show_core/show_new
+        # filter so the FMB row matches the scope of the rest of the panel.
+        if not fmb_data.empty:
+            fmb_per_geo_mask = (
+                (fmb_core_mask | fmb_new_mask) if (show_core and show_new)
+                else (fmb_core_mask if show_core else fmb_new_mask)
+            )
+            overall_fmb_s = _sum_geo(fmb_data, fmb_per_geo_mask, geo)
+        else:
+            overall_fmb_s = None
+
         with st.expander(
             _dbr_expander_title(f"{geo} Overall", overall_s),
             expanded=False):
-            blocks = [(f"{geo} Overall", overall_s)]
+            blocks = [(f"{geo} Overall", overall_s, False, overall_fmb_s)]
 
             # Core breakdown
             if show_core:
@@ -5932,10 +6014,21 @@ def render_dbr():
                         geo_core[geo_core["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
                         if (geo_core["BRAND_BUCKET"] == "HP").any()
                         else pd.Series({c: 0 for c in numeric_cols}))
+                    geo_core_fmb_s    = _sum_geo(fmb_data, fmb_core_mask, geo)
+                    geo_core_vt_fmb_s = _sum_geo(
+                        fmb_data,
+                        (fmb_core_mask & (fmb_data["BRAND_BUCKET"] == "VT"))
+                        if fmb_core_mask is not None else None,
+                        geo)
+                    geo_core_hp_fmb_s = _sum_geo(
+                        fmb_data,
+                        (fmb_core_mask & (fmb_data["BRAND_BUCKET"] == "HP"))
+                        if fmb_core_mask is not None else None,
+                        geo)
                     blocks.extend([
-                        (f"{geo} Overall (Core)", geo_core_s),
-                        (f"{geo} VT (Core)",      geo_core_vt_s),
-                        (f"{geo} HP (Core)",      geo_core_hp_s),
+                        (f"{geo} Overall (Core)", geo_core_s,    False, geo_core_fmb_s),
+                        (f"{geo} VT (Core)",      geo_core_vt_s, False, geo_core_vt_fmb_s),
+                        (f"{geo} HP (Core)",      geo_core_hp_s, False, geo_core_hp_fmb_s),
                     ])
 
             # New breakdown
@@ -5951,18 +6044,30 @@ def render_dbr():
                         geo_new[geo_new["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
                         if (geo_new["BRAND_BUCKET"] == "HP").any()
                         else pd.Series({c: 0 for c in numeric_cols}))
+                    geo_new_fmb_s    = _sum_geo(fmb_data, fmb_new_mask, geo)
+                    geo_new_vt_fmb_s = _sum_geo(
+                        fmb_data,
+                        (fmb_new_mask & (fmb_data["BRAND_BUCKET"] == "VT"))
+                        if fmb_new_mask is not None else None,
+                        geo)
+                    geo_new_hp_fmb_s = _sum_geo(
+                        fmb_data,
+                        (fmb_new_mask & (fmb_data["BRAND_BUCKET"] == "HP"))
+                        if fmb_new_mask is not None else None,
+                        geo)
                     blocks.extend([
-                        (f"{geo} Overall (New)", geo_new_s,    True),
-                        (f"{geo} VT (New)",      geo_new_vt_s, True),
-                        (f"{geo} HP (New)",      geo_new_hp_s, True),
+                        (f"{geo} Overall (New)", geo_new_s,    True, geo_new_fmb_s),
+                        (f"{geo} VT (New)",      geo_new_vt_s, True, geo_new_vt_fmb_s),
+                        (f"{geo} HP (New)",      geo_new_hp_s, True, geo_new_hp_fmb_s),
                     ])
 
             _render_dbr_mini_table(blocks, key_suffix=geo)
 
     # ── Compact legend ──
     st.caption(
-        "Rows: **Budget** (peach), **Actual** (green), "
-        "**% Achievement** (pink, Actual ÷ Budget). "
+        "Rows: **FMB** (blue — full-month budget, not pro-rated), "
+        "**Budget** (peach — budget for selected date range), "
+        "**Actual** (green), **% Achievement** (pink, Actual ÷ Budget). "
         "Each country expander shows that GEO's own Overall first, then "
         "Core (VT/HP) and New (VT/HP) breakdowns when data is available. "
         "CM1% / ACoS% / CM2% are expressed as a percent of Net Revenue; "
