@@ -1642,6 +1642,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))   AS PRODUCT_NAME,
                 MAX(BRAND)                                               AS BRAND,
                 MAX(CATEGORY)                                            AS CATEGORY,
+                MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)'))      AS SUB_CATEGORY,
                 SUM(QTY_BUDGET)                                          AS BUD_UNITS_RAW,
                 SUM(QTY_ACTUAL)                                          AS ACT_UNITS_RAW,
                 SUM(SALES_BUDGET_{sfx})                                  AS BUD_REVENUE_RAW,
@@ -1716,6 +1717,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             p.PRODUCT_NAME                                                          AS PRODUCT_NAME,
             p.BRAND                                                                 AS BRAND,
             p.CATEGORY                                                              AS CATEGORY,
+            p.SUB_CATEGORY                                                          AS SUB_CATEGORY,
             -- Velocity (Yesterday absolute, 7/14/30d as daily averages)
             COALESCE(r.U_1D, 0)                                                     AS UNITS_YESTERDAY,
             ROUND(COALESCE(r.U_7D, 0)  /  7.0, 1)                                   AS UNITS_7D_AVG,
@@ -3474,9 +3476,9 @@ def render_subcategory():
         if cr.empty:
             st.info("📭 No ASIN data found for this GEO in the selected range.")
         else:
-            # Brand + Category filters side-by-side
-            brand_opts = sorted(b for b in cr["BRAND"].dropna().unique() if str(b).strip())
-            cat_opts   = sorted(c for c in cr["CATEGORY"].dropna().unique() if str(c).strip())
+            # Brand + Sub-Category filters side-by-side
+            brand_opts    = sorted(b for b in cr["BRAND"].dropna().unique() if str(b).strip())
+            sub_cat_opts  = sorted(s for s in cr["SUB_CATEGORY"].dropna().unique() if str(s).strip())
             fc1, fc2 = st.columns(2, gap="medium")
             with fc1:
                 picked_brands = st.multiselect(
@@ -3484,14 +3486,14 @@ def render_subcategory():
                     brand_opts, default=[], placeholder="All brands",
                     key=f"cr_brand_{geo}") if len(brand_opts) > 1 else []
             with fc2:
-                picked_cats = st.multiselect(
-                    f"🗂 Filter by Category ({len(cat_opts)} available)",
-                    cat_opts, default=[], placeholder="All categories",
-                    key=f"cr_cat_{geo}") if len(cat_opts) > 1 else []
+                picked_subcats = st.multiselect(
+                    f"🗂 Filter by Sub-Category ({len(sub_cat_opts)} available)",
+                    sub_cat_opts, default=[], placeholder="All sub-categories",
+                    key=f"cr_subcat_{geo}") if len(sub_cat_opts) > 1 else []
             if picked_brands:
                 cr = cr[cr["BRAND"].isin(picked_brands)].reset_index(drop=True)
-            if picked_cats:
-                cr = cr[cr["CATEGORY"].isin(picked_cats)].reset_index(drop=True)
+            if picked_subcats:
+                cr = cr[cr["SUB_CATEGORY"].isin(picked_subcats)].reset_index(drop=True)
 
             # Build column list — USA gets FBA + ADW + Total Inv; others Total only
             inv_cols = ([("FBA_INV", "FBA Inv"),
