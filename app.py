@@ -3586,9 +3586,14 @@ def render_subcategory():
                 ("PM1_ACOS_PCT",    "PM-1 ACoS%"),
             ]
 
+            # NOTE: SUB_CATEGORY must be listed as a text column here —
+            # if it's left out, it gets pd.to_numeric'd to NaN and shows
+            # as "None" in the rendered table.
+            _text_cols = {"ASIN", "PRODUCT_NAME", "BRAND",
+                          "CATEGORY", "SUB_CATEGORY"}
             show = pd.DataFrame({
                 disp: pd.to_numeric(cr[raw], errors="coerce")
-                       if raw not in ("ASIN","PRODUCT_NAME","BRAND","CATEGORY")
+                       if raw not in _text_cols
                        else cr[raw].fillna("").astype(str)
                 for raw, disp in col_map
             }).reset_index(drop=True)
