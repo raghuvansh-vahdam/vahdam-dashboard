@@ -1910,7 +1910,12 @@ def _run_pnl_query(sql_template, retry_on_missing_col=True):
 def get_pnl_agg(where, sfx):
     def _build():
         sel = _pnl_metric_sql([p for _, _, p in _PNL_LINES], sfx)
-        return f"SELECT {sel} FROM {TABLE} WHERE {where}"
+        # Quantity / Units lives on currency-agnostic columns
+        # (QTY_ACTUAL / QTY_BUDGET), so we add them separately.
+        return (f"SELECT {sel}, "
+                f"COALESCE(SUM(QTY_ACTUAL),0) AS QTY_ACT, "
+                f"COALESCE(SUM(QTY_BUDGET),0) AS QTY_BUD "
+                f"FROM {TABLE} WHERE {where}")
     try:
         return _run_pnl_query(_build())
     except Exception:
@@ -2771,6 +2776,35 @@ def _build_waterfall(row):
     rows = []
     sales_act = _f(row.get("SALES_ACT"))
     sales_bud = _f(row.get("SALES_BUD"))
+
+    # Quantity row prepended above Sales. Units don't have a meaningful
+    # "% of Sales" so those two cells render as "—". Variance and Var%
+    # still apply (act units vs bud units).
+    qty_act = _f(row.get("QTY_ACT"))
+    qty_bud = _f(row.get("QTY_BUD"))
+    if qty_act is not None and qty_bud is not None:
+        qty_var     = qty_act - qty_bud
+        qty_var_pct = (qty_var / abs(qty_bud) * 100) if qty_bud != 0 else None
+    else:
+        qty_var, qty_var_pct = None, None
+    rows.append({
+        "P&L Line":       "Quantity",
+        "Actual (INR)":   fmt_indian(qty_act),
+        "% of Sales (A)": "—",
+        "Budget (INR)":   fmt_indian(qty_bud),
+        "% of Sales (B)": "—",
+        "Variance (INR)": fmt_indian(qty_var, signed=True),
+        "Var %":          (f"{'+' if (qty_var_pct or 0) >= 0 else ''}"
+                            f"{qty_var_pct:.1f}%"
+                            if qty_var_pct is not None else "—"),
+        "_type": "total",
+        "_var":  qty_var,
+        # Quantity isn't a cost — higher act-vs-bud is GOOD, so the
+        # variance-colour logic uses _cost=False (positive variance =
+        # green, like Sales).
+        "_cost": False,
+    })
+
     for label, row_type, pfx in _PNL_LINES:
         act = _f(row.get(f"{pfx}_ACT"))
         bud = _f(row.get(f"{pfx}_BUD"))
