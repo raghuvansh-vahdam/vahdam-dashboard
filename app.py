@@ -1835,13 +1835,17 @@ _PNL_LINES = [
     ("Sales",               "total",    "SALES"),
     ("(-) COGS",            "cost",     "COGS"),
     ("(-) Additional Duty", "cost",     "ADDITIONAL_DUTY"),
-    ("= CM1",               "subtotal", "CM1"),
     ("(-) Outbound",        "cost",     "OUTBOUND"),
     ("(-) 3PL",             "cost",     "THREE_PL"),
     ("(-) Storage",         "cost",     "STORAGE"),
     ("(-) Last Mile",       "cost",     "LAST_MILE"),
     ("(-) Commission",      "cost",     "COMMISSION"),
-    ("= CM2 (pre-mkt)",     "subtotal", "CM2_PRE_MKT"),
+    # CM1 here represents Sales minus every line above (already the way
+    # the source data is calculated — Sales - COGS - duties -
+    # fulfilment costs). The previous "CM2 (pre-mkt)" row was dropped
+    # because it equalled CM1 in this dataset (no extra pre-marketing
+    # deduction exists upstream).
+    ("= CM1",               "subtotal", "CM1"),
     ("(-) PM Spend",        "cost",     "PM_SPEND"),
     ("= CM2",               "total",    "CM2"),
 ]
@@ -2776,12 +2780,17 @@ def _build_waterfall(row):
     rows = []
     sales_act = _f(row.get("SALES_ACT"))
     sales_bud = _f(row.get("SALES_BUD"))
-
-    # Quantity row prepended above Sales. Units don't have a meaningful
-    # "% of Sales" so those two cells render as "—". Variance and Var%
-    # still apply (act units vs bud units).
     qty_act = _f(row.get("QTY_ACT"))
     qty_bud = _f(row.get("QTY_BUD"))
+
+    def _per_unit(v, qty):
+        if v is None or qty is None or qty == 0:
+            return None
+        return v / qty
+
+    # Quantity row prepended above Sales. Units don't have a meaningful
+    # "% of Sales" or "Per Unit" so those cells render as "—". Variance
+    # and Var% still apply (act units vs bud units).
     if qty_act is not None and qty_bud is not None:
         qty_var     = qty_act - qty_bud
         qty_var_pct = (qty_var / abs(qty_bud) * 100) if qty_bud != 0 else None
@@ -2790,8 +2799,10 @@ def _build_waterfall(row):
     rows.append({
         "P&L Line":       "Quantity",
         "Actual (INR)":   fmt_indian(qty_act),
+        "Per Unit (A)":   "—",
         "% of Sales (A)": "—",
         "Budget (INR)":   fmt_indian(qty_bud),
+        "Per Unit (B)":   "—",
         "% of Sales (B)": "—",
         "Variance (INR)": fmt_indian(qty_var, signed=True),
         "Var %":          (f"{'+' if (qty_var_pct or 0) >= 0 else ''}"
@@ -2799,9 +2810,6 @@ def _build_waterfall(row):
                             if qty_var_pct is not None else "—"),
         "_type": "total",
         "_var":  qty_var,
-        # Quantity isn't a cost — higher act-vs-bud is GOOD, so the
-        # variance-colour logic uses _cost=False (positive variance =
-        # green, like Sales).
         "_cost": False,
     })
 
@@ -2816,15 +2824,25 @@ def _build_waterfall(row):
         # Common-size: each line as % of Sales
         pct_act = (act / sales_act * 100) if (act is not None and sales_act not in (None, 0)) else None
         pct_bud = (bud / sales_bud * 100) if (bud is not None and sales_bud not in (None, 0)) else None
+        # Per-unit cost / value: line value ÷ corresponding-period
+        # Quantity. Useful for spotting per-unit cost creep or pricing.
+        pu_act  = _per_unit(act, qty_act)
+        pu_bud  = _per_unit(bud, qty_bud)
 
         def _pct_fmt(v):
             return "—" if v is None else f"{v:.1f}%"
+        def _pu_fmt(v):
+            if v is None: return "—"
+            # 2 decimals for small per-unit values (< 100), else whole rupees
+            return f"{v:,.2f}" if abs(v) < 100 else f"{v:,.0f}"
 
         rows.append({
             "P&L Line":       label,
             "Actual (INR)":   fmt_indian(act),
+            "Per Unit (A)":   _pu_fmt(pu_act),
             "% of Sales (A)": _pct_fmt(pct_act),
             "Budget (INR)":   fmt_indian(bud),
+            "Per Unit (B)":   _pu_fmt(pu_bud),
             "% of Sales (B)": _pct_fmt(pct_bud),
             "Variance (INR)": fmt_indian(var, signed=True),
             "Var %":          (f"{'+'if (var_pct or 0)>=0 else ''}{var_pct:.1f}%"
