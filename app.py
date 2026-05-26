@@ -2392,9 +2392,15 @@ def render_alerts(view1_df, kpi_row, agg_label="GEO", key_prefix="alert"):
 
 
 # ── Country performance bar with rich hover (Exec Summary) ──
-def build_country_perf_chart(view1_df):
+def build_country_perf_chart(view1_df, fm_df=None):
     """Horizontal bar chart of Revenue % vs Budget per country, with a rich
-    hover tooltip showing all 5 KPIs (Rev, CM1%, ACoS%, CM2%, CM2 Abs)."""
+    hover tooltip showing all 5 KPIs (Rev, CM1%, ACoS%, CM2%, CM2 Abs).
+
+    `fm_df`: optional full-month view1 dataframe (typically
+    get_view1(where_fm, sfx)). When supplied, the tooltip also shows
+    FM Bud Revenue / Quantity / CM2 Abs alongside the selected-period
+    figures so the user knows the full bucket each metric is sliced out
+    of."""
     if not HAS_PLOTLY or view1_df is None or view1_df.empty:
         return None
     t = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
@@ -2402,6 +2408,20 @@ def build_country_perf_chart(view1_df):
     t = t.dropna(subset=["REV_PCT_n"]).copy()
     if t.empty: return None
     t = t.sort_values("REV_PCT_n", ascending=True).reset_index(drop=True)
+
+    # Merge FM Budget columns onto the per-GEO totals if available.
+    if fm_df is not None and not fm_df.empty and "CHANNEL" in fm_df.columns:
+        fm_t = fm_df[fm_df["CHANNEL"] == "TOTAL"][
+            [c for c in ("GEO", "SALES_BUD", "QTY_BUD", "CM2_ABS_BUD")
+             if c in fm_df.columns]
+        ].copy()
+        fm_t = fm_t.rename(columns={
+            "SALES_BUD":   "FM_SALES_BUD",
+            "QTY_BUD":     "FM_QTY_BUD",
+            "CM2_ABS_BUD": "FM_CM2_ABS_BUD",
+        })
+        if "GEO" in fm_t.columns:
+            t = t.merge(fm_t, on="GEO", how="left")
 
     def _num(col): return pd.to_numeric(t[col], errors="coerce") if col in t.columns else pd.Series([None]*len(t))
 
@@ -2411,6 +2431,10 @@ def build_country_perf_chart(view1_df):
     cm2a    = _num("CM2_ABS_ACT"); cm2a_bud= _num("CM2_ABS_BUD")
     sales_act = _num("SALES_ACT"); sales_bud = _num("SALES_BUD")
     qty_act   = _num("QTY");       qty_bud   = _num("QTY_BUD")
+    # Full-month budget series (None when fm_df not provided)
+    fm_sales  = _num("FM_SALES_BUD")
+    fm_qty    = _num("FM_QTY_BUD")
+    fm_cm2a   = _num("FM_CM2_ABS_BUD")
 
     def _ppdiff(a, b):
         return [None if (pd.isna(x) or pd.isna(y)) else float(x) - float(y)
@@ -2428,6 +2452,10 @@ def build_country_perf_chart(view1_df):
     customdata = []
     for i, row in t.iterrows():
         qty_ratio = _ratio([qty_act.iloc[i]], [qty_bud.iloc[i]])[0]
+        # FM Bud (full-month) values for each metric
+        _fm_sales_v = _f(fm_sales.iloc[i])
+        _fm_qty_v   = _f(fm_qty.iloc[i])
+        _fm_cm2a_v  = _f(fm_cm2a.iloc[i])
         cd = [
             fmt_lakhs(sales_act.iloc[i]),     fmt_lakhs(sales_bud.iloc[i]),
             f"{_f(t['REV_PCT_n'].iloc[i]):.1f}%",
@@ -2443,6 +2471,10 @@ def build_country_perf_chart(view1_df):
             # Quantity (units)
             fmt_units(qty_act.iloc[i]),       fmt_units(qty_bud.iloc[i]),
             (f"{qty_ratio:.1f}%" if qty_ratio is not None else "—"),
+            # FM Bud (full-month) — Sales / Quantity / CM2 Abs
+            (fmt_lakhs(_fm_sales_v) if _fm_sales_v is not None else "—"),
+            (fmt_units(_fm_qty_v)   if _fm_qty_v   is not None else "—"),
+            (fmt_lakhs(_fm_cm2a_v)  if _fm_cm2a_v  is not None else "—"),
         ]
         customdata.append(cd)
 
@@ -2471,9 +2503,11 @@ def build_country_perf_chart(view1_df):
             "<span style='color:#7a6a50;'>· Rev vs Budget</span><br>"
             "──────────────────<br>"
             "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
-            "<b>(%{customdata[2]})</b><br>"
+            "<b>(%{customdata[2]})</b>  "
+            "<span style='color:#7a6a50;'>· FM Bud %{customdata[18]}</span><br>"
             "<b>Quantity</b>     %{customdata[15]}  /  %{customdata[16]}  "
-            "<b>(%{customdata[17]})</b><br>"
+            "<b>(%{customdata[17]})</b>  "
+            "<span style='color:#7a6a50;'>· FM Bud %{customdata[19]}</span><br>"
             "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
             "<b>(%{customdata[5]} vs B)</b><br>"
             "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
@@ -2481,9 +2515,10 @@ def build_country_perf_chart(view1_df):
             "<b>CM2%</b>         %{customdata[9]}  /  %{customdata[10]}  "
             "<b>(%{customdata[11]} vs B)</b><br>"
             "<b>CM2 Abs</b>      %{customdata[12]} /  %{customdata[13]}  "
-            "<b>(%{customdata[14]})</b><br>"
+            "<b>(%{customdata[14]})</b>  "
+            "<span style='color:#7a6a50;'>· FM Bud %{customdata[20]}</span><br>"
             "<span style='color:#7a6a50;font-size:10px;'>"
-            "Actual / Budget · click row to drill</span>"
+            "Actual / Budget · FM Bud = full-month · click row to drill</span>"
             "<extra></extra>"
         ),
     ))
@@ -2994,7 +3029,10 @@ def render_ceo():
                     '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
                     '— hover for full P&amp;L · click any bar to drill in</span>'
                     '</div>', unsafe_allow_html=True)
-        cfig = build_country_perf_chart(df)
+        # Pull a per-GEO full-month aggregate so the tooltip can show
+        # FM Bud Revenue / Quantity / CM2 Abs next to the period budget.
+        fm_view1_df = get_view1(where_fm, sfx)
+        cfig = build_country_perf_chart(df, fm_df=fm_view1_df)
         if cfig is not None:
             cevent = st.plotly_chart(
                 cfig, use_container_width=True,
