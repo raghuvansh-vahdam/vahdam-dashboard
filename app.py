@@ -1021,6 +1021,9 @@ TOTAL_ROW = ";font-weight:700;background:#EDE8DC;color:#004A2B"
 
 # ── SQL helpers ───────────────────────────────────────────────────────────────
 def _v1_metrics(sfx):
+    # ACoS Actual now includes Google Ads spend: (PM+GADS)/Sales
+    # ACoS Budget stays PM-only (no Google Spend budget upstream)
+    spend_act = _spend_actual_sum_sql(sfx)
     return f"""
         SUM(QTY_ACTUAL)                                                                    AS QTY,
         SUM(QTY_BUDGET)                                                                    AS QTY_BUD,
@@ -1030,7 +1033,7 @@ def _v1_metrics(sfx):
         ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)            AS REV_PCT,
         ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)             AS CM1_PCT_ACT,
         ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)             AS CM1_PCT_BUD,
-        ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)        AS ACOS_ACT,
+        ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)                       AS ACOS_ACT,
         ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)        AS ACOS_BUD,
         ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)             AS CM2_PCT_ACT,
         ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)             AS CM2_PCT_BUD,
@@ -1043,6 +1046,9 @@ def _v1_metrics(sfx):
 # ── Queries ───────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def get_kpis(where, sfx):
+    # ACoS Actual = (PM Spend + Google Ads Spend) / Sales — see _spend_actual_sum_sql.
+    # ACoS Budget remains PM-only (no Google Ads budget column upstream).
+    spend_act = _spend_actual_sum_sql(sfx)
     return run_query(f"""
         SELECT
             ROUND(SUM(SALES_ACTUAL_{sfx}),0)                                              AS SALES_ACT,
@@ -1053,9 +1059,9 @@ def get_kpis(where, sfx):
             ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)         AS CM1_BUD,
             ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100
                  -SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)         AS CM1_DELTA,
-            ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)    AS ACOS_ACT,
+            ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)                   AS ACOS_ACT,
             ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)    AS ACOS_BUD,
-            ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100
+            ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100
                  -SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)    AS ACOS_DELTA,
             ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1)         AS CM2_ACT,
             ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1)         AS CM2_BUD,
@@ -1108,6 +1114,9 @@ def get_fm_budget_v1(where_fm, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_view2(where, sfx):
+    # ACoS Actual now = (PM_SPEND_ACTUAL + GOOGLE_SPEND_ACTUAL) / SALES_ACTUAL.
+    # Budget side stays PM-only (no GADS budget column).
+    spend_act = _spend_actual_sum_sql(sfx)
     return run_query(f"""
         SELECT COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') AS SUB_CATEGORY,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)  AS SALES_BUD,
@@ -1117,7 +1126,7 @@ def get_view2(where, sfx):
             ROUND(SUM(CM1_ACTUAL_{sfx}),0)    AS CM1_ACT,
             ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS CM1_PCT_ACT,
             ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS CM1_PCT_BUD,
-            ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS ACOS_PCT_ACT,
+            ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS ACOS_PCT_ACT,
             ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS ACOS_PCT_BUD,
             ROUND(SUM(CM2_BUDGET_{sfx}),0)    AS CM2_BUD,
             ROUND(SUM(CM2_ACTUAL_{sfx}),0)    AS CM2_ACT,
@@ -1138,7 +1147,7 @@ def get_view2(where, sfx):
             ROUND(SUM(CM1_ACTUAL_{sfx}),0),
             ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
             ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
-            ROUND(SUM(PM_SPEND_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
             ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
             ROUND(SUM(CM2_BUDGET_{sfx}),0),
             ROUND(SUM(CM2_ACTUAL_{sfx}),0),
@@ -1416,6 +1425,9 @@ def get_asin_data(where, geo, sub_cat, sfx):
         "(COALESCE(i.FBA_INV,0) + COALESCE(i.ADW_INV,0))" if is_usa
         else "COALESCE(i.FBA_INV,0)"
     )
+    # Defensive SUM for GOOGLE_SPEND_ACTUAL — yields 0 when the column
+    # hasn't been added upstream yet.
+    gads_sum_sql = _gads_actual_sum_sql(sfx)
 
     return run_query(f"""
         WITH pnl AS (
@@ -1433,6 +1445,7 @@ def get_asin_data(where, geo, sub_cat, sfx):
                 SUM(SALES_ACTUAL_{sfx})                                 AS ACT_REVENUE_RAW,
                 SUM(CM1_ACTUAL_{sfx})                                   AS CM1_ACT_RAW,
                 SUM(PM_SPEND_ACTUAL_{sfx})                              AS PM_SPEND_ACT_RAW,
+                {gads_sum_sql}                                          AS GADS_SPEND_ACT_RAW,
                 SUM(CM2_ACTUAL_{sfx})                                   AS CM2_ACT_RAW
             FROM {TABLE}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
@@ -1507,7 +1520,10 @@ def get_asin_data(where, geo, sub_cat, sfx):
             ROUND(p.ACT_REVENUE_RAW / NULLIF(p.ACT_UNITS_RAW, 0), 2)                AS ACT_ASP,
             ROUND(p.CM1_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)            AS ACT_CM1_PCT,
             ROUND(p.PM_SPEND_ACT_RAW, 0)                                            AS ACT_SPEND,
-            ROUND(p.PM_SPEND_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)       AS ACT_ACOS_PCT,
+            ROUND(p.GADS_SPEND_ACT_RAW, 0)                                          AS GADS_SPEND_ACT,
+            -- ACoS Actual = (PM Spend + Google Ads Spend) / Sales × 100
+            ROUND((p.PM_SPEND_ACT_RAW + p.GADS_SPEND_ACT_RAW)
+                   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)                         AS ACT_ACOS_PCT,
             ROUND(p.CM2_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)            AS ACT_CM2_PCT,
             ROUND(p.CM2_ACT_RAW, 0)                                                 AS ACT_CM2_ABS,
             ROUND(p.ACT_REVENUE_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)        AS REV_ACHVD_PCT,
@@ -1669,6 +1685,10 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
         sess_pm_extrap  = "CAST(NULL AS NUMBER)"
         sess_pm1_extrap = "CAST(NULL AS NUMBER)"
 
+    # Defensive Google Ads sum — yields 0 when GOOGLE_SPEND_ACTUAL_<sfx>
+    # is missing from the schema (e.g. older snapshot).
+    gads_sum_sql = _gads_actual_sum_sql(sfx)
+
     return run_query(f"""
         WITH pnl AS (
             SELECT
@@ -1690,6 +1710,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 SUM(CM1_ACTUAL_{sfx})                                    AS CM1_ACT_RAW,
                 SUM(PM_SPEND_BUDGET_{sfx})                               AS SPEND_BUD_RAW,
                 SUM(PM_SPEND_ACTUAL_{sfx})                               AS SPEND_ACT_RAW,
+                {gads_sum_sql}                                           AS GADS_SPEND_ACT_RAW,
                 SUM(CM2_BUDGET_{sfx})                                    AS CM2_BUD_RAW,
                 SUM(CM2_ACTUAL_{sfx})                                    AS CM2_ACT_RAW
             FROM {TABLE}
@@ -1727,13 +1748,15 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             GROUP BY UPPER(SPLIT_PART(ASIN, ' ', 1))
         ),
         pm AS (
-            -- Previous full calendar month
+            -- Previous full calendar month. SPEND now includes Google Ads
+            -- so PM ACoS% matches the (PM + GADS) / Sales definition.
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
                    SUM(QTY_ACTUAL)                AS UNITS,
                    COUNT(DISTINCT CASE WHEN COALESCE(QTY_ACTUAL,0) > 0
                                        THEN DAY END) AS UNIT_DAYS,
                    SUM(SALES_ACTUAL_{sfx})        AS REVENUE,
-                   SUM(PM_SPEND_ACTUAL_{sfx})     AS SPEND
+                   SUM(PM_SPEND_ACTUAL_{sfx})
+                     + {gads_sum_sql}             AS SPEND
             FROM {TABLE}
             WHERE DAY BETWEEN '{prev_m_start}' AND '{prev_m_end}'
               AND GEO = '{geo}' AND {GEO_EXCL}
@@ -1741,13 +1764,15 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
         pm1 AS (
-            -- Previous-1 (two months ago) full calendar month
+            -- Previous-1 (two months ago) full calendar month. SPEND
+            -- includes Google Ads — same convention as `pm`.
             SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
                    SUM(QTY_ACTUAL)                AS UNITS,
                    COUNT(DISTINCT CASE WHEN COALESCE(QTY_ACTUAL,0) > 0
                                        THEN DAY END) AS UNIT_DAYS,
                    SUM(SALES_ACTUAL_{sfx})        AS REVENUE,
-                   SUM(PM_SPEND_ACTUAL_{sfx})     AS SPEND
+                   SUM(PM_SPEND_ACTUAL_{sfx})
+                     + {gads_sum_sql}             AS SPEND
             FROM {TABLE}
             WHERE DAY BETWEEN '{prev_m1_start}' AND '{prev_m1_end}'
               AND GEO = '{geo}' AND {GEO_EXCL}
@@ -1798,11 +1823,17 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             ROUND(COALESCE(p.BUD_REVENUE_RAW, 0), 0)                                AS BUD_REVENUE,
             ROUND(COALESCE(p.ACT_REVENUE_RAW, 0), 0)                                AS ACT_REVENUE,
             ROUND(COALESCE(p.BUD_REVENUE_RAW, 0) - COALESCE(p.ACT_REVENUE_RAW, 0), 0) AS LAG_REVENUE,
+            -- Absolute spends (for the new "GADS Spend" column displayed
+            -- next to PM Spend / ACoS%).
+            ROUND(COALESCE(p.SPEND_ACT_RAW, 0), 0)                                  AS ACT_SPEND,
+            ROUND(COALESCE(p.GADS_SPEND_ACT_RAW, 0), 0)                             AS GADS_SPEND_ACT,
             -- Margin / ad-cost % (ratios of selected-period absolutes)
+            -- ACoS Actual = (PM Spend + Google Ads Spend) / Sales × 100
             ROUND(p.CM1_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM1_PCT,
             ROUND(p.CM1_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM1_PCT,
             ROUND(p.SPEND_BUD_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_ACOS_PCT,
-            ROUND(p.SPEND_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_ACOS_PCT,
+            ROUND((p.SPEND_ACT_RAW + p.GADS_SPEND_ACT_RAW)
+                    / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)                        AS ACT_ACOS_PCT,
             ROUND(p.CM2_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM2_PCT,
             ROUND(p.CM2_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM2_PCT,
             -- ── Previous full month (extrapolated sessions in CR%) ──
@@ -1847,6 +1878,12 @@ _PNL_LINES = [
     # deduction exists upstream).
     ("= CM1",               "subtotal", "CM1"),
     ("(-) PM Spend",        "cost",     "PM_SPEND"),
+    # GADS = Google Ads spend. Source table has GOOGLE_SPEND_ACTUAL_{sfx}
+    # only (no Budget column upstream → Budget cell renders as "—" via
+    # _pnl_metric_sql's CAST(NULL AS NUMBER) fallback). CM2 already nets
+    # out GADS in the source data, so this row simply surfaces the
+    # value that's already implicit in CM2.
+    ("(-) GADS Spend",      "cost",     "GOOGLE_SPEND"),
     ("= CM2",               "total",    "CM2"),
 ]
 
@@ -1872,6 +1909,35 @@ def _pnl_metric_sql(prefixes, sfx, with_alias=True):
             expr = f"ROUND(SUM({col}),0)" if col in all_cols else "CAST(NULL AS NUMBER)"
             parts.append(f"{expr} AS {pfx}_{short}" if with_alias else expr)
     return ", ".join(parts)
+
+
+def _spend_actual_sum_sql(sfx):
+    """SQL fragment for total marketing spend = PM Spend Actual + GADS Actual.
+    GADS (GOOGLE_SPEND_ACTUAL_<sfx>) is opt-in: if the column doesn't
+    exist in the live table (e.g. before the upstream load adds it),
+    we fall back to PM Spend only.
+
+    Returns an expression like:
+        (COALESCE(SUM(PM_SPEND_ACTUAL_INR),0) + COALESCE(SUM(GOOGLE_SPEND_ACTUAL_INR),0))
+    when both exist, or just the PM_SPEND term otherwise. Use inside
+    SUM/aggregate queries that group at any grain — the column refs are
+    naked column names that get aggregated by the surrounding SUM."""
+    all_cols = discover_pnl_cols()
+    pm = f"PM_SPEND_ACTUAL_{sfx}"
+    g  = f"GOOGLE_SPEND_ACTUAL_{sfx}"
+    if g in all_cols and pm in all_cols:
+        return f"(COALESCE(SUM({pm}),0) + COALESCE(SUM({g}),0))"
+    if g in all_cols:
+        return f"COALESCE(SUM({g}),0)"
+    return f"COALESCE(SUM({pm}),0)"
+
+
+def _gads_actual_sum_sql(sfx):
+    """Standalone SUM for GOOGLE_SPEND_ACTUAL_<sfx>, NULL-safe and
+    defensive against the column not existing yet."""
+    all_cols = discover_pnl_cols()
+    g = f"GOOGLE_SPEND_ACTUAL_{sfx}"
+    return f"COALESCE(SUM({g}),0)" if g in all_cols else "CAST(0 AS NUMBER)"
 
 
 def _run_pnl_query(sql_template, retry_on_missing_col=True):
@@ -1930,7 +1996,7 @@ def get_pnl_agg(where, sfx):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_daily(where, sfx):
     def _build():
-        sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND"], sfx)
+        sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"], sfx)
         return f"SELECT DAY, {sel} FROM {TABLE} WHERE {where} GROUP BY DAY ORDER BY DAY"
     try:
         return _run_pnl_query(_build())
@@ -1939,7 +2005,7 @@ def get_pnl_daily(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_category(where, sfx):
-    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND"]
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
     return run_query(f"""
@@ -1954,7 +2020,7 @@ def get_pnl_category(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_channel(where, sfx):
-    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND"]
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
     return run_query(f"""
@@ -1970,7 +2036,7 @@ def get_pnl_channel(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_geo(where, sfx):
-    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND"]
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
     return run_query(f"""
@@ -2094,10 +2160,11 @@ METRIC_DEFS = {
     "REV_PCT":        "Rev % = Sales Actual ÷ Sales Budget × 100. >100% = above plan.",
     "CM1":            "CM1 = Contribution Margin 1 = Sales − COGS − Additional Duty.\n"
                       "CM1% = CM1 ÷ Sales × 100.",
-    "ACOS":           "ACoS = Advertising Cost of Sales = PM Spend ÷ Sales × 100.\n"
-                      "Lower is better (ad efficiency). <20% = efficient, >35% = unhealthy.",
-    "CM2":            "CM2 = CM1 − Outbound − 3PL − Storage − Last Mile − Commission − PM Spend.\n"
-                      "CM2% = CM2 ÷ Sales × 100. The bottom-line margin after all marketplace costs.",
+    "ACOS":           "ACoS = (PM Spend + Google Ads Spend) ÷ Sales × 100.\n"
+                      "Lower is better (ad efficiency). <20% = efficient, >35% = unhealthy.\n"
+                      "Budget side is PM-only (no Google Ads budget exists upstream).",
+    "CM2":            "CM2 = CM1 − PM Spend − Google Ads Spend.\n"
+                      "CM2% = CM2 ÷ Sales × 100. The bottom-line margin after all marketplace + paid-media costs.",
     "CM2_ABS":        "CM2 Absolute = CM2 in rupee terms. The actual profit contribution.",
     "FORECAST_EOM":   "Forecast EOM = (Sales-to-date ÷ days elapsed) × total days in month.\n"
                       "Linear extrapolation of current pace to month-end.",
@@ -3750,6 +3817,8 @@ def render_subcategory():
                 ("ACT_CM1_PCT",     "Act CM1%"),
                 ("BUD_ACOS_PCT",    "Bud ACoS%"),
                 ("ACT_ACOS_PCT",    "Act ACoS%"),
+                ("ACT_SPEND",       "PM Spend"),
+                ("GADS_SPEND_ACT",  "GADS Spend"),
                 ("BUD_CM2_PCT",     "Bud CM2%"),
                 ("ACT_CM2_PCT",     "Act CM2%"),
                 # Previous full month
@@ -3869,7 +3938,18 @@ def render_subcategory():
                 "Bud CM1%":        st.column_config.NumberColumn(format="%.1f%%"),
                 "Act CM1%":        st.column_config.NumberColumn(format="%.1f%%"),
                 "Bud ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
-                "Act ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
+                "Act ACoS%":       st.column_config.NumberColumn(
+                    format="%.1f%%",
+                    help="ACoS = (PM Spend + GADS Spend) ÷ Sales × 100. "
+                         "Includes both Amazon Ads and Google Ads spend."),
+                "PM Spend":        st.column_config.NumberColumn(
+                    format=f"{currency_sym}%,.0f",
+                    help="Performance Marketing (Amazon Ads) spend — actuals."),
+                "GADS Spend":      st.column_config.NumberColumn(
+                    format=f"{currency_sym}%,.0f",
+                    help="Google Ads spend — actuals. Currently surfaced "
+                         "for USA + CA where the data is loaded; other GEOs "
+                         "will show 0."),
                 "Bud CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
                 "Act CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
                 # Previous month (anchored to today)
@@ -4154,6 +4234,8 @@ def render_asin():
             ("BUD_CM1_PCT",   "Bud CM1%"),
             ("ACT_ACOS_PCT",  "Act ACoS%"),
             ("BUD_ACOS_PCT",  "Bud ACoS%"),
+            ("ACT_SPEND",     "PM Spend"),
+            ("GADS_SPEND_ACT","GADS Spend"),
             ("ACT_CM2_PCT",   "Act CM2%"),
             ("BUD_CM2_PCT",   "Bud CM2%"),
             ("ACT_CM2_ABS",   "CM2 Abs"),
@@ -4168,6 +4250,9 @@ def render_asin():
         p["Lag(R)"]    = pd.to_numeric(df["_LAG_REV"],   errors="coerce")
         p["Lag(U)"]    = pd.to_numeric(df["_LAG_UNITS"], errors="coerce")
         p["CM2 Abs"]   = df["ACT_CM2_ABS"].apply(fmt_lakhs)
+        # PM Spend / GADS Spend — both currency, rendered as lakhs.
+        p["PM Spend"]   = df["ACT_SPEND"].apply(fmt_lakhs)
+        p["GADS Spend"] = df["GADS_SPEND_ACT"].apply(fmt_lakhs)
         p["Act ASP"]   = df["ACT_ASP"].apply(lambda v: fmt_ccy(v))
         p["Bud ASP"]   = df["BUD_ASP"].apply(lambda v: fmt_ccy(v))
         for col in ["Rev %","Act CM1%","Bud CM1%","Act ACoS%","Bud ACoS%","Act CM2%","Bud CM2%"]:
@@ -6243,11 +6328,12 @@ def render_pnl():
                 daily["DAY"] = pd.to_datetime(daily["DAY"])
                 fig = go.Figure()
                 trace_cfgs = [
-                    ("SALES_ACT",    "Sales (Actual)",   "#004A2B", "solid"),
-                    ("SALES_BUD",    "Sales (Budget)",   "#004A2B", "dot"),
-                    ("CM1_ACT",      "CM1 (Actual)",     "#AB8743", "solid"),
-                    ("CM2_ACT",      "CM2 (Actual)",     "#2E7D32", "solid"),
-                    ("PM_SPEND_ACT", "PM Spend (Actual)","#8b1a1a", "dash"),
+                    ("SALES_ACT",        "Sales (Actual)",      "#004A2B", "solid"),
+                    ("SALES_BUD",        "Sales (Budget)",      "#004A2B", "dot"),
+                    ("CM1_ACT",          "CM1 (Actual)",        "#AB8743", "solid"),
+                    ("CM2_ACT",          "CM2 (Actual)",        "#2E7D32", "solid"),
+                    ("PM_SPEND_ACT",     "PM Spend (Actual)",   "#8b1a1a", "dash"),
+                    ("GOOGLE_SPEND_ACT", "GADS Spend (Actual)", "#d4842b", "dash"),
                 ]
                 # Pick axis unit based on peak magnitude across all traces
                 _peak = 0.0
@@ -6297,7 +6383,8 @@ def render_pnl():
             dt["Date"] = pd.to_datetime(dt["DAY"]).dt.strftime("%d %b")
             col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
                        ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
-                       ("PM_SPEND_ACT","PM Spend")]
+                       ("PM_SPEND_ACT","PM Spend"),
+                       ("GOOGLE_SPEND_ACT","GADS Spend")]
             for src, lbl in col_map:
                 if src in dt.columns:
                     dt[lbl] = dt[src].apply(fmt_lakhs)
@@ -6318,7 +6405,8 @@ def render_pnl():
         disp = df_in.copy()
         col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
                    ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
-                   ("PM_SPEND_ACT","PM Spend")]
+                   ("PM_SPEND_ACT","PM Spend"),
+                   ("GOOGLE_SPEND_ACT","GADS Spend")]
         for src, lbl in col_map:
             if src in disp.columns:
                 disp[lbl] = disp[src].apply(fmt_lakhs)
@@ -6445,6 +6533,9 @@ def get_dbr_data(d_from, d_to, sfx):
     fallback path rebuilds the SQL once."""
     # Currency-agnostic + currency-suffixed (col_name, alias) pairs in the
     # exact order get_dbr_data's downstream code expects.
+    # GOOGLE_SPEND_ACTUAL_<sfx> is Actual-only — there is no GADS Budget
+    # column upstream, so we expose only GADS_ACT and leave the Budget
+    # side blank in the DBR table render.
     _pairs = [
         ("QTY_BUDGET",                       "UNITS_BUD"),
         ("QTY_ACTUAL",                       "UNITS_ACT"),
@@ -6466,6 +6557,7 @@ def get_dbr_data(d_from, d_to, sfx):
         (f"CM1_ACTUAL_{sfx}",                "CM1_ACT"),
         (f"PM_SPEND_BUDGET_{sfx}",           "SPND_BUD"),
         (f"PM_SPEND_ACTUAL_{sfx}",           "SPND_ACT"),
+        (f"GOOGLE_SPEND_ACTUAL_{sfx}",       "GADS_ACT"),
         (f"CM2_BUDGET_{sfx}",                "CM2_BUD"),
         (f"CM2_ACTUAL_{sfx}",                "CM2_ACT"),
     ]
@@ -6518,21 +6610,28 @@ def get_dbr_data(d_from, d_to, sfx):
 # fmt: "int"     → integer, comma-separated (units)
 #      "ccy"     → currency, comma-separated (rupees, integer)
 #      "pct_rev" → expressed as % of Net Revenue (CM1%, ACoS%, CM2%)
+#
+# Sentinel `__NO_BUDGET__` for budget_col → render "—" for Budget cells.
+# Used for GADS Spend which is Actual-only upstream.
+# ACOS% pulls TOTAL spend Actual via a synthetic column `_TOTAL_SPND_ACT`
+# (computed in pandas after the SQL fetch) so that
+# ACoS Actual = (PM Spend + Google Ads Spend) / Sales.
 _DBR_COLS = [
-    ("Units",             "UNITS_BUD",  "UNITS_ACT",  "int"),
-    ("Net Revenue",       "NETREV_BUD", "NETREV_ACT", "ccy"),
-    ("COGS",              "COGS_BUD",   "COGS_ACT",   "ccy"),
-    ("Outbound",          "OUT_BUD",    "OUT_ACT",    "ccy"),
-    ("Last Mile",         "LM_BUD",     "LM_ACT",     "ccy"),
-    ("Commission",        "COMM_BUD",   "COMM_ACT",   "ccy"),
-    ("Storage",           "STR_BUD",    "STR_ACT",    "ccy"),
-    ("additional duty",   "ADDL_BUD",   "ADDL_ACT",   "ccy"),
-    ("CM1%",              "CM1_BUD",    "CM1_ACT",    "pct_rev"),
-    ("CM1",               "CM1_BUD",    "CM1_ACT",    "ccy"),
-    ("Spend",             "SPND_BUD",   "SPND_ACT",   "ccy"),
-    ("ACOS%",             "SPND_BUD",   "SPND_ACT",   "pct_rev"),
-    ("CM2%",              "CM2_BUD",    "CM2_ACT",    "pct_rev"),
-    ("CM2",               "CM2_BUD",    "CM2_ACT",    "ccy"),
+    ("Units",             "UNITS_BUD",  "UNITS_ACT",      "int"),
+    ("Net Revenue",       "NETREV_BUD", "NETREV_ACT",     "ccy"),
+    ("COGS",              "COGS_BUD",   "COGS_ACT",       "ccy"),
+    ("Outbound",          "OUT_BUD",    "OUT_ACT",        "ccy"),
+    ("Last Mile",         "LM_BUD",     "LM_ACT",         "ccy"),
+    ("Commission",        "COMM_BUD",   "COMM_ACT",       "ccy"),
+    ("Storage",           "STR_BUD",    "STR_ACT",        "ccy"),
+    ("additional duty",   "ADDL_BUD",   "ADDL_ACT",       "ccy"),
+    ("CM1%",              "CM1_BUD",    "CM1_ACT",        "pct_rev"),
+    ("CM1",               "CM1_BUD",    "CM1_ACT",        "ccy"),
+    ("Spend",             "SPND_BUD",   "SPND_ACT",       "ccy"),
+    ("GADS Spend",   "__NO_BUDGET__",   "GADS_ACT",       "ccy"),
+    ("ACOS%",             "SPND_BUD",   "_TOTAL_SPND_ACT","pct_rev"),
+    ("CM2%",              "CM2_BUD",    "CM2_ACT",        "pct_rev"),
+    ("CM2",               "CM2_BUD",    "CM2_ACT",        "ccy"),
 ]
 
 
@@ -6558,7 +6657,22 @@ def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
 
     When `actual_only=True` (or when the block has no budget at all),
     only the Actual row is emitted — used for the "Amazon Global
-    Business (New)" block where new launches don't yet have a budget."""
+    Business (New)" block where new launches don't yet have a budget.
+
+    `_DBR_COLS` may use the sentinel `__NO_BUDGET__` as `b_col` for
+    actuals-only metrics (GADS Spend) — that cell renders as "—" for
+    Budget / % Achievement rows. The actual column `_TOTAL_SPND_ACT`
+    (PM Spend + GADS) is synthesised inside this function so the ACoS%
+    row reflects the new (PM + GADS) / Sales definition."""
+    # Augment slice_totals with derived columns. dict/Series both
+    # support `get`/`__setitem__` — pandas Series via Series[key] = val.
+    pm_act_v   = _f(slice_totals.get("SPND_ACT")) or 0
+    gads_act_v = _f(slice_totals.get("GADS_ACT")) or 0
+    try:
+        slice_totals["_TOTAL_SPND_ACT"] = pm_act_v + gads_act_v
+    except Exception:
+        pass  # Series read-only edge cases — we fall back to the get below.
+
     netrev_b = _f(slice_totals.get("NETREV_BUD")) or 0
     netrev_a = _f(slice_totals.get("NETREV_ACT")) or 0
 
@@ -6567,13 +6681,20 @@ def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
         bud_total = sum(
             (_f(slice_totals.get(b_col)) or 0)
             for _, b_col, _, _ in _DBR_COLS
+            if b_col != "__NO_BUDGET__"
         )
         if bud_total == 0:
             actual_only = True
 
+    NO_BUD = "__NO_BUDGET__"
     def _val(b_col, a_col, fmt, kind):
+        if b_col == NO_BUD and kind != "Actual":
+            return "—"
         bv = _f(slice_totals.get(b_col)) or 0
-        av = _f(slice_totals.get(a_col)) or 0
+        if a_col == "_TOTAL_SPND_ACT":
+            av = pm_act_v + gads_act_v
+        else:
+            av = _f(slice_totals.get(a_col)) or 0
         if kind == "Budget":
             if fmt == "pct_rev":
                 return _dbr_fmt_pct(bv / netrev_b * 100) if netrev_b else "—"
@@ -6593,6 +6714,9 @@ def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
         fmb_netrev_b = _f(fmb_totals.get("NETREV_BUD")) or 0
         fmb_row = {"GEO Bucket": label, "Type": "FMB"}
         for col_label, b_col, _a_col, fmt in _DBR_COLS:
+            if b_col == NO_BUD:
+                fmb_row[col_label] = "—"
+                continue
             fmb_bv = _f(fmb_totals.get(b_col)) or 0
             if fmt == "pct_rev":
                 fmb_row[col_label] = (
