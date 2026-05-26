@@ -6436,8 +6436,50 @@ def get_dbr_data(d_from, d_to, sfx):
     across the columns the DBR table needs. CATEGORY is kept so the view
     can slice for Core (Teas & Botanicals), New (Coffee + Supplements),
     and any other custom grouping in pandas without re-querying. BRAND_BUCKET
-    resolves to VT (Vahdam) / HP (Handpick + Spice Train) / OTHER."""
-    return run_query(f"""
+    resolves to VT (Vahdam) / HP (Handpick + Spice Train) / OTHER.
+
+    Defensive against schema drift: any column not present in the live
+    table (e.g. STORAGE_BUDGET_INR was dropped at one point) is replaced
+    with `CAST(0 AS NUMBER)` so the query keeps compiling. On a stale-
+    column-list miss, _run_pnl_query refreshes discover_pnl_cols and the
+    fallback path rebuilds the SQL once."""
+    # Currency-agnostic + currency-suffixed (col_name, alias) pairs in the
+    # exact order get_dbr_data's downstream code expects.
+    _pairs = [
+        ("QTY_BUDGET",                       "UNITS_BUD"),
+        ("QTY_ACTUAL",                       "UNITS_ACT"),
+        (f"SALES_BUDGET_{sfx}",              "NETREV_BUD"),
+        (f"SALES_ACTUAL_{sfx}",              "NETREV_ACT"),
+        (f"COGS_BUDGET_{sfx}",               "COGS_BUD"),
+        (f"COGS_ACTUAL_{sfx}",               "COGS_ACT"),
+        (f"OUTBOUND_BUDGET_{sfx}",           "OUT_BUD"),
+        (f"OUTBOUND_ACTUAL_{sfx}",           "OUT_ACT"),
+        (f"LAST_MILE_BUDGET_{sfx}",          "LM_BUD"),
+        (f"LAST_MILE_ACTUAL_{sfx}",          "LM_ACT"),
+        (f"COMMISSION_BUDGET_{sfx}",         "COMM_BUD"),
+        (f"COMMISSION_ACTUAL_{sfx}",         "COMM_ACT"),
+        (f"STORAGE_BUDGET_{sfx}",            "STR_BUD"),
+        (f"STORAGE_ACTUAL_{sfx}",            "STR_ACT"),
+        (f"ADDITIONAL_DUTY_BUDGET_{sfx}",    "ADDL_BUD"),
+        (f"ADDITIONAL_DUTY_ACTUAL_{sfx}",    "ADDL_ACT"),
+        (f"CM1_BUDGET_{sfx}",                "CM1_BUD"),
+        (f"CM1_ACTUAL_{sfx}",                "CM1_ACT"),
+        (f"PM_SPEND_BUDGET_{sfx}",           "SPND_BUD"),
+        (f"PM_SPEND_ACTUAL_{sfx}",           "SPND_ACT"),
+        (f"CM2_BUDGET_{sfx}",                "CM2_BUD"),
+        (f"CM2_ACTUAL_{sfx}",                "CM2_ACT"),
+    ]
+
+    def _build():
+        all_cols = discover_pnl_cols()
+        select_lines = []
+        for col, alias in _pairs:
+            if col in all_cols:
+                select_lines.append(f"COALESCE(SUM({col}), 0) AS {alias}")
+            else:
+                select_lines.append(f"CAST(0 AS NUMBER) AS {alias}")
+        select_sql = ",\n            ".join(select_lines)
+        return f"""
         SELECT
             GEO,
             UPPER(TRIM(CATEGORY))                                 AS CATEGORY,
@@ -6455,35 +6497,20 @@ def get_dbr_data(d_from, d_to, sfx):
             -- Keep the original BRAND verbatim too so the debug expander
             -- can show exactly what's in the source data.
             UPPER(TRIM(BRAND))                                    AS BRAND_RAW,
-            COALESCE(SUM(QTY_BUDGET), 0)                          AS UNITS_BUD,
-            COALESCE(SUM(QTY_ACTUAL), 0)                          AS UNITS_ACT,
-            COALESCE(SUM(SALES_BUDGET_{sfx}),  0)                 AS NETREV_BUD,
-            COALESCE(SUM(SALES_ACTUAL_{sfx}),  0)                 AS NETREV_ACT,
-            COALESCE(SUM(COGS_BUDGET_{sfx}),   0)                 AS COGS_BUD,
-            COALESCE(SUM(COGS_ACTUAL_{sfx}),   0)                 AS COGS_ACT,
-            COALESCE(SUM(OUTBOUND_BUDGET_{sfx}),   0)             AS OUT_BUD,
-            COALESCE(SUM(OUTBOUND_ACTUAL_{sfx}),   0)             AS OUT_ACT,
-            COALESCE(SUM(LAST_MILE_BUDGET_{sfx}),  0)             AS LM_BUD,
-            COALESCE(SUM(LAST_MILE_ACTUAL_{sfx}),  0)             AS LM_ACT,
-            COALESCE(SUM(COMMISSION_BUDGET_{sfx}), 0)             AS COMM_BUD,
-            COALESCE(SUM(COMMISSION_ACTUAL_{sfx}), 0)             AS COMM_ACT,
-            COALESCE(SUM(STORAGE_BUDGET_{sfx}),    0)             AS STR_BUD,
-            COALESCE(SUM(STORAGE_ACTUAL_{sfx}),    0)             AS STR_ACT,
-            COALESCE(SUM(ADDITIONAL_DUTY_BUDGET_{sfx}), 0)        AS ADDL_BUD,
-            COALESCE(SUM(ADDITIONAL_DUTY_ACTUAL_{sfx}), 0)        AS ADDL_ACT,
-            COALESCE(SUM(CM1_BUDGET_{sfx}),    0)                 AS CM1_BUD,
-            COALESCE(SUM(CM1_ACTUAL_{sfx}),    0)                 AS CM1_ACT,
-            COALESCE(SUM(PM_SPEND_BUDGET_{sfx}), 0)               AS SPND_BUD,
-            COALESCE(SUM(PM_SPEND_ACTUAL_{sfx}), 0)               AS SPND_ACT,
-            COALESCE(SUM(CM2_BUDGET_{sfx}),    0)                 AS CM2_BUD,
-            COALESCE(SUM(CM2_ACTUAL_{sfx}),    0)                 AS CM2_ACT
+            {select_sql}
         FROM {TABLE}
         WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
           AND GEO IS NOT NULL AND TRIM(GEO) <> ''
           AND CATEGORY IS NOT NULL AND TRIM(CATEGORY) <> ''
           AND {GEO_EXCL}
         GROUP BY GEO, UPPER(TRIM(CATEGORY)), BRAND_BUCKET, UPPER(TRIM(BRAND))
-    """)
+        """
+    try:
+        return _run_pnl_query(_build())
+    except Exception:
+        # _run_pnl_query cleared discover_pnl_cols on missing-col → rebuild
+        # once with the fresh column set.
+        return run_query(_build())
 
 
 # Columns rendered in the DBR table. Each tuple:
