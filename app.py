@@ -2504,10 +2504,10 @@ def build_country_perf_chart(view1_df, fm_df=None):
             "──────────────────<br>"
             "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
             "<b>(%{customdata[2]})</b>  "
-            "<span style='color:#7a6a50;'>· FM Bud %{customdata[18]}</span><br>"
+            "<span style='color:#7a6a50;'>· FM = %{customdata[18]}</span><br>"
             "<b>Quantity</b>     %{customdata[15]}  /  %{customdata[16]}  "
             "<b>(%{customdata[17]})</b>  "
-            "<span style='color:#7a6a50;'>· FM Bud %{customdata[19]}</span><br>"
+            "<span style='color:#7a6a50;'>· FM = %{customdata[19]}</span><br>"
             "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
             "<b>(%{customdata[5]} vs B)</b><br>"
             "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
@@ -2516,9 +2516,9 @@ def build_country_perf_chart(view1_df, fm_df=None):
             "<b>(%{customdata[11]} vs B)</b><br>"
             "<b>CM2 Abs</b>      %{customdata[12]} /  %{customdata[13]}  "
             "<b>(%{customdata[14]})</b>  "
-            "<span style='color:#7a6a50;'>· FM Bud %{customdata[20]}</span><br>"
+            "<span style='color:#7a6a50;'>· FM = %{customdata[20]}</span><br>"
             "<span style='color:#7a6a50;font-size:10px;'>"
-            "Actual / Budget · FM Bud = full-month · click row to drill</span>"
+            "Actual / Budget · FM = full-month budget · click row to drill</span>"
             "<extra></extra>"
         ),
     ))
@@ -2552,10 +2552,14 @@ def build_country_perf_chart(view1_df, fm_df=None):
 
 
 # ── Sub-Category performance bar with rich hover ──
-def build_subcat_perf_chart(view2_df):
+def build_subcat_perf_chart(view2_df, fm_df=None):
     """Horizontal bar chart of Revenue % vs Budget per sub-category, with a rich
     hover tooltip showing all 5 KPIs (Rev, CM1%, ACoS%, CM2%, CM2 Abs).
-    Mirrors build_country_perf_chart for visual consistency."""
+    Mirrors build_country_perf_chart for visual consistency.
+
+    `fm_df`: optional full-month view2 dataframe (typically
+    get_view2(where_fm, sfx)). When supplied, the tooltip also shows
+    FM = X (full-month budget) for Revenue / Quantity / CM2 Abs."""
     if not HAS_PLOTLY or view2_df is None or view2_df.empty:
         return None
     t = view2_df[view2_df["SUB_CATEGORY"] != "GRAND TOTAL"].copy()
@@ -2563,6 +2567,19 @@ def build_subcat_perf_chart(view2_df):
     t = t.dropna(subset=["REV_PCT_n"]).copy()
     if t.empty: return None
     t = t.sort_values("REV_PCT_n", ascending=True).reset_index(drop=True)
+
+    # Merge FM Budget columns onto the per-subcat totals if available.
+    if fm_df is not None and not fm_df.empty and "SUB_CATEGORY" in fm_df.columns:
+        fm_keep = [c for c in ("SUB_CATEGORY", "SALES_BUD",
+                                "UNITS_BUD", "CM2_BUD")
+                   if c in fm_df.columns]
+        fm_t = (fm_df[fm_df["SUB_CATEGORY"] != "GRAND TOTAL"][fm_keep]
+                .rename(columns={
+                    "SALES_BUD": "FM_SALES_BUD",
+                    "UNITS_BUD": "FM_UNITS_BUD",
+                    "CM2_BUD":   "FM_CM2_BUD",
+                }))
+        t = t.merge(fm_t, on="SUB_CATEGORY", how="left")
 
     def _num(col): return pd.to_numeric(t[col], errors="coerce") if col in t.columns else pd.Series([None]*len(t))
 
@@ -2572,6 +2589,10 @@ def build_subcat_perf_chart(view2_df):
     cm2_act_p = _num("CM2_PCT_ACT"); cm2_bud_p = _num("CM2_PCT_BUD")
     cm2a      = _num("CM2_ACT");     cm2a_bud  = _num("CM2_BUD")
     qty_act   = _num("UNITS_ACT");   qty_bud   = _num("UNITS_BUD")
+    # Full-month budget series (NaN when fm_df not provided)
+    fm_sales  = _num("FM_SALES_BUD")
+    fm_qty    = _num("FM_UNITS_BUD")
+    fm_cm2a   = _num("FM_CM2_BUD")
 
     def _pp_str(a, b):
         if pd.isna(a) or pd.isna(b): return "—"
@@ -2585,6 +2606,9 @@ def build_subcat_perf_chart(view2_df):
 
     customdata = []
     for i, row in t.iterrows():
+        _fm_sales_v = _f(fm_sales.iloc[i])
+        _fm_qty_v   = _f(fm_qty.iloc[i])
+        _fm_cm2a_v  = _f(fm_cm2a.iloc[i])
         cd = [
             fmt_lakhs(sales_act.iloc[i]), fmt_lakhs(sales_bud.iloc[i]),
             f"{_f(t['REV_PCT_n'].iloc[i]):.1f}%",
@@ -2599,6 +2623,10 @@ def build_subcat_perf_chart(view2_df):
             # Quantity (units)
             fmt_units(qty_act.iloc[i]),   fmt_units(qty_bud.iloc[i]),
             _ratio_str(qty_act.iloc[i], qty_bud.iloc[i]),
+            # FM Bud (full-month) — Sales / Quantity / CM2 Abs
+            (fmt_lakhs(_fm_sales_v) if _fm_sales_v is not None else "—"),
+            (fmt_units(_fm_qty_v)   if _fm_qty_v   is not None else "—"),
+            (fmt_lakhs(_fm_cm2a_v)  if _fm_cm2a_v  is not None else "—"),
         ]
         customdata.append(cd)
 
@@ -2626,9 +2654,11 @@ def build_subcat_perf_chart(view2_df):
             "<span style='color:#7a6a50;'>· Rev vs Budget</span><br>"
             "──────────────────<br>"
             "<b>Revenue</b>      %{customdata[0]}  /  %{customdata[1]}  "
-            "<b>(%{customdata[2]})</b><br>"
+            "<b>(%{customdata[2]})</b>  "
+            "<span style='color:#7a6a50;'>· FM = %{customdata[18]}</span><br>"
             "<b>Quantity</b>     %{customdata[15]}  /  %{customdata[16]}  "
-            "<b>(%{customdata[17]})</b><br>"
+            "<b>(%{customdata[17]})</b>  "
+            "<span style='color:#7a6a50;'>· FM = %{customdata[19]}</span><br>"
             "<b>CM1%</b>         %{customdata[3]}  /  %{customdata[4]}  "
             "<b>(%{customdata[5]} vs B)</b><br>"
             "<b>ACoS%</b>        %{customdata[6]}  /  %{customdata[7]}  "
@@ -2636,9 +2666,11 @@ def build_subcat_perf_chart(view2_df):
             "<b>CM2%</b>         %{customdata[9]}  /  %{customdata[10]}  "
             "<b>(%{customdata[11]} vs B)</b><br>"
             "<b>CM2 Abs</b>      %{customdata[12]} /  %{customdata[13]}  "
-            "<b>(%{customdata[14]})</b><br>"
+            "<b>(%{customdata[14]})</b>  "
+            "<span style='color:#7a6a50;'>· FM = %{customdata[20]}</span><br>"
             "<span style='color:#7a6a50;font-size:10px;'>"
-            "Actual / Budget · click bar to drill into ASINs</span>"
+            "Actual / Budget · FM = full-month budget · "
+            "click bar to drill into ASINs</span>"
             "<extra></extra>"
         ),
     ))
@@ -3496,7 +3528,10 @@ def render_subcategory():
         '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
         '— hover for full P&amp;L · click any bar to drill into ASINs</span>'
         '</div>', unsafe_allow_html=True)
-    scfig = build_subcat_perf_chart(df)
+    # Full-month per-subcat aggregate so the tooltip can show FM = X
+    # alongside the period budget.
+    fm_view2_df = get_view2(where_fm, sfx)
+    scfig = build_subcat_perf_chart(df, fm_df=fm_view2_df)
     if scfig is not None:
         sc_evt = st.plotly_chart(
             scfig, use_container_width=True,
