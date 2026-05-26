@@ -1884,6 +1884,14 @@ _PNL_LINES = [
     # out GADS in the source data, so this row simply surfaces the
     # value that's already implicit in CM2.
     ("(-) GADS Spend",      "cost",     "GOOGLE_SPEND"),
+    # Tool Spend = software / automation tooling cost. Source has
+    # TOOL_COST_ACTUAL_{sfx} only (no Budget). CM2 in the source already
+    # subtracts Tool Cost (verified: CM2 = CM1 − PM − GADS − Tool), so
+    # this row mirrors the GADS handling — surfaces the value that's
+    # already implicit in CM2 without changing any math.
+    # Intentionally NOT included in the ACoS numerator (Tool Cost is
+    # tooling overhead, not paid-media).
+    ("(-) Tool Spend",      "cost",     "TOOL_COST"),
     ("= CM2",               "total",    "CM2"),
 ]
 
@@ -1996,7 +2004,7 @@ def get_pnl_agg(where, sfx):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_daily(where, sfx):
     def _build():
-        sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"], sfx)
+        sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"], sfx)
         return f"SELECT DAY, {sel} FROM {TABLE} WHERE {where} GROUP BY DAY ORDER BY DAY"
     try:
         return _run_pnl_query(_build())
@@ -2005,7 +2013,7 @@ def get_pnl_daily(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_category(where, sfx):
-    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"]
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
     return run_query(f"""
@@ -2020,7 +2028,7 @@ def get_pnl_category(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_channel(where, sfx):
-    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"]
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
     return run_query(f"""
@@ -2036,7 +2044,7 @@ def get_pnl_channel(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_pnl_geo(where, sfx):
-    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND"]
+    pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
     return run_query(f"""
@@ -6334,6 +6342,7 @@ def render_pnl():
                     ("CM2_ACT",          "CM2 (Actual)",        "#2E7D32", "solid"),
                     ("PM_SPEND_ACT",     "PM Spend (Actual)",   "#8b1a1a", "dash"),
                     ("GOOGLE_SPEND_ACT", "GADS Spend (Actual)", "#d4842b", "dash"),
+                    ("TOOL_COST_ACT",    "Tool Spend (Actual)", "#6a4a96", "dash"),
                 ]
                 # Pick axis unit based on peak magnitude across all traces
                 _peak = 0.0
@@ -6384,7 +6393,8 @@ def render_pnl():
             col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
                        ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
                        ("PM_SPEND_ACT","PM Spend"),
-                       ("GOOGLE_SPEND_ACT","GADS Spend")]
+                       ("GOOGLE_SPEND_ACT","GADS Spend"),
+                       ("TOOL_COST_ACT","Tool Spend")]
             for src, lbl in col_map:
                 if src in dt.columns:
                     dt[lbl] = dt[src].apply(fmt_lakhs)
@@ -6406,7 +6416,8 @@ def render_pnl():
         col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
                    ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
                    ("PM_SPEND_ACT","PM Spend"),
-                   ("GOOGLE_SPEND_ACT","GADS Spend")]
+                   ("GOOGLE_SPEND_ACT","GADS Spend"),
+                   ("TOOL_COST_ACT","Tool Spend")]
         for src, lbl in col_map:
             if src in disp.columns:
                 disp[lbl] = disp[src].apply(fmt_lakhs)
@@ -6558,6 +6569,8 @@ def get_dbr_data(d_from, d_to, sfx):
         (f"PM_SPEND_BUDGET_{sfx}",           "SPND_BUD"),
         (f"PM_SPEND_ACTUAL_{sfx}",           "SPND_ACT"),
         (f"GOOGLE_SPEND_ACTUAL_{sfx}",       "GADS_ACT"),
+        # Tool Spend is Actual-only too — no Budget column upstream.
+        (f"TOOL_COST_ACTUAL_{sfx}",          "TOOL_ACT"),
         (f"CM2_BUDGET_{sfx}",                "CM2_BUD"),
         (f"CM2_ACTUAL_{sfx}",                "CM2_ACT"),
     ]
@@ -6629,6 +6642,9 @@ _DBR_COLS = [
     ("CM1",               "CM1_BUD",    "CM1_ACT",        "ccy"),
     ("Spend",             "SPND_BUD",   "SPND_ACT",       "ccy"),
     ("GADS Spend",   "__NO_BUDGET__",   "GADS_ACT",       "ccy"),
+    # Tool Spend = software/automation tooling. Actual-only, no Budget;
+    # NOT included in ACOS% (ACOS stays (PM + GADS) / Sales).
+    ("Tool Spend",   "__NO_BUDGET__",   "TOOL_ACT",       "ccy"),
     ("ACOS%",             "SPND_BUD",   "_TOTAL_SPND_ACT","pct_rev"),
     ("CM2%",              "CM2_BUD",    "CM2_ACT",        "pct_rev"),
     ("CM2",               "CM2_BUD",    "CM2_ACT",        "ccy"),
