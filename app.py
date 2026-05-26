@@ -3462,13 +3462,15 @@ def render_subcategory():
     where_fm = build_where(geo_override=geo, date_from=month_start, date_to=month_end)
     where_lm = build_where(geo_override=geo, date_from=lm_d_from, date_to=lm_d_to)
     df       = get_view2(where, sfx)
-    fm_df    = get_fm_budget_v2(where_fm, sfx)
 
     if df.empty:
         st.warning("📭 No sub-category data found for this selection.")
         return
 
-    df = df.merge(fm_df[["SUB_CATEGORY","FM_SALES_BUD"]], on="SUB_CATEGORY", how="left")
+    # NOTE: do NOT merge get_fm_budget_v2's FM_SALES_BUD onto df here — it
+    # collides with the FM_SALES_BUD that build_subcat_perf_chart produces
+    # via its own get_view2(where_fm) merge, creating FM_SALES_BUD_x/_y and
+    # making `t["FM_SALES_BUD"]` NaN in the hover tooltip.
 
     # ── KPI cards: Revenue · CM1% · ACoS% · CM2% · CM2 Abs ──
     # Use get_kpis for the GEO slice — same metrics as Overview, scoped to this GEO.
