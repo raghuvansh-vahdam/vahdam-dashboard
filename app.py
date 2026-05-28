@@ -6554,7 +6554,9 @@ def get_dbr_data(d_from, d_to, sfx):
     across the columns the DBR table needs. CATEGORY is kept so the view
     can slice for Core (Teas & Botanicals), New (Coffee + Supplements),
     and any other custom grouping in pandas without re-querying. BRAND_BUCKET
-    resolves to VT (Vahdam) / HP (Handpick + Spice Train) / OTHER.
+    resolves to VT (Vahdam) / HP (Handpick) / OTHER. Spice Train brand
+    has been renamed to Handpick upstream — the LIKE %SPICETRAIN%
+    clause in BRAND_BUCKET stays as a no-op safety net for stale rows.
 
     Defensive against schema drift: any column not present in the live
     table (e.g. STORAGE_BUDGET_INR was dropped at one point) is replaced
@@ -6603,16 +6605,23 @@ def get_dbr_data(d_from, d_to, sfx):
             else:
                 select_lines.append(f"CAST(0 AS NUMBER) AS {alias}")
         select_sql = ",\n            ".join(select_lines)
+        # NOTE on the CATEGORY handling: we used to filter rows where
+        # CATEGORY IS NULL / blank, which silently dropped budget (e.g.
+        # CA had ~20.6L of un-tagged May 2026 budget). We now COALESCE
+        # to '(untagged)' so those rows still roll into the Total
+        # rollup. CORE / NEW slices in pandas use keyword matchers
+        # (_is_core_cat / _is_new_cat) so '(untagged)' rows naturally
+        # don't appear in either business-type slice — only Total.
         return f"""
         SELECT
             GEO,
-            UPPER(TRIM(CATEGORY))                                 AS CATEGORY,
+            COALESCE(NULLIF(UPPER(TRIM(CATEGORY)),''),'(untagged)') AS CATEGORY,
             CASE
-                -- Robust matching to handle case + spacing + underscore
-                -- variants like "Vahdam Wellness", "Spicetrain",
-                -- "Spice_Train", "SpiceTrain", "Handpick by Vahdam", etc.
-                -- HP patterns are checked FIRST so "Handpick by Vahdam"
-                -- (if it exists) doesn't accidentally bucket as VT.
+                -- HP patterns checked FIRST so any "Handpick by Vahdam"
+                -- variant doesn't accidentally bucket as VT. Spice
+                -- Train brand was renamed to Handpick in source — we
+                -- keep the LIKE %SPICETRAIN% clause as a no-op safety
+                -- net in case a stale row sneaks in.
                 WHEN UPPER(TRIM(BRAND)) LIKE '%HANDPICK%'                     THEN 'HP'
                 WHEN UPPER(REPLACE(REPLACE(TRIM(BRAND),' ',''),'_','')) LIKE '%SPICETRAIN%' THEN 'HP'
                 WHEN UPPER(TRIM(BRAND)) LIKE '%VAHDAM%'                       THEN 'VT'
@@ -6625,9 +6634,10 @@ def get_dbr_data(d_from, d_to, sfx):
         FROM {TABLE}
         WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
           AND GEO IS NOT NULL AND TRIM(GEO) <> ''
-          AND CATEGORY IS NOT NULL AND TRIM(CATEGORY) <> ''
           AND {GEO_EXCL}
-        GROUP BY GEO, UPPER(TRIM(CATEGORY)), BRAND_BUCKET, UPPER(TRIM(BRAND))
+        GROUP BY GEO,
+                 COALESCE(NULLIF(UPPER(TRIM(CATEGORY)),''),'(untagged)'),
+                 BRAND_BUCKET, UPPER(TRIM(BRAND))
         """
     try:
         return _run_pnl_query(_build())
@@ -6880,7 +6890,7 @@ def render_dbr():
         f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
         f'&nbsp;&bull;&nbsp; <b>CORE</b> = Teas &amp; Botanicals &nbsp;·&nbsp; '
         f'<b>NEW</b> = Coffee + Supplements &nbsp;·&nbsp; '
-        f'<b>VT</b> = Vahdam &nbsp;·&nbsp; <b>HP</b> = Handpick + Spice Train'
+        f'<b>VT</b> = Vahdam &nbsp;·&nbsp; <b>HP</b> = Handpick'
         f'</div>',
         unsafe_allow_html=True)
 
@@ -7142,7 +7152,7 @@ def render_dbr():
             colB.markdown(strip_card(
                 "HP total (FMB)",
                 f"₹{int(tot.get('HP', 0)):,}" if tot.get('HP') else "—",
-                "Handpick + Spice Train, all cats, full month"),
+                "Handpick, all cats, full month"),
                 unsafe_allow_html=True)
             colC.markdown(strip_card(
                 "OTHER total (FMB)",
