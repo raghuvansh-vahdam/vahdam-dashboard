@@ -7497,21 +7497,14 @@ def render_new_business():
     else:
         eff_today = _now_ist.date() - timedelta(days=2)
 
-    st.markdown(
-        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} '
-        f'&rarr; {d_to.strftime("%d %b %Y")} '
-        f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
-        f'&nbsp;&bull;&nbsp; Pace: {(d_to - d_from).days + 1} days'
-        f'</div>', unsafe_allow_html=True)
-
-    # ── GEO + Product filter row ──
+    # ── GEO + Date preset + Product filter row ──
     geos_avail = get_nb_geos_with_data()
     if not geos_avail:
         st.warning("No New Business GEOs found (CATEGORY in Coffee / Supplements).")
         return
     # Default → USA. "All" is also offered (first option) for cross-GEO view.
     geo_default = "USA" if "USA" in geos_avail else geos_avail[0]
-    fc1, fc2 = st.columns([1, 3], gap="medium")
+    fc1, fc2, fc3 = st.columns([1, 1.2, 2.5], gap="medium")
     with fc1:
         geo = st.selectbox(
             "GEO", geos_avail,
@@ -7519,6 +7512,20 @@ def render_new_business():
             help="Switch country. **All** aggregates every GEO. USA uses your "
                  "hardcoded 18-ASIN list; other GEOs auto-detect ASINs whose "
                  "CATEGORY is Coffee or Supplements.")
+    with fc2:
+        # In-view date preset. Default = follow the sidebar so the
+        # existing behaviour is unchanged unless the user actively
+        # overrides here.
+        nb_date_opts = ["Use sidebar", "MTD", "QTD", "YTD",
+                        "Last 7 Days", "Last 30 Days",
+                        "Last 60 Days", "Last 90 Days",
+                        "Custom Range"]
+        nb_preset = st.selectbox(
+            "Date Preset", nb_date_opts, index=0, key="nb_date_preset",
+            help="Overrides the sidebar date range for this view only. "
+                 "All KPIs, the summary table, and the funnel breakdown "
+                 "use the chosen window. **Use sidebar** keeps the global "
+                 "selection.")
 
     # Fetch the ASIN universe for the GEO (DataFrame with ASIN / PRODUCT_NAME / GEO).
     universe_df = get_nb_asin_universe(geo)
@@ -7543,7 +7550,7 @@ def render_new_business():
                                   + ")")
     product_opts = universe_df["DISPLAY"].tolist()
 
-    with fc2:
+    with fc3:
         picked_products = st.multiselect(
             f"Product Name ({len(product_opts)} available)",
             product_opts, default=[],
@@ -7563,13 +7570,76 @@ def render_new_business():
         return
     asin_csv = _nb_asin_in_list(asin_list_filtered)
 
+    # ── Resolve the in-view date range ──
+    # If the local preset is "Use sidebar" we just inherit the global
+    # d_from / d_to (and prev_*). Otherwise we recompute everything from
+    # `eff_today` (the IST-3pm-cutoff "today") so the user can switch
+    # ranges without touching the sidebar.
+    if nb_preset == "Use sidebar":
+        nb_d_from, nb_d_to = d_from, d_to
+    elif nb_preset == "MTD":
+        nb_d_to   = eff_today
+        nb_d_from = nb_d_to.replace(day=1)
+    elif nb_preset == "QTD":
+        q_start_month = ((eff_today.month - 1) // 3) * 3 + 1
+        nb_d_from = date(eff_today.year, q_start_month, 1)
+        nb_d_to   = eff_today
+    elif nb_preset == "YTD":
+        nb_d_from = date(eff_today.year, 1, 1)
+        nb_d_to   = eff_today
+    elif nb_preset == "Last 7 Days":
+        nb_d_to   = eff_today
+        nb_d_from = nb_d_to - timedelta(days=6)
+    elif nb_preset == "Last 30 Days":
+        nb_d_to   = eff_today
+        nb_d_from = nb_d_to - timedelta(days=29)
+    elif nb_preset == "Last 60 Days":
+        nb_d_to   = eff_today
+        nb_d_from = nb_d_to - timedelta(days=59)
+    elif nb_preset == "Last 90 Days":
+        nb_d_to   = eff_today
+        nb_d_from = nb_d_to - timedelta(days=89)
+    else:  # Custom Range
+        cc1, cc2 = st.columns(2, gap="medium")
+        with cc1:
+            nb_d_from = st.date_input("From", value=eff_today.replace(day=1),
+                                       key="nb_custom_from")
+        with cc2:
+            nb_d_to   = st.date_input("To",   value=eff_today,
+                                       key="nb_custom_to")
+        if nb_d_from > nb_d_to:
+            st.warning("Custom range: 'From' is after 'To' — swap your dates.")
+            return
+
+    # Prior-period dates = same-length window ending the day before
+    # nb_d_from. When the in-view preset is "Use sidebar" we just use
+    # the global prev_d_from / prev_d_to (already computed at module
+    # scope) so nothing changes in that flow.
+    if nb_preset == "Use sidebar":
+        nb_prev_d_from, nb_prev_d_to = prev_d_from, prev_d_to
+    else:
+        _nb_period_len = (nb_d_to - nb_d_from).days + 1
+        nb_prev_d_to   = nb_d_from - timedelta(days=1)
+        nb_prev_d_from = nb_prev_d_to - timedelta(days=_nb_period_len - 1)
+
+    st.markdown(
+        f'<div class="page-sub">{nb_d_from.strftime("%d %b %Y")} '
+        f'&rarr; {nb_d_to.strftime("%d %b %Y")} '
+        f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
+        f'&nbsp;&bull;&nbsp; Pace: {(nb_d_to - nb_d_from).days + 1} days'
+        + ((f' &nbsp;&bull;&nbsp; '
+            f'<span style="color:#AB8743;font-weight:600;">'
+            f'Local preset: {nb_preset}</span>')
+           if nb_preset != "Use sidebar" else "")
+        + '</div>', unsafe_allow_html=True)
+
     # ── Headline KPI cards: top row = sales/margin, bottom row = ads ──
     # Both the selected period and the same-length prior period are
     # fetched so each card can show a vs-prior-period delta line.
     with st.spinner("Loading New Business summary…"):
-        summary  = get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx)
+        summary    = get_nb_asin_summary(geo, asin_csv, nb_d_from, nb_d_to, sfx)
         summary_lp = get_nb_asin_summary(geo, asin_csv,
-                                          prev_d_from, prev_d_to, sfx)
+                                          nb_prev_d_from, nb_prev_d_to, sfx)
     if summary.empty:
         st.info(f"📭 No data for {geo} New Business in the selected date range.")
         return
@@ -7618,7 +7688,7 @@ def render_new_business():
     lp_pcos_pct   = _pct(lp_ad_spend, lp_paid_rev)
     lp_paid_share = _pct(lp_paid_rev, lp_revenue)
 
-    period_lbl = f"vs prior {(d_to - d_from).days + 1}d"
+    period_lbl = f"vs prior {(nb_d_to - nb_d_from).days + 1}d"
     st.markdown('<div class="section-hdr">Segment KPIs</div>', unsafe_allow_html=True)
     row1 = st.columns(5, gap="small")
     row1[0].markdown(strip_card("Revenue",  fmt_lakhs(tot_revenue),
@@ -7687,7 +7757,7 @@ def render_new_business():
     st.markdown(
         f'<div style="font-size:11px;color:#7a6a50;margin-top:-4px;">'
         f'Prior period for delta comparisons: '
-        f'{prev_d_from.strftime("%d %b")} – {prev_d_to.strftime("%d %b %Y")}'
+        f'{nb_prev_d_from.strftime("%d %b")} – {nb_prev_d_to.strftime("%d %b %Y")}'
         f'</div>', unsafe_allow_html=True)
     st.markdown("")
 
