@@ -817,9 +817,7 @@ with st.sidebar:
     if st.button("DBR", use_container_width=True, key="nav_dbr"):
         st.session_state.view = "dbr"
         st.rerun()
-    if st.button("New Business", use_container_width=True, key="nav_new_business",
-                 help="Coffee + Supplements ASINs — KPI cards, per-product "
-                      "performance summary, and a 9-period funnel breakdown."):
+    if st.button("New Business", use_container_width=True, key="nav_new_business"):
         st.session_state.view = "new_business"
         st.rerun()
     if st.button("Price Tracker", use_container_width=True, key="nav_price"):
