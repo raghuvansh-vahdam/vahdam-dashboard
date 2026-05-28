@@ -963,6 +963,167 @@ with st.sidebar:
     sfx = "INR" if use_inr else "LOCAL"
     sym = "₹" if use_inr else ""
 
+    # Dark mode — persists across reruns via session_state. When enabled
+    # a conditional CSS block below the main stylesheet flips the page
+    # chrome to deep-forest / cream-inverted. Saffron accents stay
+    # untouched so the brand still reads as Vahdam at a glance.
+    _is_dark = st.toggle("🌙 Dark mode",
+                         value=st.session_state.get("theme") == "dark",
+                         key="theme_dark_toggle",
+                         help="Easier on the eyes for long evening "
+                              "sessions. Charts stay cream-themed in "
+                              "this release — full dark-mode chart "
+                              "support coming next.")
+    st.session_state.theme = "dark" if _is_dark else "light"
+
+    # Inject dark-theme overrides only when toggled on. Targets the
+    # main app canvas, KPI cards, captions, headers, footer, error
+    # cards, skeletons, and wordcloud. Streamlit's internal dataframe
+    # / chart components keep their built-in light theme — charts will
+    # be addressed in a follow-up by switching the apply_vahdam_chart_style
+    # helper to be theme-aware.
+    if _is_dark:
+        st.markdown("""
+        <style>
+            /* ── Page canvas ── */
+            [data-testid="stAppViewContainer"],
+            [data-testid="stMain"],
+            [data-testid="stMainBlockContainer"] {
+                background-color: #0F1A14 !important;
+                color: #F5F0E0 !important;
+            }
+            /* Tighten sidebar a shade darker than the main canvas */
+            section[data-testid="stSidebar"] {
+                background-color: #08120D !important;
+            }
+            /* Headings stay the brand green, but bumped lighter so they
+               still pop on the deep-forest canvas. */
+            .page-title { color: #6CC791 !important; }
+            .page-sub,
+            .breadcrumb { color: #C9A76A !important; }
+            .section-hdr {
+                color: #E8DDB8 !important;
+                border-left-color: #C9A76A !important;
+            }
+
+            /* ── KPI cards ── */
+            .pnl-strip {
+                background: linear-gradient(180deg, #15241B 0%, #0F1A14 100%) !important;
+                border-color: #2A3530 !important;
+                border-top-color: #6CC791 !important;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.4) !important;
+            }
+            .pnl-strip-label { color: #C9A76A !important; }
+            .pnl-strip-val   { color: #F5F0E0 !important; }
+            .pnl-strip-sub   { color: #A89A7A !important; }
+            .pnl-strip:hover { border-top-color: #C9A76A !important; }
+
+            .kpi-card,
+            .hero-card,
+            .geo-perf,
+            .forecast-card {
+                background: #15241B !important;
+                border-color: #2A3530 !important;
+                color: #F5F0E0 !important;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.4) !important;
+            }
+            .kpi-card .kpi-actual,
+            .hero-value { color: #F5F0E0 !important; }
+            .kpi-card .kpi-label,
+            .kpi-card .kpi-budget { color: #C9A76A !important; }
+            .delta-up { color: #6CC791 !important; }
+            .delta-dn { color: #E89090 !important; }
+
+            /* ── vs-B pill ── */
+            .badge-green { background:#1f3a2b !important; color:#6CC791 !important; }
+            .badge-amber { background:#3a2f15 !important; color:#E8C87B !important; }
+            .badge-red   { background:#3a1a1a !important; color:#E89090 !important; }
+
+            /* ── GEO perf rows ── */
+            .geo-perf-row { border-bottom-color: #2A3530 !important; }
+            .geo-name { color: #E8DDB8 !important; }
+            .geo-bar-track { background: #1B2A21 !important; }
+            .geo-vals { color: #A89A7A !important; }
+            .geo-pct-up   { color: #6CC791 !important; }
+            .geo-pct-warn { color: #E8C87B !important; }
+            .geo-pct-down { color: #E89090 !important; }
+
+            /* ── Skeleton placeholders (deeper cream → deep slate) ── */
+            .vahdam-skel,
+            .vahdam-skel-header {
+                background: linear-gradient(90deg,
+                    #1B2A21 0%, #243429 50%, #1B2A21 100%) !important;
+                background-size: 220% 100%;
+                opacity: 0.75;
+            }
+
+            /* ── Status footer ── */
+            .vahdam-footer {
+                background: #15241B !important;
+                border-top-color: #2A3530 !important;
+                color: #C9A76A !important;
+            }
+            .vahdam-footer .footer-sep { color: #4A5A50 !important; }
+
+            /* ── Error card ── */
+            .vahdam-err-card {
+                background: linear-gradient(180deg, #2A1B1B 0%, #15241B 100%) !important;
+                border-color: #4a2a2a !important;
+            }
+            .vahdam-err-title { color: #E89090 !important; }
+            .vahdam-err-body  { color: #E8DDB8 !important; }
+            .vahdam-err-meta  { color: #A89A7A !important; }
+
+            /* ── Word cloud ── */
+            .vahdam-wordcloud {
+                background: #15241B !important;
+                border-color: #2A3530 !important;
+            }
+            .vahdam-wordcloud span { color: #C9A76A !important; }
+
+            /* ── Captions, small text ── */
+            [data-testid="stCaptionContainer"],
+            .stCaption, .small-muted {
+                color: #A89A7A !important;
+            }
+
+            /* ── Dataframes: muted dark wrapper. Streamlit's internal
+                 table styling stays light; this just keeps the wrapper
+                 from looking misplaced against the deep-forest page. ── */
+            [data-testid="stDataFrame"] {
+                background: #15241B !important;
+                border-radius: 10px;
+                padding: 4px;
+            }
+
+            /* ── Tabs: inactive tab text in muted cream ── */
+            div[data-baseweb="tab-list"] {
+                border-bottom-color: #2A3530 !important;
+            }
+            div[data-baseweb="tab"] {
+                color: #A89A7A !important;
+            }
+            div[data-baseweb="tab"][aria-selected="true"] {
+                color: #6CC791 !important;
+            }
+
+            /* ── Login card (in case of timeout while in dark mode) ── */
+            .login-card {
+                background: #15241B !important;
+                border-color: #2A3530 !important;
+                border-top-color: #6CC791 !important;
+            }
+
+            /* ── Misc lines + hr ── */
+            hr { border-color: #2A3530 !important; }
+
+            /* Mobile banner stays high-contrast on dark too */
+            .vahdam-mobile-banner {
+                background: linear-gradient(135deg, #0F1A14 0%, #15241B 100%) !important;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
     # ── Quick Date Presets ──
     st.markdown("#### Quick Presets")
     today  = date.today()
@@ -1185,8 +1346,29 @@ def fmt_lakhs_for(v, geo, signed=False):
         globals()["sym"] = saved
 
 
+#
+# ── Number formatting house rules ────────────────────────────────────────────
+#
+#   1. KPI cards / hero metrics / breadcrumbs / chart axes
+#      → SHORT FORM (Cr / L / K, two decimals when small in its unit)
+#      → Use `fmt_lakhs(v)`        for currency
+#      → Use `fmt_units(v)`        for unit counts
+#      → Use `fmt_pct(v)`          for percentages
+#
+#   2. Detail tables (P&L Statement, DBR, ASIN-level row tables)
+#      → FULL INDIAN COMMA  (e.g. ₹15,08,20,798 / 1,16,522 units)
+#      → Use `fmt_indian(v)`       for currency or unit absolutes
+#      → Use `fmt_num(v, dec=N)`   for ratios needing fixed decimals
+#
+#   3. Chart hover tooltips
+#      → SHORT FORM for the headline value, FULL for the raw context line
+#
+# Helpers below all return "—" for None / NaN so callers can pipe data
+# straight through without pre-cleaning.
 def fmt_lakhs(v, signed=False):
-    """Auto-scale Indian currency: <1K → raw, <1L → K, <1Cr → L, ≥1Cr → Cr."""
+    """Auto-scale Indian currency: <1K → raw, <1L → K, <1Cr → L, ≥1Cr → Cr.
+    Short form. Use in KPI cards, chart axes, hover headline values.
+    For full Indian-comma format use `fmt_indian(v)` instead."""
     n = _f(v)
     if n is None: return "—"
     a = abs(n)
@@ -1266,16 +1448,63 @@ def kpi_delta(delta, unit="%", invert=False):
     return f'<div class="kpi-delta {cls}">{sign} {abs(v):.1f}{unit} vs Bud</div>'
 
 def color_pct(v):
+    """4-tier color rule for percentage-of-target metrics (Rev %, etc.).
+
+    Bands tuned so the dashboard doesn't scream red at routine 95-99%
+    misses (eye fatigue / cry-wolf). True meaning of each tier:
+        ≥ 100%       → GOOD       — celebrate (saturated forest)
+        95 to <100%  → NORMAL     — close to target, muted gray (no bg)
+        90 to <95%   → ATTENTION  — warning, saffron tint
+        <  90%       → ALARM      — saturated red, demands action
+    """
     v = _f(v)
     if v is None: return ""
     if v >= 100: return "background-color:#d6ece1;color:#004A2B;font-weight:600"
-    if v >= 80:  return "background-color:#fef3d6;color:#7a5c00;font-weight:600"
-    return "background-color:#fde8e8;color:#8b1a1a;font-weight:600"
+    if v >=  95: return "color:#7a6a50;font-weight:600"
+    if v >=  90: return "background-color:#fef3d6;color:#7a5c00;font-weight:600"
+    return        "background-color:#fde8e8;color:#8b1a1a;font-weight:600"
 
-def color_var(v):
+
+def color_var(v, threshold=None):
+    """Color absolute variance with a "small-doesn't-matter" gray band.
+    `threshold` (optional) is the minimum |v| that triggers a red/green;
+    below it the value renders gray. Defaults to ₹50K which is roughly
+    a single ASIN's day. Pass 0 to keep the legacy (any non-zero = colored)
+    behaviour."""
     v = _f(v)
     if v is None: return ""
-    return "color:#004A2B;font-weight:600" if v >= 0 else "color:#8b1a1a;font-weight:600"
+    th = 50_000 if threshold is None else threshold
+    if abs(v) < th:
+        return "color:#7a6a50;font-weight:600"          # NORMAL (gray)
+    if v >= 0:
+        return "color:#004A2B;font-weight:600"          # GOOD   (forest)
+    return    "color:#8b1a1a;font-weight:600"          # ALARM  (red)
+
+
+def color_pp_delta(v, attention=2.0, alarm=5.0, lower_better=False):
+    """Color a percentage-point delta (e.g. ACoS Act - ACoS Bud).
+    For metrics where positive = good (CM2%, CM1%), keep defaults.
+    For metrics where lower = better (ACoS%, spend ratios), pass
+    `lower_better=True` so the polarity inverts.
+
+    Bands by |delta|:
+        < `attention` pp  → NORMAL  (gray) — within tolerance, no story
+        < `alarm`     pp  → ATTENTION (saffron / muted-red)
+        ≥ `alarm`     pp  → ALARM (saturated)
+    Polarity decides red vs green for the alert tiers.
+    """
+    v = _f(v)
+    if v is None: return ""
+    a = abs(v)
+    good = (v >= 0 and not lower_better) or (v <= 0 and lower_better)
+    if a < attention:
+        return "color:#7a6a50;font-weight:600"
+    if a < alarm:
+        # Mid band — amber if bad, muted forest if good.
+        return ("color:#004A2B;font-weight:600" if good
+                else "color:#AB8743;font-weight:600")
+    return ("color:#004A2B;font-weight:700" if good
+            else "color:#8b1a1a;font-weight:700")
 
 def color_prorata(s):
     if not isinstance(s, str) or s == "—": return ""
@@ -3344,7 +3573,11 @@ def ask_ai(question, context_str):
 
 
 def fmt_indian(v, signed=False):
-    """Indian number format: 1,04,09,835"""
+    """Indian number format: 1,04,09,835. Full precision, no scaling.
+    Use in detail tables (P&L Statement waterfall, DBR mini-tables) where
+    the user needs to read the exact rupee value. For at-a-glance KPI
+    cards use the scaled `fmt_lakhs(v)` instead — see house-rules comment
+    above `fmt_lakhs`."""
     n = _f(v)
     if n is None: return "—"
     neg = n < 0
@@ -5138,7 +5371,9 @@ def render_asin_detail():
     rolling["Avg ASP"] = rolling["Avg ASP"].apply(
         lambda v: "—" if v is None else f"{sym}{v:,.2f}")
     rolling["Spend"]   = rolling["Spend"].apply(fmt_lakhs)
-    st.dataframe(rolling, use_container_width=True, hide_index=True)
+    # height= triggers Streamlit's sticky header behaviour.
+    st.dataframe(rolling, use_container_width=True, hide_index=True,
+                 height=min(360, 60 + len(rolling) * 38))
     st.caption(
         "Rolling windows are computed from the last 90 days "
         "regardless of the period selector above. "
@@ -7154,8 +7389,11 @@ if sku_search and sku_search.strip():
                     sx[idx.index("Rev %")] = color_pct(_rv.iloc[row.name])
                 return sx
 
+            # Fixed height triggers sticky header in Streamlit.
+            _sk_n = len(show_sk) if hasattr(show_sk, "__len__") else 0
             st.dataframe(show_sk.style.apply(style_sk, axis=1).hide(axis="index"),
-                         use_container_width=True, hide_index=True)
+                         use_container_width=True, hide_index=True,
+                         height=min(420, 60 + _sk_n * 38))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 5b — DBR (Daily Business Report)
@@ -7758,9 +7996,12 @@ def render_dbr():
                 elif rt == "OTHER": bg = "#fde8e8"
                 else:               bg = "#ffffff"
                 return [f"background-color:{bg};color:#171717;"] * len(row)
+            # Fixed height triggers sticky header in Streamlit.
+            _br_n = len(br_disp) if hasattr(br_disp, "__len__") else 0
             st.dataframe(
                 br_disp.style.apply(_style_br, axis=1).hide(axis="index"),
                 use_container_width=True, hide_index=True,
+                height=min(360, 60 + _br_n * 38),
             )
             # Bucket totals — the quick numbers
             tot = (fmb_data.groupby("BRAND_BUCKET")["NETREV_BUD"]
