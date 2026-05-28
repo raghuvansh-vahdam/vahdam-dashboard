@@ -6839,11 +6839,18 @@ def _render_dbr_mini_table(blocks, key_suffix=""):
     col_order = ["Bucket", "Type"] + [c[0] for c in _DBR_COLS]
     df_disp = pd.DataFrame(rows, columns=col_order)
     n_rows  = len(df_disp)
+    # Pin Bucket + Type to the left so the row identity stays visible
+    # while horizontally scrolling through the wide metric columns.
+    dbr_column_config = {
+        "Bucket": st.column_config.TextColumn("Bucket", width="medium", pinned=True),
+        "Type":   st.column_config.TextColumn("Type",   width="small",  pinned=True),
+    }
     st.dataframe(
         df_disp.style.apply(_dbr_style_row, axis=1).hide(axis="index"),
         use_container_width=True,
         height=min(440, 38 + n_rows * 36),
         hide_index=True,
+        column_config=dbr_column_config,
     )
 
 
@@ -6996,24 +7003,24 @@ def render_dbr():
                 ("HP (Core)",      core_hp_s, False, fmb_hp),
             ])
 
-    # ── Global New (expandable, actual-only) — FMB rows match Core's ──
+    # ── Global New (expandable, actual-only) — no FMB row ──
+    # FMB is category-agnostic (full-month budget across ALL cats), so
+    # surfacing it inside a NEW-only block (Coffee + Supplements) was
+    # misleading: the FMB row showed the entire business's budget, not
+    # the New segment's. New launches don't have their own dedicated
+    # budget upstream yet, so we render the block as pure actual-only.
     if show_new:
         new_s    = _sum(data, new_mask)
         new_vt_s = _sum(data, new_mask & (data["BRAND_BUCKET"] == "VT"))
         new_hp_s = _sum(data, new_mask & (data["BRAND_BUCKET"] == "HP"))
-        # Same FMB (all-cats) — represents the full bucket each row
-        # comes out of, regardless of CORE vs NEW.
-        fmb_overall_n = _sum_fmb()
-        fmb_vt_n      = _sum_fmb(brand="VT")
-        fmb_hp_n      = _sum_fmb(brand="HP")
         with st.expander(
             _dbr_expander_title("Amazon Global Business (New)",
                                  new_s, actual_only=True),
             expanded=False):
             _render_dbr_mini_table([
-                ("Overall (New)", new_s,    True, fmb_overall_n),
-                ("VT (New)",      new_vt_s, True, fmb_vt_n),
-                ("HP (New)",      new_hp_s, True, fmb_hp_n),
+                ("Overall (New)", new_s,    True),
+                ("VT (New)",      new_vt_s, True),
+                ("HP (New)",      new_hp_s, True),
             ])
 
     # ── Per-country drill-down ──
@@ -7069,7 +7076,8 @@ def render_dbr():
                         (f"{geo} HP (Core)",      geo_core_hp_s, False, geo_fmb_hp),
                     ])
 
-            # New breakdown — Budget/Actual scoped to New; FMB ignores cat.
+            # New breakdown — actual-only, no FMB (FMB is category-
+            # agnostic so it does not represent the NEW segment).
             if show_new:
                 geo_new = data[new_mask & (data["GEO"] == geo)]
                 if not geo_new.empty:
@@ -7083,9 +7091,9 @@ def render_dbr():
                         if (geo_new["BRAND_BUCKET"] == "HP").any()
                         else pd.Series({c: 0 for c in numeric_cols}))
                     blocks.extend([
-                        (f"{geo} Overall (New)", geo_new_s,    True, geo_fmb_overall),
-                        (f"{geo} VT (New)",      geo_new_vt_s, True, geo_fmb_vt),
-                        (f"{geo} HP (New)",      geo_new_hp_s, True, geo_fmb_hp),
+                        (f"{geo} Overall (New)", geo_new_s,    True),
+                        (f"{geo} VT (New)",      geo_new_vt_s, True),
+                        (f"{geo} HP (New)",      geo_new_hp_s, True),
                     ])
 
             _render_dbr_mini_table(blocks, key_suffix=geo)
