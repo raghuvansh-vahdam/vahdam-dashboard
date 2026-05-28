@@ -1096,11 +1096,7 @@ with st.sidebar:
     st.markdown("---")
     _is_dark = st.toggle("🌙 Dark mode",
                          value=st.session_state.get("theme") == "dark",
-                         key="theme_dark_toggle",
-                         help="Easier on the eyes for long evening "
-                              "sessions. Charts stay cream-themed in "
-                              "this release — full dark-mode chart "
-                              "support coming next.")
+                         key="theme_dark_toggle")
     st.session_state.theme = "dark" if _is_dark else "light"
 
     # Inject dark-theme overrides only when toggled on. Targets the main
