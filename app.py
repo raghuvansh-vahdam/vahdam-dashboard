@@ -963,10 +963,137 @@ with st.sidebar:
     sfx = "INR" if use_inr else "LOCAL"
     sym = "₹" if use_inr else ""
 
-    # Dark mode — persists across reruns via session_state. When enabled
-    # a conditional CSS block below the main stylesheet flips the page
-    # chrome to deep-forest / cream-inverted. Saffron accents stay
-    # untouched so the brand still reads as Vahdam at a glance.
+    # NOTE: Dark-mode toggle + theme CSS now live at the bottom of the
+    # sidebar (below "Refresh data") — see the matching block down there.
+
+    # ── Quick Date Presets ──
+    st.markdown("#### Quick Presets")
+    today  = date.today()
+    # Default end-of-range slips behind real "today" based on the IST
+    # data-load cutoff: warehouse refresh lands ~3pm IST, so before 3pm
+    # the freshest complete day is the day-before-yesterday; after 3pm
+    # it's yesterday. This keeps the default view free of partial
+    # half-loaded data without forcing the user to fiddle with Custom
+    # Range every morning.
+    _IST          = timezone(timedelta(hours=5, minutes=30))
+    _now_ist      = datetime.now(_IST)
+    _ist_3pm_cut  = 15  # 15:00 IST cutoff
+    if _now_ist.hour >= _ist_3pm_cut:
+        effective_today = _now_ist.date() - timedelta(days=1)   # yesterday
+    else:
+        effective_today = _now_ist.date() - timedelta(days=2)   # day before yesterday
+
+    PRESET_OPTS = ["MTD", "QTD", "YTD",
+                   "Last 30 Days", "Last 60 Days", "Last 90 Days",
+                   "Custom Range"]
+    preset = st.selectbox("Date Preset", PRESET_OPTS, index=0, key="date_preset")
+
+    _preset_days = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90}
+    if preset == "MTD":
+        # MTD is anchored to the month containing the effective end date —
+        # so on 1 Jun before-3pm we'd show 1 May → 30 May (last full day
+        # of May), not "1 Jun → 30 May" which would be nonsensical.
+        d_to   = effective_today
+        d_from = d_to.replace(day=1)
+    elif preset == "QTD":
+        # Quarter-to-date: first day of the quarter containing d_to
+        q_start_month = ((effective_today.month - 1) // 3) * 3 + 1
+        d_from = date(effective_today.year, q_start_month, 1)
+        d_to   = effective_today
+    elif preset == "YTD":
+        d_from = date(effective_today.year, 1, 1)
+        d_to   = effective_today
+    elif preset in _preset_days:
+        d_from = effective_today - timedelta(days=_preset_days[preset] - 1)
+        d_to   = effective_today
+    else:
+        d1, d2 = st.columns(2)
+        with d1: d_from = st.date_input("From", value=effective_today.replace(day=1))
+        with d2: d_to   = st.date_input("To",   value=effective_today)
+
+    if preset != "Custom Range":
+        st.caption(f"📅 {d_from.strftime('%d %b')} – {d_to.strftime('%d %b %Y')}  "
+                   f"·  {(d_to - d_from).days + 1} days")
+
+    # ── SKU / ASIN / Product search ──
+    st.markdown("---")
+    st.markdown("#### Search")
+    sku_search = st.text_input("SKU / ASIN / Product",
+                               placeholder="e.g. B09YXMVQTV…", key="sku_search")
+
+    # ── Filters ──
+    @st.cache_data(ttl=600)
+    def get_options():
+        return run_query(f"SELECT DISTINCT BRAND,CATEGORY,CHANNEL,GEO,SUB_CATEGORY FROM {TABLE} WHERE {GEO_EXCL}")
+    opts = get_options()
+
+    st.markdown("#### Filters")
+    if st.button("⟲ Clear all filters", use_container_width=True,
+                 key="clear_filters",
+                 help="Reset Brand / Category / Channel / GEO / Sub-Category / SKU search"):
+        for k in ["flt_brand","flt_cat","flt_channel","flt_geo","flt_subcat","sku_search"]:
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
+                               key="flt_brand")
+    f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
+                               key="flt_cat")
+    _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
+    _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
+    _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
+    f_channel = [c.replace(" ", "_") for c in _ch_pick]
+    f_geo     = st.multiselect("GEO",
+                               [g for g in GEO_ORDER if g in opts["GEO"].dropna().unique()],
+                               key="flt_geo")
+    f_subcat  = st.multiselect("Sub-Category", sorted(opts["SUB_CATEGORY"].dropna().unique()),
+                               key="flt_subcat")
+
+    # Active-filter count badge
+    _active = sum(1 for x in [f_brand, f_cat, f_channel, f_geo, f_subcat] if x)
+    if _active:
+        st.caption(f"🔵 {_active} filter{'s' if _active != 1 else ''} active")
+
+    # ── Navigation ──
+    st.markdown("---")
+    if st.button("Executive Summary", use_container_width=True, key="nav_ceo"):
+        st.session_state.view = "ceo"
+        st.rerun()
+    if st.button("Overview", use_container_width=True, key="nav_overview"):
+        st.session_state.view = "overview"
+        st.rerun()
+    if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
+        st.session_state.view = "pnl"
+        st.rerun()
+    if st.button("DBR", use_container_width=True, key="nav_dbr"):
+        st.session_state.view = "dbr"
+        st.rerun()
+    if st.button("New Business", use_container_width=True, key="nav_new_business"):
+        st.session_state.view = "new_business"
+        st.rerun()
+    if st.button("Price Tracker", use_container_width=True, key="nav_price"):
+        st.session_state.view = "price"
+        st.rerun()
+    if st.button("Customer Insights", use_container_width=True, key="nav_ci"):
+        st.session_state.view = "customer_insights"
+        st.rerun()
+
+    # ── Refresh data ──
+    st.markdown("---")
+    if st.button("🔄 Refresh data", use_container_width=True, key="refresh_data",
+                 help="Clear cache and refetch from Snowflake"):
+        st.cache_data.clear()
+        st.rerun()
+    from datetime import datetime as _dt
+    st.markdown(f"<div style='font-size:10.5px;color:#AB8743;text-align:center;"
+                f"margin-top:4px;'>Last loaded · {_dt.now().strftime('%H:%M:%S')}"
+                f"</div>", unsafe_allow_html=True)
+
+    # ── Dark mode toggle ──
+    # Lives at the bottom of the sidebar (below Refresh data) so the top
+    # stays focused on the filters / search / navigation that users touch
+    # every session. Theme is a once-per-session preference.
+    st.markdown("---")
     _is_dark = st.toggle("🌙 Dark mode",
                          value=st.session_state.get("theme") == "dark",
                          key="theme_dark_toggle",
@@ -976,12 +1103,12 @@ with st.sidebar:
                               "support coming next.")
     st.session_state.theme = "dark" if _is_dark else "light"
 
-    # Inject dark-theme overrides only when toggled on. Targets the
-    # main app canvas, KPI cards, captions, headers, footer, error
-    # cards, skeletons, and wordcloud. Streamlit's internal dataframe
-    # / chart components keep their built-in light theme — charts will
-    # be addressed in a follow-up by switching the apply_vahdam_chart_style
-    # helper to be theme-aware.
+    # Inject dark-theme overrides only when toggled on. Targets the main
+    # app canvas, KPI cards, captions, headers, footer, error cards,
+    # skeletons and wordcloud. Streamlit's internal dataframe / chart
+    # components keep their built-in light theme — charts will be
+    # addressed in a follow-up by making apply_vahdam_chart_style
+    # theme-aware.
     if _is_dark:
         st.markdown("""
         <style>
@@ -1123,129 +1250,6 @@ with st.sidebar:
             }
         </style>
         """, unsafe_allow_html=True)
-
-    # ── Quick Date Presets ──
-    st.markdown("#### Quick Presets")
-    today  = date.today()
-    # Default end-of-range slips behind real "today" based on the IST
-    # data-load cutoff: warehouse refresh lands ~3pm IST, so before 3pm
-    # the freshest complete day is the day-before-yesterday; after 3pm
-    # it's yesterday. This keeps the default view free of partial
-    # half-loaded data without forcing the user to fiddle with Custom
-    # Range every morning.
-    _IST          = timezone(timedelta(hours=5, minutes=30))
-    _now_ist      = datetime.now(_IST)
-    _ist_3pm_cut  = 15  # 15:00 IST cutoff
-    if _now_ist.hour >= _ist_3pm_cut:
-        effective_today = _now_ist.date() - timedelta(days=1)   # yesterday
-    else:
-        effective_today = _now_ist.date() - timedelta(days=2)   # day before yesterday
-
-    PRESET_OPTS = ["MTD", "QTD", "YTD",
-                   "Last 30 Days", "Last 60 Days", "Last 90 Days",
-                   "Custom Range"]
-    preset = st.selectbox("Date Preset", PRESET_OPTS, index=0, key="date_preset")
-
-    _preset_days = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90}
-    if preset == "MTD":
-        # MTD is anchored to the month containing the effective end date —
-        # so on 1 Jun before-3pm we'd show 1 May → 30 May (last full day
-        # of May), not "1 Jun → 30 May" which would be nonsensical.
-        d_to   = effective_today
-        d_from = d_to.replace(day=1)
-    elif preset == "QTD":
-        # Quarter-to-date: first day of the quarter containing d_to
-        q_start_month = ((effective_today.month - 1) // 3) * 3 + 1
-        d_from = date(effective_today.year, q_start_month, 1)
-        d_to   = effective_today
-    elif preset == "YTD":
-        d_from = date(effective_today.year, 1, 1)
-        d_to   = effective_today
-    elif preset in _preset_days:
-        d_from = effective_today - timedelta(days=_preset_days[preset] - 1)
-        d_to   = effective_today
-    else:
-        d1, d2 = st.columns(2)
-        with d1: d_from = st.date_input("From", value=effective_today.replace(day=1))
-        with d2: d_to   = st.date_input("To",   value=effective_today)
-
-    if preset != "Custom Range":
-        st.caption(f"📅 {d_from.strftime('%d %b')} – {d_to.strftime('%d %b %Y')}  "
-                   f"·  {(d_to - d_from).days + 1} days")
-
-    # ── SKU / ASIN / Product search ──
-    st.markdown("---")
-    st.markdown("#### Search")
-    sku_search = st.text_input("SKU / ASIN / Product",
-                               placeholder="e.g. B09YXMVQTV…", key="sku_search")
-
-    # ── Filters ──
-    @st.cache_data(ttl=600)
-    def get_options():
-        return run_query(f"SELECT DISTINCT BRAND,CATEGORY,CHANNEL,GEO,SUB_CATEGORY FROM {TABLE} WHERE {GEO_EXCL}")
-    opts = get_options()
-
-    st.markdown("#### Filters")
-    if st.button("⟲ Clear all filters", use_container_width=True,
-                 key="clear_filters",
-                 help="Reset Brand / Category / Channel / GEO / Sub-Category / SKU search"):
-        for k in ["flt_brand","flt_cat","flt_channel","flt_geo","flt_subcat","sku_search"]:
-            st.session_state.pop(k, None)
-        st.rerun()
-
-    f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
-                               key="flt_brand")
-    f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
-                               key="flt_cat")
-    _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
-    _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
-    _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
-    f_channel = [c.replace(" ", "_") for c in _ch_pick]
-    f_geo     = st.multiselect("GEO",
-                               [g for g in GEO_ORDER if g in opts["GEO"].dropna().unique()],
-                               key="flt_geo")
-    f_subcat  = st.multiselect("Sub-Category", sorted(opts["SUB_CATEGORY"].dropna().unique()),
-                               key="flt_subcat")
-
-    # Active-filter count badge
-    _active = sum(1 for x in [f_brand, f_cat, f_channel, f_geo, f_subcat] if x)
-    if _active:
-        st.caption(f"🔵 {_active} filter{'s' if _active != 1 else ''} active")
-
-    # ── Navigation ──
-    st.markdown("---")
-    if st.button("Executive Summary", use_container_width=True, key="nav_ceo"):
-        st.session_state.view = "ceo"
-        st.rerun()
-    if st.button("Overview", use_container_width=True, key="nav_overview"):
-        st.session_state.view = "overview"
-        st.rerun()
-    if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
-        st.session_state.view = "pnl"
-        st.rerun()
-    if st.button("DBR", use_container_width=True, key="nav_dbr"):
-        st.session_state.view = "dbr"
-        st.rerun()
-    if st.button("New Business", use_container_width=True, key="nav_new_business"):
-        st.session_state.view = "new_business"
-        st.rerun()
-    if st.button("Price Tracker", use_container_width=True, key="nav_price"):
-        st.session_state.view = "price"
-        st.rerun()
-    if st.button("Customer Insights", use_container_width=True, key="nav_ci"):
-        st.session_state.view = "customer_insights"
-        st.rerun()
-
-    # ── Refresh data ──
-    st.markdown("---")
-    if st.button("🔄 Refresh data", use_container_width=True, key="refresh_data",
-                 help="Clear cache and refetch from Snowflake"):
-        st.cache_data.clear()
-        st.rerun()
-    from datetime import datetime as _dt
-    st.markdown(f"<div style='font-size:10.5px;color:#AB8743;text-align:center;"
-                f"margin-top:4px;'>Last loaded · {_dt.now().strftime('%H:%M:%S')}"
-                f"</div>", unsafe_allow_html=True)
 
     # ── Credit footer ──
     st.markdown(
