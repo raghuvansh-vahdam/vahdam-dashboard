@@ -496,6 +496,82 @@ st.markdown("""
         .narrative  { font-size: 12.5px; line-height: 1.45; }
     }
 
+    /* ── Phone strategy (< 768px) ──
+       Streamlit's flex columns become awkwardly tiny on phones — KPI
+       cards squish to 18px wide each. We collapse columns to stacked,
+       hide the heaviest tables behind a "best on desktop" CTA, and
+       narrow the page chrome so the Exec Summary KPI grid reads top-
+       to-bottom in a single column. */
+    .vahdam-mobile-banner { display: none; }
+    @media (max-width: 767.98px) {
+        /* Force all st.columns to stack vertically */
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+            flex: 1 0 100% !important;
+            min-width: 0 !important;
+            width: 100% !important;
+        }
+        /* Hide the wide data tables (CR Tracker, Sub-Cat, ASIN view) —
+           they're unusable at this width. Tag any table you DO want to
+           keep visible on mobile with the `.vahdam-keep-on-mobile`
+           class. */
+        [data-testid="stDataFrame"]:not(.vahdam-keep-on-mobile),
+        [data-testid="stTable"]:not(.vahdam-keep-on-mobile) {
+            display: none !important;
+        }
+        /* Show the mobile banner CTA on phone */
+        .vahdam-mobile-banner {
+            display: block;
+            background: linear-gradient(135deg, #004A2B 0%, #2E7D32 100%);
+            color: #FBF5EA;
+            border-radius: 12px;
+            padding: 18px 20px;
+            margin: 14px 0;
+            box-shadow: 0 4px 14px rgba(0,74,43,0.18);
+            text-align: center;
+        }
+        .vahdam-mobile-banner b { color: #FBF5EA; font-size: 14.5px; }
+        .vahdam-mobile-banner small {
+            display: block; margin-top: 6px;
+            color: rgba(251,245,234,0.85); font-size: 12px;
+            line-height: 1.5;
+        }
+        /* Tighter sidebar — collapsed by Streamlit by default on phones,
+           but when expanded we keep the chrome compact. */
+        section[data-testid="stSidebar"] { width: 86vw !important; }
+        /* Tighter page chrome */
+        .page-title { font-size: 18px; letter-spacing: -0.2px; }
+        .pnl-strip  { min-height: 88px; }
+        .pnl-strip-val { font-size: 18px; }
+        /* Hide the bottom footer's right-side meta to fit narrow screens */
+        .vahdam-footer .footer-right { display: none; }
+        .vahdam-footer { padding: 10px 12px; font-size: 11px; }
+    }
+
+    /* ── Tablet strategy (768 - 1199px) ──
+       Sidebar auto-collapses to a slim rail; wide tables get sticky
+       first column + horizontal scroll so they remain readable. */
+    @media (min-width: 768px) and (max-width: 1199.98px) {
+        section[data-testid="stSidebar"] { width: 230px !important; }
+        [data-testid="stDataFrame"], [data-testid="stTable"] {
+            overflow-x: auto !important;
+        }
+        /* Sticky first column for wide tables (Streamlit already
+           supports `pinned=True` per-column, this is a fallback). */
+        [data-testid="stDataFrame"] table thead tr th:first-child,
+        [data-testid="stDataFrame"] table tbody tr td:first-child {
+            position: sticky;
+            left: 0;
+            background: #FFFFFF;
+            z-index: 2;
+            box-shadow: 2px 0 4px rgba(0,74,43,0.06);
+        }
+        .page-title { font-size: 24px; }
+        .pnl-strip-val { font-size: 18px; }
+    }
+
     /* ── Tooltips (#5) — replaces native title= with a styled hover bubble ── */
     [data-tip] { position: relative; cursor: help; }
     [data-tip]:hover::after {
@@ -2510,6 +2586,128 @@ def skel_section(rows=4, kpi=False):
         '<div class="vahdam-skel vahdam-skel-bar"></div>' for _ in range(rows)
     )
     return f'<div>{header}{body}</div>'
+
+
+# ── Plotly: house style ─────────────────────────────────────────────────────
+# Apply once to every chart so the dashboard reads as one product, not a
+# stack of engineering screenshots. Cuts ~20 lines of `update_layout`
+# boilerplate from each chart that adopts it. Kept opt-in (existing
+# fig.update_layout calls still work) so we can roll it out gradually.
+_VAHDAM_FONT_FAMILY = "Inter, 'Proxima Nova', Arial, sans-serif"
+
+def apply_vahdam_chart_style(fig, *, title=None, xtitle=None, ytitle=None,
+                              height=None, hover_mode="x unified",
+                              show_legend=True, legend_top=True,
+                              y_range=None, x_range=None,
+                              tight_margins=False):
+    """Apply the Vahdam house style to a Plotly figure.
+
+    Hovermode `x unified` is the default — for bar charts where unified
+    hover is awkward, pass `hover_mode="closest"`. `tight_margins=True`
+    trims the chart for in-table / sparkline usage."""
+    if fig is None:
+        return None
+    margin = (dict(l=20, r=10, t=(36 if title else 10), b=20)
+              if tight_margins
+              else dict(l=40, r=20, t=(46 if title else 20), b=42))
+
+    layout = dict(
+        plot_bgcolor="#FBF5EA",
+        paper_bgcolor="#FBF5EA",
+        font=dict(family=_VAHDAM_FONT_FAMILY, color="#171717", size=11),
+        margin=margin,
+        hovermode=hover_mode,
+        hoverlabel=dict(
+            bgcolor="#FFFFFF",
+            font=dict(size=12, color="#171717", family=_VAHDAM_FONT_FAMILY),
+            bordercolor="#004A2B",
+            align="left",
+        ),
+        showlegend=show_legend,
+        modebar=dict(remove=["lasso2d", "select2d", "autoScale2d",
+                              "zoomIn2d", "zoomOut2d"]),
+    )
+    if title:
+        layout["title"] = dict(
+            text=f"<b>{title}</b>",
+            font=dict(size=13, color="#004A2B", family=_VAHDAM_FONT_FAMILY),
+            x=0.01, xanchor="left", yanchor="top",
+        )
+    if show_legend:
+        if legend_top:
+            layout["legend"] = dict(
+                orientation="h", yanchor="bottom", y=1.02,
+                xanchor="left", x=0,
+                bgcolor="rgba(0,0,0,0)", font=dict(size=11),
+            )
+        else:
+            layout["legend"] = dict(
+                orientation="h", yanchor="bottom", y=-0.22,
+                xanchor="center", x=0.5,
+                bgcolor="rgba(0,0,0,0)", font=dict(size=11),
+            )
+    if height is not None:
+        layout["height"] = height
+    fig.update_layout(**layout)
+
+    # Axes: hide top/right lines, dotted gridlines, muted tick colors.
+    axis_common = dict(
+        gridcolor="rgba(171,135,67,0.15)",
+        gridwidth=1, griddash="dot",
+        zeroline=False,
+        tickfont=dict(size=10, color="#7a6a50",
+                      family=_VAHDAM_FONT_FAMILY),
+    )
+    fig.update_xaxes(
+        showline=True, linewidth=1, linecolor="#D6CCBA",
+        ticks="outside", tickcolor="#D6CCBA",
+        title=(dict(text=xtitle,
+                    font=dict(size=11, color="#7a6a50",
+                              family=_VAHDAM_FONT_FAMILY))
+               if xtitle else None),
+        range=x_range,
+        **axis_common,
+    )
+    fig.update_yaxes(
+        showline=False,
+        ticks="",
+        title=(dict(text=ytitle,
+                    font=dict(size=11, color="#7a6a50",
+                              family=_VAHDAM_FONT_FAMILY))
+               if ytitle else None),
+        range=y_range,
+        **axis_common,
+    )
+    return fig
+
+
+def vahdam_plotly(fig, **st_kwargs):
+    """Render a Plotly figure with sensible defaults: full width, no
+    modebar overlay. Use directly after `apply_vahdam_chart_style`."""
+    cfg = {"displayModeBar": False}
+    return st.plotly_chart(fig, use_container_width=True, config=cfg,
+                            **st_kwargs)
+
+
+# ── GEO centroids for the choropleth bubble map ──
+# Approximate centroid lat/lon per Vahdam-served marketplace. Used by
+# the GEO bubble map under "P&L → By Country" tab.
+_GEO_CENTROIDS = {
+    "USA": (37.0902, -95.7129),
+    "UK":  (54.7023,  -3.2765),
+    "CA":  (56.1304, -106.3468),
+    "DE":  (51.1657,  10.4515),
+    "ES":  (40.4637,  -3.7492),
+    "FR":  (46.2276,   2.2137),
+    "IT":  (41.8719,  12.5674),
+    "IN":  (20.5937,  78.9629),
+    "AUS": (-25.2744, 133.7751),
+    "UAE": (23.4241,  53.8478),
+    "MX":  (23.6345, -102.5528),
+    "JP":  (36.2048, 138.2529),
+    "BR":  (-14.2350, -51.9253),
+    "NL":  (52.1326,   5.2913),
+}
 
 
 def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
@@ -6723,11 +6921,69 @@ def render_pnl():
 
         st.markdown(f'<div class="section-hdr">{section_hdr}</div>',
                     unsafe_allow_html=True)
+
+        # ── Share-of-voice stacked bar (above the table) ──
+        # Each segment = one dim value, width = share of total Sales,
+        # color cycles through the Vahdam palette. Gives the reader an
+        # immediate visual answer to "who's biggest?" before they read
+        # the numbers below.
+        if HAS_PLOTLY and "SALES_ACT" in df_in.columns:
+            _share_src = df_in[df_in[dim_col] != "GRAND TOTAL"].copy()
+            _share_src["_SALES_n"] = pd.to_numeric(
+                _share_src["SALES_ACT"], errors="coerce").fillna(0)
+            _share_src = _share_src[_share_src["_SALES_n"] > 0]
+            _total = _share_src["_SALES_n"].sum()
+            if not _share_src.empty and _total > 0:
+                _share_src["_pct"] = _share_src["_SALES_n"] / _total * 100
+                _share_src = _share_src.sort_values("_SALES_n", ascending=False)
+                # Brand-palette segment colors. Cycles for >8 dims.
+                _palette = ["#004A2B", "#AB8743", "#8b1a1a", "#1a7a3e",
+                            "#7a6a50", "#c75c3c", "#2E7D32", "#6a4a96"]
+                fig_sv = go.Figure()
+                for i, (_, r) in enumerate(_share_src.iterrows()):
+                    label = str(r[dim_col])
+                    pct   = float(r["_pct"])
+                    sales = float(r["_SALES_n"])
+                    # Show the % label only on segments wide enough to
+                    # read it (≥ 4%) — keeps the bar from getting noisy.
+                    txt = f"{label} · {pct:.1f}%" if pct >= 4 else ""
+                    fig_sv.add_trace(go.Bar(
+                        x=[pct], y=[dim_label], orientation="h",
+                        name=label,
+                        marker=dict(
+                            color=_palette[i % len(_palette)],
+                            line=dict(color="rgba(0,74,43,0.4)", width=1),
+                        ),
+                        text=txt, textposition="inside",
+                        insidetextanchor="middle",
+                        textfont=dict(size=11, color="#FFFFFF",
+                                       family=_VAHDAM_FONT_FAMILY),
+                        hovertemplate=(f"<b>{label}</b><br>"
+                                       f"Sales: {fmt_lakhs(sales)}<br>"
+                                       f"Share: {pct:.1f}%<extra></extra>"),
+                    ))
+                fig_sv.update_layout(
+                    barmode="stack",
+                    height=78,
+                    margin=dict(l=10, r=10, t=8, b=8),
+                    plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+                    showlegend=False,
+                    xaxis=dict(visible=False, range=[0, 100]),
+                    yaxis=dict(visible=False),
+                    hoverlabel=dict(bgcolor="#FFFFFF",
+                                     bordercolor="#004A2B",
+                                     font=dict(size=12,
+                                                family=_VAHDAM_FONT_FAMILY)),
+                )
+                vahdam_plotly(fig_sv, key=f"share_bar_{file_slug}")
+
         st.dataframe(ct.style.apply(style_row, axis=1).hide(axis="index"),
                      use_container_width=True, height=420)
         _cl1, _cl2 = st.columns([6, 1])
         with _cl1:
-            st.caption("**% of Total** = share of Grand Total Sales (Actual). "
+            st.caption("**Bar above** = share of total Sales by "
+                       f"{dim_label.lower()}. "
+                       "**% of Total** = share of Grand Total Sales (Actual). "
                        "**Rev %** = Sales Actual ÷ Sales Budget.")
         with _cl2:
             st.download_button("📥 CSV", ct.to_csv(index=False).encode("utf-8"),
@@ -6758,6 +7014,106 @@ def render_pnl():
         _ph.markdown(skel_table(rows=8), unsafe_allow_html=True)
         geo = get_pnl_geo(where, sfx)
         _ph.empty()
+
+        # ── GEO bubble map (sits above the table) ──
+        # Each bubble = one marketplace. Size encodes Sales Actual, color
+        # encodes Rev% achievement: green (≥100%) / amber (90-100%) /
+        # red (<90%). Lets the user spot weak markets in 2 seconds.
+        if HAS_PLOTLY and not geo.empty:
+            _gmap = geo[geo["GEO"] != "GRAND TOTAL"].copy()
+            _gmap["LAT"] = _gmap["GEO"].map(lambda g: _GEO_CENTROIDS.get(g, (None, None))[0])
+            _gmap["LON"] = _gmap["GEO"].map(lambda g: _GEO_CENTROIDS.get(g, (None, None))[1])
+            _gmap = _gmap.dropna(subset=["LAT", "LON"])
+            if not _gmap.empty:
+                _gmap["SALES_n"] = pd.to_numeric(
+                    _gmap.get("SALES_ACT", 0), errors="coerce").fillna(0)
+                _gmap["BUD_n"]   = pd.to_numeric(
+                    _gmap.get("SALES_BUD", 0), errors="coerce").fillna(0)
+                _gmap["CM2_n"]   = pd.to_numeric(
+                    _gmap.get("CM2_ACT", 0), errors="coerce").fillna(0)
+                _gmap["REV_PCT"] = (_gmap["SALES_n"]
+                                     / _gmap["BUD_n"].replace(0, pd.NA) * 100)
+                # Bubble size: sqrt scale so small markets stay legible.
+                _max_sales = float(_gmap["SALES_n"].max()) or 1.0
+                _gmap["BUBBLE_SIZE"] = (
+                    (_gmap["SALES_n"] / _max_sales).clip(lower=0.05) ** 0.5
+                ) * 60 + 8
+                def _bubble_color(v):
+                    if v is None or pd.isna(v): return "#7a6a50"
+                    if v >= 100: return "#1a7a3e"
+                    if v >= 90:  return "#AB8743"
+                    return "#8b1a1a"
+                _gmap["COLOR"] = _gmap["REV_PCT"].apply(_bubble_color)
+                def _row_hover(r):
+                    rev_pct = r["REV_PCT"]
+                    rev_pct_str = (f"{rev_pct:.1f}%"
+                                   if pd.notna(rev_pct) else "—")
+                    return (
+                        f"<b>{r['GEO']}</b><br>"
+                        f"Sales: {fmt_lakhs(r['SALES_n'])} / "
+                        f"{fmt_lakhs(r['BUD_n'])} bud<br>"
+                        f"Rev %: {rev_pct_str}<br>"
+                        f"CM2 Abs: {fmt_lakhs(r['CM2_n'])}"
+                    )
+                _gmap["HOVER"] = _gmap.apply(_row_hover, axis=1)
+
+                fig_geo = go.Figure(go.Scattergeo(
+                    lon=_gmap["LON"], lat=_gmap["LAT"],
+                    text=_gmap["GEO"],
+                    mode="markers+text",
+                    marker=dict(
+                        size=_gmap["BUBBLE_SIZE"],
+                        color=_gmap["COLOR"],
+                        line=dict(color="#FFFFFF", width=1.5),
+                        opacity=0.85,
+                        sizemode="diameter",
+                    ),
+                    textfont=dict(size=11, color="#171717",
+                                   family=_VAHDAM_FONT_FAMILY),
+                    textposition="top center",
+                    customdata=_gmap["HOVER"],
+                    hovertemplate="%{customdata}<extra></extra>",
+                ))
+                fig_geo.update_geos(
+                    projection_type="natural earth",
+                    showcoastlines=True, coastlinecolor="#D6CCBA",
+                    showland=True, landcolor="#F5EFE0",
+                    showocean=True, oceancolor="#F0EAD8",
+                    showcountries=True, countrycolor="#E0D5BA",
+                    showframe=False,
+                    bgcolor="#FBF5EA",
+                )
+                fig_geo.update_layout(
+                    height=420,
+                    margin=dict(l=0, r=0, t=44, b=0),
+                    paper_bgcolor="#FBF5EA",
+                    title=dict(
+                        text="<b>Sales by Country — bubble = Sales Actual · color = Rev% vs Budget</b>",
+                        font=dict(size=13, color="#004A2B",
+                                  family=_VAHDAM_FONT_FAMILY),
+                        x=0.01, xanchor="left",
+                    ),
+                    hoverlabel=dict(bgcolor="#FFFFFF",
+                                     bordercolor="#004A2B",
+                                     font=dict(size=12,
+                                               family=_VAHDAM_FONT_FAMILY)),
+                )
+                vahdam_plotly(fig_geo, key="pnl_geo_map")
+                # Legend chips below the map — explain bubble color.
+                st.markdown(
+                    '<div style="display:flex;gap:18px;justify-content:center;'
+                    'font-size:11.5px;color:#7a6a50;margin:-6px 0 8px 0;">'
+                    '<span><span style="display:inline-block;width:10px;height:10px;'
+                    'border-radius:50%;background:#1a7a3e;margin-right:6px;'
+                    'vertical-align:middle;"></span>≥ 100% of budget</span>'
+                    '<span><span style="display:inline-block;width:10px;height:10px;'
+                    'border-radius:50%;background:#AB8743;margin-right:6px;'
+                    'vertical-align:middle;"></span>90 – 100%</span>'
+                    '<span><span style="display:inline-block;width:10px;height:10px;'
+                    'border-radius:50%;background:#8b1a1a;margin-right:6px;'
+                    'vertical-align:middle;"></span>&lt; 90%</span>'
+                    '</div>', unsafe_allow_html=True)
+
         _render_breakdown(geo, "GEO", "Country",
                           "Country P&amp;L", "dl_pnl_geo", "country")
 
@@ -9159,6 +9515,23 @@ def render_customer_insights():
                      column_config={
                          "Rating": st.column_config.NumberColumn(format="%.1f ★"),
                      })
+
+
+# ── Mobile-only banner ──
+# CSS-controlled: only paints when viewport is < 768px. On larger
+# screens the .vahdam-mobile-banner class is `display: none` so this
+# markup is effectively a no-op for desktop / tablet users.
+st.markdown("""
+<div class="vahdam-mobile-banner">
+    <b>📱 Best experience on desktop</b>
+    <small>
+        The dashboard has wide tables and detailed charts that are hard
+        to read on a phone. KPI cards above still work — tables and
+        breakdowns are hidden at this width. Open the same URL on a
+        laptop to see the full view.
+    </small>
+</div>
+""", unsafe_allow_html=True)
 
 
 view = st.session_state.view
