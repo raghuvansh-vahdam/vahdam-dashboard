@@ -213,6 +213,114 @@ st.markdown("""
     .page-sub   { font-size: 13px; color: #AB8743; margin-bottom: 20px; font-weight: 500; }
     .breadcrumb { font-size: 12px; color: #AB8743; margin-bottom: 6px; letter-spacing:.5px; }
 
+    /* ── Skeleton loaders ──
+       Shown while a query is in flight; replaced when data arrives.
+       The shimmer keyframe drifts a lighter band across the placeholder
+       to indicate "in progress". Far less jarring than a centered
+       spinner blanking the whole page. */
+    @keyframes vahdam-shimmer {
+        0%   { background-position: -120% 0; }
+        100% { background-position:  120% 0; }
+    }
+    .vahdam-skel {
+        background: linear-gradient(90deg,
+            #EDE4D0 0%, #F5EFE0 50%, #EDE4D0 100%);
+        background-size: 220% 100%;
+        animation: vahdam-shimmer 1.6s ease-in-out infinite;
+        border-radius: 10px;
+        opacity: 0.85;
+    }
+    .vahdam-skel-row {
+        display: flex; gap: 10px; margin: 6px 0;
+    }
+    .vahdam-skel-cell {
+        flex: 1; height: 96px;
+    }
+    .vahdam-skel-bar {
+        height: 22px; margin: 8px 0; border-radius: 6px;
+    }
+    .vahdam-skel-header {
+        height: 32px; margin-bottom: 12px; border-radius: 6px;
+        background: linear-gradient(90deg,
+            #E0D5BA 0%, #ECE2C8 50%, #E0D5BA 100%);
+        background-size: 220% 100%;
+        animation: vahdam-shimmer 1.6s ease-in-out infinite;
+    }
+
+    /* ── Vahdam logo: gentle pulse while the first query is in flight ── */
+    @keyframes vahdam-logo-pulse {
+        0%   { transform: scale(1);     opacity: 1; }
+        50%  { transform: scale(1.035); opacity: 0.92; }
+        100% { transform: scale(1);     opacity: 1; }
+    }
+    section[data-testid="stSidebar"] img.vahdam-loading,
+    section[data-testid="stSidebar"]:has(.vahdam-bootstrapping) img {
+        animation: vahdam-logo-pulse 1.8s ease-in-out infinite;
+    }
+
+    /* ── KPI number "value changed" highlight ──
+       Numbers in KPI strip cards briefly flash saffron on rerun so the
+       user sees the value refreshed. Applied via a single pulse keyframe
+       that runs once per render. */
+    @keyframes vahdam-num-flash {
+        0%   { color: #004A2B; }
+        20%  { color: #AB8743; transform: scale(1.03); }
+        100% { color: #004A2B; transform: scale(1.0); }
+    }
+    .pnl-strip-val {
+        animation: vahdam-num-flash 0.65s ease-out;
+        transform-origin: left center;
+        display: inline-block;
+    }
+
+    /* ── Status footer (bottom of page) ── */
+    .vahdam-footer {
+        margin-top: 36px; padding: 12px 16px;
+        background: #F5EFE0; border-top: 1px solid #E0D5BA;
+        border-radius: 8px 8px 0 0;
+        font-size: 11.5px; color: #7a6a50;
+        display: flex; justify-content: space-between; align-items: center;
+        flex-wrap: wrap; gap: 12px; letter-spacing: 0.2px;
+    }
+    .vahdam-footer .footer-left,
+    .vahdam-footer .footer-right { display: flex; align-items: center; gap: 14px; }
+    .vahdam-footer .footer-sep   { color: #C9BBA0; }
+    .vahdam-footer .footer-dot   { width: 8px; height: 8px; border-radius: 50%;
+                                    background: #1a7a3e; display: inline-block;
+                                    margin-right: 6px;
+                                    box-shadow: 0 0 6px rgba(26,122,62,0.4); }
+    .vahdam-footer .footer-dot-warn { background: #AB8743;
+                                       box-shadow: 0 0 6px rgba(171,135,67,0.4); }
+    .vahdam-footer .footer-dot-bad  { background: #8b1a1a;
+                                       box-shadow: 0 0 6px rgba(139,26,26,0.4); }
+
+    /* ── Friendly error card ── */
+    .vahdam-err-card {
+        background: linear-gradient(180deg, #FFF5F5 0%, #FBF5EA 100%);
+        border: 1px solid #f4d6d6;
+        border-left: 4px solid #8b1a1a;
+        border-radius: 10px; padding: 18px 22px; margin: 20px 0;
+    }
+    .vahdam-err-title { font-size: 16px; font-weight: 700; color: #8b1a1a;
+                         margin-bottom: 4px; }
+    .vahdam-err-body  { font-size: 13px; color: #4a3a2a;
+                         margin-bottom: 8px; line-height: 1.5; }
+    .vahdam-err-meta  { font-size: 11px; color: #7a6a50; font-family: monospace; }
+
+    /* ── Simple HTML word cloud ── */
+    .vahdam-wordcloud {
+        background: #FFFFFF; border: 1px solid #E0D5BA;
+        border-radius: 10px; padding: 22px;
+        text-align: center; line-height: 1.7;
+        margin: 8px 0 14px 0;
+    }
+    .vahdam-wordcloud span {
+        display: inline-block; margin: 4px 9px;
+        font-weight: 600; letter-spacing: 0.2px;
+        transition: transform 0.18s ease;
+    }
+    .vahdam-wordcloud span:hover { transform: scale(1.10); cursor: default; }
+
     .section-hdr {
         font-size: 15px; font-weight: 700; color: #004A2B;
         margin: 22px 0 10px 0; border-left: 4px solid #AB8743;
@@ -679,6 +787,62 @@ def run_query(sql: str) -> pd.DataFrame:
                 continue
             raise
 
+
+def render_friendly_data_error(err, where="dashboard", sql_snippet=None):
+    """User-facing error card for Snowflake / data exceptions.
+
+    Replaces the raw red Python stacktrace that Streamlit shows by
+    default. Calls st.stop() at the end so downstream rendering doesn't
+    explode on missing columns.
+
+    Where to use: wrap the page-router try/except (top of the if-elif
+    chain that picks the view to render). For per-call recovery
+    (like the column-drop case handled by _run_pnl_query), keep the
+    existing in-function try/except — this is only the final safety net.
+    """
+    err_text = str(err) if err else "Unknown error"
+    short    = err_text.split("\n")[0][:240]
+    now_ist  = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    ts       = now_ist.strftime("%H:%M IST")
+
+    st.markdown(f"""
+    <div class="vahdam-err-card">
+        <div class="vahdam-err-title">⚠️ Couldn't load data right now</div>
+        <div class="vahdam-err-body">
+            The Snowflake query for <b>{where}</b> didn't come back cleanly.
+            Most often this is a transient connection blip or an upstream
+            schema change. Try refreshing the data, or come back in 30
+            seconds.
+        </div>
+        <div class="vahdam-err-meta">View: {where} &nbsp;·&nbsp; Time: {ts}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    cols = st.columns([1.3, 1.3, 1.5, 5])
+    with cols[0]:
+        if st.button("🔄 Refresh data", key=f"err_refresh_{where}"):
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            st.rerun()
+    with cols[1]:
+        if st.button("↩️ Reload page", key=f"err_reload_{where}"):
+            st.rerun()
+    with cols[2]:
+        if st.button("🏠 Exec Summary", key=f"err_home_{where}"):
+            st.session_state.view = "ceo"
+            st.rerun()
+
+    with st.expander("Technical details (for engineers)", expanded=False):
+        st.markdown(f"**Short message**\n\n`{short}`")
+        st.markdown("**Full error**")
+        st.code(err_text, language="text")
+        if sql_snippet:
+            st.markdown("**Query (first 2KB)**")
+            st.code(sql_snippet[:2000], language="sql")
+    st.stop()
+
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None),
              ("selected_asin",None), ("selected_asin_product",None)]:
@@ -704,6 +868,14 @@ if "_url_synced" not in st.session_state:
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.image("vahdam_logo.webp", use_container_width=True)
+    # First-load marker: triggers the gentle pulse animation on the sidebar
+    # logo (via the :has(.vahdam-bootstrapping) CSS selector) while the
+    # initial data fetch is in flight. Removed after the first successful
+    # render so subsequent navigations don't keep pulsing.
+    if not st.session_state.get("_first_load_done"):
+        st.markdown('<div class="vahdam-bootstrapping" '
+                    'style="display:none;"></div>',
+                    unsafe_allow_html=True)
     st.markdown("""<div style="text-align:center;color:#AB8743;font-size:11px;
         letter-spacing:2px;text-transform:uppercase;margin-top:-8px;margin-bottom:8px;">
         Amazon P&L Dashboard</div>""", unsafe_allow_html=True)
@@ -2290,6 +2462,56 @@ def top_movers_chips(view1_df, n=3):
     return f'<div class="movers-row">{"".join(chips)}</div>'
 
 
+# ── Skeleton loaders ─────────────────────────────────────────────────────────
+# Lightweight HTML placeholders that pulse while a query is in flight.
+# Usage:
+#     ph = st.empty()
+#     ph.markdown(skel_table(rows=8), unsafe_allow_html=True)
+#     data = get_data(...)
+#     ph.empty()
+#     st.dataframe(data, ...)
+# When the data is already cached the placeholder appears for ~0ms (Streamlit
+# never actually paints it), so cached views feel instant.
+def skel_kpi_row(n=5, height=96):
+    """KPI-strip-card row skeleton — `n` cells, each `height` tall."""
+    cells = "".join(
+        f'<div class="vahdam-skel vahdam-skel-cell" '
+        f'style="height:{height}px;"></div>'
+        for _ in range(n)
+    )
+    return f'<div class="vahdam-skel-row">{cells}</div>'
+
+
+def skel_table(rows=8, has_header=True):
+    """Table-shaped skeleton: optional header bar + `rows` content bars."""
+    parts = []
+    if has_header:
+        parts.append('<div class="vahdam-skel-header"></div>')
+    parts += [
+        '<div class="vahdam-skel vahdam-skel-bar"></div>' for _ in range(rows)
+    ]
+    return f'<div style="padding:6px 2px;">{"".join(parts)}</div>'
+
+
+def skel_chart(height=440):
+    """Chart-area skeleton (single tall block)."""
+    return (f'<div class="vahdam-skel" '
+            f'style="height:{height}px;border-radius:10px;margin:8px 0;"></div>')
+
+
+def skel_section(rows=4, kpi=False):
+    """Combined: header bar + (optional) KPI row + a few content bars.
+    Handy for replacing the whole 'Loading sub-cat…' spinner block."""
+    header = '<div class="vahdam-skel-header" style="width:40%;"></div>'
+    body = ""
+    if kpi:
+        body += skel_kpi_row(n=5, height=88)
+    body += "".join(
+        '<div class="vahdam-skel vahdam-skel-bar"></div>' for _ in range(rows)
+    )
+    return f'<div>{header}{body}</div>'
+
+
 def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
                vs_b_pct=None, vs_b_lower_better=False,
                lm_value=None, ly_delta=None, ly_value=None):
@@ -2963,11 +3185,11 @@ def _build_waterfall(row):
     rows.append({
         "P&L Line":       "Quantity",
         "Actual (INR)":   fmt_indian(qty_act),
-        "Per Unit (A)":   "—",
-        "% of Sales (A)": "—",
+        "Per Unit (Actual)":   "—",
+        "% of Sales (Actual)": "—",
         "Budget (INR)":   fmt_indian(qty_bud),
-        "Per Unit (B)":   "—",
-        "% of Sales (B)": "—",
+        "Per Unit (Budget)":   "—",
+        "% of Sales (Budget)": "—",
         "Variance (INR)": fmt_indian(qty_var, signed=True),
         "Var %":          (f"{'+' if (qty_var_pct or 0) >= 0 else ''}"
                             f"{qty_var_pct:.1f}%"
@@ -3003,11 +3225,11 @@ def _build_waterfall(row):
         rows.append({
             "P&L Line":       label,
             "Actual (INR)":   fmt_indian(act),
-            "Per Unit (A)":   _pu_fmt(pu_act),
-            "% of Sales (A)": _pct_fmt(pct_act),
+            "Per Unit (Actual)":   _pu_fmt(pu_act),
+            "% of Sales (Actual)": _pct_fmt(pct_act),
             "Budget (INR)":   fmt_indian(bud),
-            "Per Unit (B)":   _pu_fmt(pu_bud),
-            "% of Sales (B)": _pct_fmt(pct_bud),
+            "Per Unit (Budget)":   _pu_fmt(pu_bud),
+            "% of Sales (Budget)": _pct_fmt(pct_bud),
             "Variance (INR)": fmt_indian(var, signed=True),
             "Var %":          (f"{'+'if (var_pct or 0)>=0 else ''}{var_pct:.1f}%"
                                if var_pct is not None else "—"),
@@ -3789,8 +4011,10 @@ def render_subcategory():
             f"**PM-1** = {_pm1_start.strftime('%b %Y')} "
             f"({_pm1_start.strftime('%d %b')}–{_pm1_end.strftime('%d %b')})."
         )
-        with st.spinner("Loading CR Tracker…"):
-            cr = get_cr_tracker_data(geo, d_from, d_to, sfx)
+        _ph = st.empty()
+        _ph.markdown(skel_table(rows=12), unsafe_allow_html=True)
+        cr = get_cr_tracker_data(geo, d_from, d_to, sfx)
+        _ph.empty()
 
         if cr.empty:
             st.info("📭 No ASIN data found for this GEO in the selected range.")
@@ -4616,8 +4840,10 @@ def render_asin_detail():
             f'{(d2 - d1).days + 1} days</div>', unsafe_allow_html=True)
 
     # ── Pull daily data ──
-    with st.spinner("Loading ASIN daily…"):
-        daily = get_asin_daily(asin, geo, d1, d2, sfx)
+    _ph = st.empty()
+    _ph.markdown(skel_chart(height=380), unsafe_allow_html=True)
+    daily = get_asin_daily(asin, geo, d1, d2, sfx)
+    _ph.empty()
 
     if daily.empty:
         st.warning("📭 No daily data found for this ASIN in the selected window.")
@@ -4644,8 +4870,10 @@ def render_asin_detail():
     # 7/30/90-day comparable buckets (Amazon-style). These use an
     # INDEPENDENT 90-day query so they are always correct even when the user
     # selects a short window like "Last 7 Days" in the period selector.
-    with st.spinner("Loading 90-day rolling stats…"):
-        roll = get_asin_rolling(asin, geo, sfx)
+    _ph = st.empty()
+    _ph.markdown(skel_kpi_row(n=4, height=68), unsafe_allow_html=True)
+    roll = get_asin_rolling(asin, geo, sfx)
+    _ph.empty()
 
     def _window90(days):
         if roll.empty:
@@ -6229,9 +6457,11 @@ def render_pnl():
     where_lm = build_where(date_from=lm_d_from, date_to=lm_d_to)
 
     # ── Summary KPI strip ──
-    with st.spinner("Loading summary…"):
-        _agg    = get_pnl_agg(where,    sfx)
-        _agg_lm = get_pnl_agg(where_lm, sfx)
+    _ph = st.empty()
+    _ph.markdown(skel_kpi_row(n=5), unsafe_allow_html=True)
+    _agg    = get_pnl_agg(where,    sfx)
+    _agg_lm = get_pnl_agg(where_lm, sfx)
+    _ph.empty()
 
     if not _agg.empty:
         _r  = {k.upper(): v for k, v in _agg.iloc[0].items()}
@@ -6296,8 +6526,15 @@ def render_pnl():
             col.markdown(html, unsafe_allow_html=True)
         st.markdown("")
 
+    # Cheap counts that don't require an extra query — total P&L line
+    # count (+1 for the Quantity header row) and number of days in the
+    # selected range. Category / Channel / Country counts surface as
+    # captions inside each tab once their query has run.
+    _n_lines = len(_PNL_LINES) + 1
+    _n_days  = (d_to - d_from).days + 1
     t1, t2, t3, t4, t5 = st.tabs([
-        "📊 P&L Statement", "📈 Daily Trend",
+        f"📊 P&L Statement ({_n_lines})",
+        f"📈 Daily Trend ({_n_days}d)",
         "🗂️ By Category", "🛒 By Channel", "🌍 By Country",
     ])
 
@@ -6349,8 +6586,10 @@ def render_pnl():
 
     # ── Tab 2: Daily Trend ──
     with t2:
-        with st.spinner("Loading daily trend…"):
-            daily = get_pnl_daily(where, sfx)
+        _ph = st.empty()
+        _ph.markdown(skel_chart(height=440), unsafe_allow_html=True)
+        daily = get_pnl_daily(where, sfx)
+        _ph.empty()
         if daily.empty:
             st.info("📭 No daily data available.")
         else:
@@ -6434,6 +6673,14 @@ def render_pnl():
         if df_in.empty:
             st.info(f"📭 No {dim_label.lower()} data available.")
             return
+        # Row count badge for the section header. Subtracts the
+        # GRAND TOTAL row so the count reflects real dimensions, not
+        # the rollup line.
+        _n = max(0, len(df_in) - (1 if (df_in[dim_col] == "GRAND TOTAL").any() else 0))
+        section_hdr = (f'{section_hdr} '
+                       f'<span style="font-size:12px;color:#7a6a50;'
+                       f'font-weight:500;">— {_n} {dim_label.lower()}'
+                       f'{"" if _n == 1 else "s"}</span>')
         disp = df_in.copy()
         col_map = [("SALES_ACT","Sales Act"), ("SALES_BUD","Sales Bud"),
                    ("CM1_ACT","CM1 Act"), ("CM2_ACT","CM2 Act"),
@@ -6489,22 +6736,28 @@ def render_pnl():
 
     # ── Tab 3: By Category ──
     with t3:
-        with st.spinner("Loading category P&L…"):
-            cat = get_pnl_category(where, sfx)
+        _ph = st.empty()
+        _ph.markdown(skel_table(rows=8), unsafe_allow_html=True)
+        cat = get_pnl_category(where, sfx)
+        _ph.empty()
         _render_breakdown(cat, "CATEGORY", "Category",
                           "Category P&amp;L", "dl_pnl_cat", "category")
 
     # ── Tab 4: By Channel ──
     with t4:
-        with st.spinner("Loading channel P&L…"):
-            ch = get_pnl_channel(where, sfx)
+        _ph = st.empty()
+        _ph.markdown(skel_table(rows=6), unsafe_allow_html=True)
+        ch = get_pnl_channel(where, sfx)
+        _ph.empty()
         _render_breakdown(ch, "CHANNEL", "Channel",
                           "Channel P&amp;L", "dl_pnl_chan", "channel")
 
     # ── Tab 5: By Country ──
     with t5:
-        with st.spinner("Loading country P&L…"):
-            geo = get_pnl_geo(where, sfx)
+        _ph = st.empty()
+        _ph.markdown(skel_table(rows=8), unsafe_allow_html=True)
+        geo = get_pnl_geo(where, sfx)
+        _ph.empty()
         _render_breakdown(geo, "GEO", "Country",
                           "Country P&amp;L", "dl_pnl_geo", "country")
 
@@ -6916,9 +7169,11 @@ def render_dbr():
     # ── Fetch once, slice in pandas. Pull the SELECTED-range data AND
     # the FULL-MONTH range so we can show FMB rows. The two share an
     # identical shape, so the same slicing helpers work on both. ──
-    with st.spinner("Loading DBR…"):
-        data     = get_dbr_data(d_from, d_to, sfx)
-        fmb_data = get_dbr_data(month_start, month_end, sfx)
+    _ph = st.empty()
+    _ph.markdown(skel_section(rows=6, kpi=True), unsafe_allow_html=True)
+    data     = get_dbr_data(d_from, d_to, sfx)
+    fmb_data = get_dbr_data(month_start, month_end, sfx)
+    _ph.empty()
     if data.empty:
         st.info("📭 No data for the selected date range.")
         return
@@ -7634,10 +7889,13 @@ def render_new_business():
     # ── Headline KPI cards: top row = sales/margin, bottom row = ads ──
     # Both the selected period and the same-length prior period are
     # fetched so each card can show a vs-prior-period delta line.
-    with st.spinner("Loading New Business summary…"):
-        summary    = get_nb_asin_summary(geo, asin_csv, nb_d_from, nb_d_to, sfx)
-        summary_lp = get_nb_asin_summary(geo, asin_csv,
-                                          nb_prev_d_from, nb_prev_d_to, sfx)
+    _ph = st.empty()
+    _ph.markdown(skel_kpi_row(n=5) + skel_kpi_row(n=5) + skel_table(rows=10),
+                 unsafe_allow_html=True)
+    summary    = get_nb_asin_summary(geo, asin_csv, nb_d_from, nb_d_to, sfx)
+    summary_lp = get_nb_asin_summary(geo, asin_csv,
+                                      nb_prev_d_from, nb_prev_d_to, sfx)
+    _ph.empty()
     if summary.empty:
         st.info(f"📭 No data for {geo} New Business in the selected date range.")
         return
@@ -7839,8 +8097,10 @@ def render_new_business():
 
     periods = _nb_periods(eff_today)
     periods_tuple = tuple(periods)
-    with st.spinner(f"Loading 9-period breakdown for {sel_asin}…"):
-        pdf = get_nb_asin_periods(sel_asin, geo, periods_tuple, sfx)
+    _ph = st.empty()
+    _ph.markdown(skel_table(rows=18), unsafe_allow_html=True)
+    pdf = get_nb_asin_periods(sel_asin, geo, periods_tuple, sfx)
+    _ph.empty()
 
     if pdf.empty:
         st.info("📭 No data for this ASIN across the 9 periods.")
@@ -8068,19 +8328,102 @@ def get_reviews_all():
 
 
 def _theme_counts(slice_df):
-    """Return DataFrame[theme, n] sorted desc — counts non-empty theme cells.
-    Always returns the same two columns even when no themes are present
-    (otherwise sort_values('n') on an empty DataFrame raises KeyError)."""
+    """Return DataFrame[theme, n, asin_coverage, avg_rating] sorted by `n`
+    desc — counts non-empty theme cells. Always returns the full schema
+    even when no themes are present (so downstream sort_values calls
+    don't raise KeyError)."""
+    cols = ["theme", "n", "asin_coverage", "avg_rating"]
     rows = []
     if slice_df is not None and not slice_df.empty:
         for col, label in _REVIEW_THEMES:
-            if col in slice_df.columns:
-                n = int((slice_df[col].fillna("").astype(str).str.strip() != "").sum())
-                if n > 0:
-                    rows.append({"theme": label, "n": n})
+            if col not in slice_df.columns:
+                continue
+            mask = slice_df[col].fillna("").astype(str).str.strip() != ""
+            n = int(mask.sum())
+            if n == 0:
+                continue
+            sub = slice_df[mask]
+            asin_cov = int(sub["ASIN"].nunique()) if "ASIN" in sub.columns else 0
+            avg_rat  = (float(pd.to_numeric(sub["RATING"], errors="coerce").mean())
+                        if "RATING" in sub.columns and not sub.empty else None)
+            rows.append({"theme": label, "n": n,
+                         "asin_coverage": asin_cov,
+                         "avg_rating": avg_rat})
     if not rows:
-        return pd.DataFrame(columns=["theme", "n"])
-    return pd.DataFrame(rows).sort_values("n", ascending=False).reset_index(drop=True)
+        return pd.DataFrame(columns=cols)
+    return (pd.DataFrame(rows, columns=cols)
+              .sort_values("n", ascending=False).reset_index(drop=True))
+
+
+# ── Word cloud (Customer Insights) ──
+# Lightweight stopword list — pragma kept short rather than importing
+# nltk. Targets generic English noise; tea / spice / supplement domain
+# words stay so meaningful themes can surface.
+_WORDCLOUD_STOPWORDS = frozenset("""
+a about above after again against all am an and any are aren as at be because
+been before being below between both but by can cant cannot could couldnt did
+didnt do does doesnt doing dont down during each few for from further had hadnt
+has hasnt have havent having he hed hell hes her here hers herself him himself
+his how however i id ill im ive if in into is isnt it its itself just lets me
+more most mustnt my myself no nor not of off on once only or other ought our
+ours ourselves out over own same shant she shed shell shes should shouldnt so
+some such than that thats the their theirs them themselves then there theres
+these they theyd theyll theyre theyve this those through to too under until up
+very was wasnt we wed well were werent weve what whats when whens where wheres
+which while who whos whom why whys with wont would wouldnt you youd youll
+youre youve your yours yourself yourselves get got really also one two three
+four five six seven eight nine ten will just like would much way back put many
+even though still ever take see make know thing things use used using order
+arrived received bought purchased product products amazon item items
+""".split())
+
+
+def _wordcloud_freqs(slice_df, max_words=40, min_len=4):
+    """Tally distinct words across REVIEW_TEXT in a slice. Returns a list
+    of (word, count) tuples sorted high → low. Lowercases everything,
+    strips punctuation, drops stopwords and tokens shorter than
+    `min_len` so we surface meaningful product / experience language."""
+    if slice_df is None or slice_df.empty or "REVIEW_TEXT" not in slice_df.columns:
+        return []
+    import re as _re
+    counter = {}
+    # Vectorize-then-flatten for speed on big slices. Casts NaN → "".
+    blob = " ".join(slice_df["REVIEW_TEXT"].fillna("").astype(str).tolist())
+    # Keep letters only; collapse common punctuation. apostrophes
+    # within words (don't → dont) get stripped first so the stopword
+    # list (kept apostrophe-less) matches cleanly.
+    blob = _re.sub(r"['']", "", blob.lower())
+    for tok in _re.findall(r"[a-z]+", blob):
+        if len(tok) < min_len: continue
+        if tok in _WORDCLOUD_STOPWORDS: continue
+        counter[tok] = counter.get(tok, 0) + 1
+    items = sorted(counter.items(), key=lambda kv: -kv[1])[:max_words]
+    return items
+
+
+def render_word_cloud(slice_df, max_words=40, palette=None):
+    """Render the HTML word cloud from REVIEW_TEXT in `slice_df`. Sizes
+    range 12-32px based on frequency; colors cycle through the Vahdam
+    palette so the cloud feels brand-aligned, not generic."""
+    items = _wordcloud_freqs(slice_df, max_words=max_words)
+    if not items:
+        st.caption("Not enough review text to build a word cloud.")
+        return
+    palette = palette or ["#004A2B", "#AB8743", "#7a6a50",
+                          "#8b1a1a", "#1a7a3e", "#4a3a2a"]
+    max_n = items[0][1]
+    parts = []
+    for i, (word, n) in enumerate(items):
+        size = 12 + (n / max_n) * 22       # 12 – 34 px
+        color = palette[i % len(palette)]
+        parts.append(
+            f'<span style="font-size:{size:.1f}px;color:{color};" '
+            f'title="{n} mentions">{word}</span>'
+        )
+    st.markdown(
+        f'<div class="vahdam-wordcloud">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _sample_quote(slice_df, low_rating=True, max_len=140):
@@ -8143,8 +8486,10 @@ def render_customer_insights():
         'theme when the cell is non-empty.</div>',
         unsafe_allow_html=True)
 
-    with st.spinner("Loading reviews…"):
-        raw = get_reviews_all()
+    _ph = st.empty()
+    _ph.markdown(skel_section(rows=8, kpi=True), unsafe_allow_html=True)
+    raw = get_reviews_all()
+    _ph.empty()
     if raw.empty:
         st.warning("📭 No review rows available.")
         return
@@ -8332,20 +8677,63 @@ def render_customer_insights():
                 st.plotly_chart(fig, use_container_width=True,
                                  config={"displayModeBar": False})
         with c4:
-            st.markdown('<div class="section-hdr">Top complaint themes</div>',
-                         unsafe_allow_html=True)
+            # Theme bar gains a sort dropdown — same data, re-ordered
+            # by mention count, distinct ASIN coverage, or worst avg ★.
+            hdr_l, hdr_r = st.columns([3, 2], gap="small")
+            with hdr_l:
+                st.markdown('<div class="section-hdr">Top complaint themes</div>',
+                             unsafe_allow_html=True)
+            with hdr_r:
+                _theme_sort = st.selectbox(
+                    "Sort by",
+                    ["Mention count", "ASIN coverage", "Worst avg ★"],
+                    index=0, key="ci_theme_sort",
+                    label_visibility="collapsed",
+                )
             st.caption("Among 1–2★ reviews")
             t = _theme_counts(df[df["NEGATIVE"]])
+            if not t.empty:
+                if _theme_sort == "ASIN coverage":
+                    t = t.sort_values("asin_coverage", ascending=False)
+                elif _theme_sort == "Worst avg ★":
+                    t = t.sort_values("avg_rating", ascending=True,
+                                      na_position="last")
+                else:
+                    t = t.sort_values("n", ascending=False)
             if HAS_PLOTLY and not t.empty:
-                t = t.head(12).iloc[::-1]
-                fig = go.Figure(go.Bar(x=t["n"], y=t["theme"], orientation="h",
-                                         marker_color="#c75c3c"))
+                tt = t.head(12).iloc[::-1]
+                # Each bar is labelled with (n · m ASINs · ★) so a single
+                # glance covers all three sort dimensions even when the
+                # user isn't switching the dropdown.
+                bar_labels = [
+                    f"{int(row['n']):,} · {int(row['asin_coverage'])} ASIN"
+                    f"{'s' if int(row['asin_coverage']) != 1 else ''}"
+                    f" · {row['avg_rating']:.1f}★"
+                    if pd.notna(row["avg_rating"]) else
+                    f"{int(row['n']):,} · {int(row['asin_coverage'])} ASIN"
+                    f"{'s' if int(row['asin_coverage']) != 1 else ''}"
+                    for _, row in tt.iterrows()
+                ]
+                fig = go.Figure(go.Bar(x=tt["n"], y=tt["theme"], orientation="h",
+                                         marker_color="#c75c3c",
+                                         text=bar_labels, textposition="outside",
+                                         textfont=dict(size=11, color="#5a4d35")))
                 fig.update_layout(plot_bgcolor="#FBF5EA",
                                     paper_bgcolor="#FBF5EA",
-                                    height=300, margin=dict(l=120, r=20, t=10, b=30))
+                                    height=320, margin=dict(l=130, r=140, t=10, b=30))
                 fig.update_xaxes(gridcolor="rgba(171,135,67,0.18)")
                 st.plotly_chart(fig, use_container_width=True,
                                  config={"displayModeBar": False})
+
+        # ── Word cloud (full width below the 2x2 grid) ──
+        st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                     'Customer language — frequent words in reviews'
+                     '</div>', unsafe_allow_html=True)
+        st.caption(
+            "Top 40 most-used words across the visible review slice "
+            "(stopwords and very-short tokens filtered). Larger = more "
+            "frequent. Hover any word for its mention count.")
+        render_word_cloud(df)
 
     # ─────────────────────────── 2. ACTIONABLES ───────────────────────────
     with t_act:
@@ -8774,23 +9162,87 @@ def render_customer_insights():
 
 
 view = st.session_state.view
-if view == "ceo":
-    render_ceo()
-elif view == "overview":
-    render_overview()
-elif view == "subcategory":
-    render_subcategory()
-elif view == "asin_detail":
-    render_asin_detail()
-elif view == "pnl":
-    render_pnl()
-elif view == "dbr":
-    render_dbr()
-elif view == "new_business":
-    render_new_business()
-elif view == "price":
-    render_price_tracker()
-elif view == "customer_insights":
-    render_customer_insights()
-else:
-    render_asin()
+# Top-level router with a friendly-error safety net. Snowflake /
+# database errors bubble up here and get rendered as a recovery card
+# (with retry buttons + collapsible technical details). Non-data
+# exceptions re-raise so Streamlit's normal panel still shows them.
+try:
+    if view == "ceo":
+        render_ceo()
+    elif view == "overview":
+        render_overview()
+    elif view == "subcategory":
+        render_subcategory()
+    elif view == "asin_detail":
+        render_asin_detail()
+    elif view == "pnl":
+        render_pnl()
+    elif view == "dbr":
+        render_dbr()
+    elif view == "new_business":
+        render_new_business()
+    elif view == "price":
+        render_price_tracker()
+    elif view == "customer_insights":
+        render_customer_insights()
+    else:
+        render_asin()
+except (snowflake.connector.errors.ProgrammingError,
+        snowflake.connector.errors.DatabaseError) as _data_err:
+    render_friendly_data_error(_data_err, where=view)
+
+
+# ── Footer ──────────────────────────────────────────────────────────────────
+# Persistent status bar at the bottom of every view. Confirms what data
+# the user is looking at without making them dig into Snowflake or the
+# sidebar. Auto-lights:
+#   green  → Snowflake reachable + connection cached
+#   amber  → cache miss this run (a query just executed)
+#   red    → the friendly-error card was rendered above (we'd have st.stop'd
+#            before reaching this point so the footer never paints red in
+#            practice — kept for completeness).
+def _footer_status():
+    """Compute (last_refresh_ts, dot_class) for the footer."""
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    now  = datetime.now(_IST)
+    # We can't introspect the Snowflake conn lazily, but if get_conn has
+    # ever returned successfully this session, the cache holds the
+    # connection — that's a reasonable health signal.
+    try:
+        ok = get_conn() is not None
+    except Exception:
+        ok = False
+    cls = "footer-dot" if ok else "footer-dot-bad"
+    return now.strftime("%H:%M IST"), cls
+
+try:
+    _foot_ts, _foot_dot_cls = _footer_status()
+except Exception:
+    _foot_ts, _foot_dot_cls = "—", "footer-dot-warn"
+
+try:
+    _foot_role = st.secrets.get("snowflake", {}).get("role", "—")
+except Exception:
+    _foot_role = "—"
+
+st.markdown(f"""
+<div class="vahdam-footer">
+    <div class="footer-left">
+        <span><span class="{_foot_dot_cls}"></span>
+              Snowflake reachable</span>
+        <span class="footer-sep">·</span>
+        <span>Last refresh: <b>{_foot_ts}</b></span>
+        <span class="footer-sep">·</span>
+        <span>Role: <b>{_foot_role}</b></span>
+    </div>
+    <div class="footer-right">
+        <span>Vahdam Amazon P&amp;L Dashboard</span>
+        <span class="footer-sep">·</span>
+        <span>v2.4</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# Mark the first successful render so subsequent reruns skip the
+# logo-pulse / first-load marker.
+st.session_state._first_load_done = True
