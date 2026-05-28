@@ -3,7 +3,7 @@ import snowflake.connector
 import pandas as pd
 import calendar
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 try:
     import plotly.express as px
@@ -718,6 +718,20 @@ with st.sidebar:
     # ── Quick Date Presets ──
     st.markdown("#### Quick Presets")
     today  = date.today()
+    # Default end-of-range slips behind real "today" based on the IST
+    # data-load cutoff: warehouse refresh lands ~3pm IST, so before 3pm
+    # the freshest complete day is the day-before-yesterday; after 3pm
+    # it's yesterday. This keeps the default view free of partial
+    # half-loaded data without forcing the user to fiddle with Custom
+    # Range every morning.
+    _IST          = timezone(timedelta(hours=5, minutes=30))
+    _now_ist      = datetime.now(_IST)
+    _ist_3pm_cut  = 15  # 15:00 IST cutoff
+    if _now_ist.hour >= _ist_3pm_cut:
+        effective_today = _now_ist.date() - timedelta(days=1)   # yesterday
+    else:
+        effective_today = _now_ist.date() - timedelta(days=2)   # day before yesterday
+
     PRESET_OPTS = ["MTD", "QTD", "YTD",
                    "Last 30 Days", "Last 60 Days", "Last 90 Days",
                    "Custom Range"]
@@ -725,21 +739,26 @@ with st.sidebar:
 
     _preset_days = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90}
     if preset == "MTD":
-        d_from, d_to = today.replace(day=1), today
+        # MTD is anchored to the month containing the effective end date —
+        # so on 1 Jun before-3pm we'd show 1 May → 30 May (last full day
+        # of May), not "1 Jun → 30 May" which would be nonsensical.
+        d_to   = effective_today
+        d_from = d_to.replace(day=1)
     elif preset == "QTD":
-        # Quarter-to-date: first day of current quarter
-        q_start_month = ((today.month - 1) // 3) * 3 + 1
-        d_from = date(today.year, q_start_month, 1)
-        d_to   = today
+        # Quarter-to-date: first day of the quarter containing d_to
+        q_start_month = ((effective_today.month - 1) // 3) * 3 + 1
+        d_from = date(effective_today.year, q_start_month, 1)
+        d_to   = effective_today
     elif preset == "YTD":
-        d_from = date(today.year, 1, 1)
-        d_to   = today
+        d_from = date(effective_today.year, 1, 1)
+        d_to   = effective_today
     elif preset in _preset_days:
-        d_from, d_to = today - timedelta(days=_preset_days[preset] - 1), today
+        d_from = effective_today - timedelta(days=_preset_days[preset] - 1)
+        d_to   = effective_today
     else:
         d1, d2 = st.columns(2)
-        with d1: d_from = st.date_input("From", value=today.replace(day=1))
-        with d2: d_to   = st.date_input("To",   value=today)
+        with d1: d_from = st.date_input("From", value=effective_today.replace(day=1))
+        with d2: d_to   = st.date_input("To",   value=effective_today)
 
     if preset != "Custom Range":
         st.caption(f"📅 {d_from.strftime('%d %b')} – {d_to.strftime('%d %b %Y')}  "
