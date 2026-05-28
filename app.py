@@ -7541,24 +7541,87 @@ def _dbr_fmt_pct(v):
     return f"{n:.2f}%"
 
 
-def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
+# ── Per-day Y-2 / Y-1 / Yesterday columns appended to every DBR table ──
+# Each day contributes 5 columns: Revenue / CM1% / ACoS% / CM2% / CM2 Abs.
+# Headers are built dynamically with the actual date prefix (e.g.
+# "24/05 Rev"). Cell-fill rules per row Type:
+#   Actual         → that day's actuals
+#   Budget         → pro-rated daily budget = (range budget) / range_days
+#                    (same value for Y-2 / Y-1 / Yesterday since the
+#                    range budget is a single number split evenly)
+#   FMB            → "—"  (daily FMB isn't a useful concept)
+#   % Achievement  → "—"  (per-day achievement is too noisy here)
+_DBR_DAY_METRICS = ("Rev", "CM1%", "ACoS%", "CM2%", "CM2 Abs")
+
+
+def _dbr_day_col_labels(day_date):
+    """5 column labels for a single day, prefixed with the date.
+    Format `dd/mm` matches the compact look of the user's mock-up
+    ("5/27/2026" → we use "27/05" since the year is implicit)."""
+    prefix = day_date.strftime("%d/%m")
+    return [f"{prefix} {m}" for m in _DBR_DAY_METRICS]
+
+
+def _dbr_day_values_actual(day_totals):
+    """5 formatted cells for a day's Actual row, given a Series of
+    summed-metric values for the same slice as the surrounding block."""
+    netrev = _f(day_totals.get("NETREV_ACT")) or 0
+    cm1    = _f(day_totals.get("CM1_ACT"))    or 0
+    spnd   = _f(day_totals.get("SPND_ACT"))   or 0
+    gads   = _f(day_totals.get("GADS_ACT"))   or 0
+    cm2    = _f(day_totals.get("CM2_ACT"))    or 0
+    spend_total = spnd + gads
+    cm1_pct  = (cm1 / netrev * 100)         if netrev else None
+    acos_pct = (spend_total / netrev * 100) if netrev else None
+    cm2_pct  = (cm2 / netrev * 100)         if netrev else None
+    return [
+        _dbr_fmt_int(netrev),
+        _dbr_fmt_pct(cm1_pct)  if cm1_pct  is not None else "—",
+        _dbr_fmt_pct(acos_pct) if acos_pct is not None else "—",
+        _dbr_fmt_pct(cm2_pct)  if cm2_pct  is not None else "—",
+        _dbr_fmt_int(cm2),
+    ]
+
+
+def _dbr_day_values_budget(range_totals, range_days):
+    """5 formatted cells for a day's Budget row using the pro-rated
+    daily slice of the range's Budget totals. Pct cells stay invariant
+    under uniform division so they equal the range %s."""
+    if range_totals is None or range_days is None or range_days <= 0:
+        return ["—"] * 5
+    rev_b  = (_f(range_totals.get("NETREV_BUD")) or 0) / range_days
+    cm1_b  = (_f(range_totals.get("CM1_BUD"))    or 0) / range_days
+    spnd_b = (_f(range_totals.get("SPND_BUD"))   or 0) / range_days
+    cm2_b  = (_f(range_totals.get("CM2_BUD"))    or 0) / range_days
+    cm1_pct  = (cm1_b  / rev_b * 100) if rev_b else None
+    acos_pct = (spnd_b / rev_b * 100) if rev_b else None
+    cm2_pct  = (cm2_b  / rev_b * 100) if rev_b else None
+    return [
+        _dbr_fmt_int(rev_b),
+        _dbr_fmt_pct(cm1_pct)  if cm1_pct  is not None else "—",
+        _dbr_fmt_pct(acos_pct) if acos_pct is not None else "—",
+        _dbr_fmt_pct(cm2_pct)  if cm2_pct  is not None else "—",
+        _dbr_fmt_int(cm2_b),
+    ]
+
+
+def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None,
+                     day_data=None, range_days=None):
     """Return Budget / Actual / % Achievement dict rows for one bucket
     given a Series-like with the SUM totals.
 
     When `fmb_totals` is provided, an additional **FMB** (Full Month Budget)
-    row is prepended at the top of the block. The FMB row shows the
-    full-current-month budget figures unscaled by the page's date range,
-    so users can see how much of the month's total budget remains.
+    row is prepended at the top of the block.
 
     When `actual_only=True` (or when the block has no budget at all),
-    only the Actual row is emitted — used for the "Amazon Global
-    Business (New)" block where new launches don't yet have a budget.
+    only the Actual row is emitted.
 
-    `_DBR_COLS` may use the sentinel `__NO_BUDGET__` as `b_col` for
-    actuals-only metrics (GADS Spend) — that cell renders as "—" for
-    Budget / % Achievement rows. The actual column `_TOTAL_SPND_ACT`
-    (PM Spend + GADS) is synthesised inside this function so the ACoS%
-    row reflects the new (PM + GADS) / Sales definition."""
+    `day_data` (optional) appends the Y-2 / Y-1 / Yesterday columns.
+    Shape: list of `(day_date, day_slice_totals)` ordered Y-2 → Y-1 → Yest,
+    where each `day_slice_totals` is a Series of summed metrics for the
+    same slice (same brand bucket / category / GEO filter) but for the
+    single day. `range_days` is the number of days in the page's date
+    window — used to pro-rate the Budget row for the day columns."""
     # Augment slice_totals with derived columns. dict/Series both
     # support `get`/`__setitem__` — pandas Series via Series[key] = val.
     pm_act_v   = _f(slice_totals.get("SPND_ACT")) or 0
@@ -7603,6 +7666,29 @@ def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
             return "—"
         return _dbr_fmt_pct(av / bv * 100)
 
+    # Pre-compute day column labels once (same for every row in this block)
+    day_labels_list = []  # list-of-lists, one per day
+    if day_data:
+        for day_date, _day_tot in day_data:
+            day_labels_list.append(_dbr_day_col_labels(day_date))
+
+    def _day_cells_for_kind(kind):
+        """Return a flat list of 15 (or 5*n_days) formatted cells for
+        the given row Type, ready to be merged into the row dict."""
+        if not day_data:
+            return []
+        cells = []
+        for (day_date, day_tot), col_labels in zip(day_data, day_labels_list):
+            if kind == "Actual":
+                vals = _dbr_day_values_actual(day_tot)
+            elif kind == "Budget":
+                vals = _dbr_day_values_budget(slice_totals, range_days)
+            else:
+                # FMB / % Achievement — dash
+                vals = ["—"] * 5
+            cells.extend(zip(col_labels, vals))
+        return cells
+
     rows = []
     # FMB row prepended when fmb_totals is provided
     if fmb_totals is not None:
@@ -7620,6 +7706,8 @@ def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
                 )
             else:
                 fmb_row[col_label] = _dbr_fmt_int(fmb_bv)
+        for (col_label, val) in _day_cells_for_kind("FMB"):
+            fmb_row[col_label] = val
         rows.append(fmb_row)
 
     kinds = ("Actual",) if actual_only else ("Budget", "Actual", "% Achievement")
@@ -7627,6 +7715,8 @@ def _build_dbr_block(label, slice_totals, actual_only=False, fmb_totals=None):
         row = {"GEO Bucket": label, "Type": kind}
         for col_label, b_col, a_col, fmt in _DBR_COLS:
             row[col_label] = _val(b_col, a_col, fmt, kind)
+        for (col_label, val) in _day_cells_for_kind(kind):
+            row[col_label] = val
         rows.append(row)
     return rows
 
@@ -7661,32 +7751,53 @@ def _dbr_style_row(row):
     return styles
 
 
-def _render_dbr_mini_table(blocks, key_suffix=""):
+def _render_dbr_mini_table(blocks, key_suffix="", day_data_dates=None,
+                            range_days=None):
     """`blocks` is a list of:
         (label, totals)                                        — 2-tuple
         (label, totals, actual_only)                           — 3-tuple
         (label, totals, actual_only, fmb_totals)               — 4-tuple
+        (label, totals, actual_only, fmb_totals, day_data)     — 5-tuple
+            where day_data is a list of (day_date, day_slice_totals)
+            ordered oldest → newest (Y-2, Y-1, Yesterday).
     Renders one styled dataframe with Bucket / Type / metric columns.
-    When the 4th element is supplied, an FMB row is prepended above
-    the Budget row."""
+    When `day_data` is present on a block, 5 day-columns per date are
+    appended to the right edge of the table. `day_data_dates` is an
+    explicit Y-2/Y-1/Yest date triple used to populate the column-order
+    list (so empty blocks don't drop them). `range_days` is the number
+    of days in the page's date window — used for pro-rated Budget cells
+    in the day columns."""
     rows = []
+    have_day_cols = False
     for entry in blocks:
-        actual_only, fmb_totals = False, None
-        if len(entry) == 4:
+        actual_only, fmb_totals, day_data = False, None, None
+        if   len(entry) == 5:
+            label, totals, actual_only, fmb_totals, day_data = entry
+        elif len(entry) == 4:
             label, totals, actual_only, fmb_totals = entry
         elif len(entry) == 3:
             label, totals, actual_only = entry
         else:
             label, totals = entry
+        if day_data:
+            have_day_cols = True
         rows.extend(
             [{**r, "Bucket": r.pop("GEO Bucket")}
              for r in _build_dbr_block(label, totals,
                                         actual_only=actual_only,
-                                        fmb_totals=fmb_totals)]
+                                        fmb_totals=fmb_totals,
+                                        day_data=day_data,
+                                        range_days=range_days)]
         )
     if not rows:
         return
     col_order = ["Bucket", "Type"] + [c[0] for c in _DBR_COLS]
+    if have_day_cols and day_data_dates:
+        # Always append the 15 day columns in the same Y-2 → Yest order
+        # so the table layout stays consistent even when one block is
+        # empty for a particular day.
+        for day_date in day_data_dates:
+            col_order.extend(_dbr_day_col_labels(day_date))
     df_disp = pd.DataFrame(rows, columns=col_order)
     n_rows  = len(df_disp)
     # Pin Bucket + Type to the left so the row identity stays visible
@@ -7763,10 +7874,26 @@ def render_dbr():
     # ── Fetch once, slice in pandas. Pull the SELECTED-range data AND
     # the FULL-MONTH range so we can show FMB rows. The two share an
     # identical shape, so the same slicing helpers work on both. ──
+    # Plus 3 single-day fetches for the Y-2 / Y-1 / Yesterday columns
+    # that get appended to every mini-table.
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    _now_ist = datetime.now(_IST)
+    if _now_ist.hour >= 15:
+        eff_today = _now_ist.date() - timedelta(days=1)
+    else:
+        eff_today = _now_ist.date() - timedelta(days=2)
+    _y0_d = eff_today                                  # "Yesterday"
+    _y1_d = eff_today - timedelta(days=1)              # Y-1
+    _y2_d = eff_today - timedelta(days=2)              # Y-2
+    day_data_dates = [_y2_d, _y1_d, _y0_d]              # ordered Y-2 → Yest
+
     _ph = st.empty()
     _ph.markdown(skel_section(rows=6, kpi=True), unsafe_allow_html=True)
     data     = get_dbr_data(d_from, d_to, sfx)
     fmb_data = get_dbr_data(month_start, month_end, sfx)
+    data_y2  = get_dbr_data(_y2_d, _y2_d, sfx)
+    data_y1  = get_dbr_data(_y1_d, _y1_d, sfx)
+    data_y0  = get_dbr_data(_y0_d, _y0_d, sfx)
     _ph.empty()
     if data.empty:
         st.info("📭 No data for the selected date range.")
@@ -7774,8 +7901,8 @@ def render_dbr():
 
     numeric_cols = [c for c in data.columns
                     if c not in ("GEO", "CATEGORY", "BRAND_BUCKET", "BRAND_RAW")]
-    for df_ in (data, fmb_data):
-        if df_.empty:
+    for df_ in (data, fmb_data, data_y2, data_y1, data_y0):
+        if df_ is None or df_.empty:
             continue
         for c in numeric_cols:
             df_[c] = pd.to_numeric(df_[c], errors="coerce").fillna(0)
@@ -7795,6 +7922,7 @@ def render_dbr():
 
     show_core = bt in ("Both", "CORE (T&B)")
     show_new  = bt in ("Both", "NEW (Coffee + Supplements)")
+    range_days = (d_to - d_from).days + 1
 
     def _sum(df_, mask, cols=None) -> pd.Series:
         if df_ is None or df_.empty:
@@ -7802,6 +7930,27 @@ def render_dbr():
         sub = df_[mask] if mask is not None else df_
         return (sub[numeric_cols].sum() if not sub.empty
                 else pd.Series({c: 0 for c in numeric_cols}))
+
+    # Helper: slice the 3 single-day dataframes by a predicate (callable
+    # that receives a dataframe and returns a boolean mask). Returns
+    # list of (day_date, slice_totals) in Y-2 → Yest order so it plugs
+    # straight into _build_dbr_block's `day_data` parameter.
+    def _day_data_for(predicate=None):
+        out = []
+        for day_df, day_date in (
+            (data_y2, _y2_d),
+            (data_y1, _y1_d),
+            (data_y0, _y0_d),
+        ):
+            if day_df is None or day_df.empty:
+                tot = pd.Series({c: 0 for c in numeric_cols})
+            else:
+                mask = predicate(day_df) if predicate is not None else None
+                sub  = day_df[mask] if mask is not None else day_df
+                tot = (sub[numeric_cols].sum() if not sub.empty
+                       else pd.Series({c: 0 for c in numeric_cols}))
+            out.append((day_date, tot))
+        return out
 
     # FMB rows are category-AGNOSTIC: they always show the full-month
     # budget for the bucket's GEO × brand combination, summed across ALL
@@ -7831,11 +7980,13 @@ def render_dbr():
         f"across **all categories** (not scaled to the selected date "
         f"range, not filtered by CORE/NEW)."
     )
-    total_s     = _sum(data,     pd.Series([True] * len(data)))
-    total_fmb_s = _sum_fmb()
+    total_s        = _sum(data, pd.Series([True] * len(data)))
+    total_fmb_s    = _sum_fmb()
+    total_day_data = _day_data_for(None)
     _render_dbr_mini_table([
-        ("Amazon Global Business (Total)", total_s, False, total_fmb_s),
-    ])
+        ("Amazon Global Business (Total)", total_s, False,
+         total_fmb_s, total_day_data),
+    ], day_data_dates=day_data_dates, range_days=range_days)
 
     # ── Global Core (expandable) — FMB rows use all-cats per brand ──
     if show_core:
@@ -7846,14 +7997,21 @@ def render_dbr():
         fmb_overall = _sum_fmb()              # all brands, all cats
         fmb_vt      = _sum_fmb(brand="VT")    # VT, all cats
         fmb_hp      = _sum_fmb(brand="HP")    # HP, all cats
+        # Per-day slices matching each row's filter
+        core_day_data    = _day_data_for(
+            lambda df: df["CATEGORY"].apply(_is_core_cat))
+        core_vt_day_data = _day_data_for(
+            lambda df: df["CATEGORY"].apply(_is_core_cat) & (df["BRAND_BUCKET"] == "VT"))
+        core_hp_day_data = _day_data_for(
+            lambda df: df["CATEGORY"].apply(_is_core_cat) & (df["BRAND_BUCKET"] == "HP"))
         with st.expander(
             _dbr_expander_title("Amazon Global Business (Core)", core_s),
             expanded=False):
             _render_dbr_mini_table([
-                ("Overall (Core)", core_s,    False, fmb_overall),
-                ("VT (Core)",      core_vt_s, False, fmb_vt),
-                ("HP (Core)",      core_hp_s, False, fmb_hp),
-            ])
+                ("Overall (Core)", core_s,    False, fmb_overall, core_day_data),
+                ("VT (Core)",      core_vt_s, False, fmb_vt,      core_vt_day_data),
+                ("HP (Core)",      core_hp_s, False, fmb_hp,      core_hp_day_data),
+            ], day_data_dates=day_data_dates, range_days=range_days)
 
     # ── Global New (expandable, actual-only) — no FMB row ──
     # FMB is category-agnostic (full-month budget across ALL cats), so
@@ -7865,15 +8023,21 @@ def render_dbr():
         new_s    = _sum(data, new_mask)
         new_vt_s = _sum(data, new_mask & (data["BRAND_BUCKET"] == "VT"))
         new_hp_s = _sum(data, new_mask & (data["BRAND_BUCKET"] == "HP"))
+        new_day_data    = _day_data_for(
+            lambda df: df["CATEGORY"].apply(_is_new_cat))
+        new_vt_day_data = _day_data_for(
+            lambda df: df["CATEGORY"].apply(_is_new_cat) & (df["BRAND_BUCKET"] == "VT"))
+        new_hp_day_data = _day_data_for(
+            lambda df: df["CATEGORY"].apply(_is_new_cat) & (df["BRAND_BUCKET"] == "HP"))
         with st.expander(
             _dbr_expander_title("Amazon Global Business (New)",
                                  new_s, actual_only=True),
             expanded=False):
             _render_dbr_mini_table([
-                ("Overall (New)", new_s,    True),
-                ("VT (New)",      new_vt_s, True),
-                ("HP (New)",      new_hp_s, True),
-            ])
+                ("Overall (New)", new_s,    True, None, new_day_data),
+                ("VT (New)",      new_vt_s, True, None, new_vt_day_data),
+                ("HP (New)",      new_hp_s, True, None, new_hp_day_data),
+            ], day_data_dates=day_data_dates, range_days=range_days)
 
     # ── Per-country drill-down ──
     if show_core and show_new:
@@ -7907,7 +8071,11 @@ def render_dbr():
         with st.expander(
             _dbr_expander_title(f"{geo} Overall", overall_s),
             expanded=False):
-            blocks = [(f"{geo} Overall", overall_s, False, geo_fmb_overall)]
+            # Per-day Overall = just the GEO filter
+            overall_day_data = _day_data_for(
+                lambda df, _g=geo: df["GEO"] == _g)
+            blocks = [(f"{geo} Overall", overall_s, False, geo_fmb_overall,
+                       overall_day_data)]
 
             # Core breakdown — Budget/Actual scoped to Core; FMB ignores cat.
             if show_core:
@@ -7922,10 +8090,16 @@ def render_dbr():
                         geo_core[geo_core["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
                         if (geo_core["BRAND_BUCKET"] == "HP").any()
                         else pd.Series({c: 0 for c in numeric_cols}))
+                    geo_core_dd    = _day_data_for(
+                        lambda df, _g=geo: (df["GEO"] == _g) & df["CATEGORY"].apply(_is_core_cat))
+                    geo_core_vt_dd = _day_data_for(
+                        lambda df, _g=geo: (df["GEO"] == _g) & df["CATEGORY"].apply(_is_core_cat) & (df["BRAND_BUCKET"] == "VT"))
+                    geo_core_hp_dd = _day_data_for(
+                        lambda df, _g=geo: (df["GEO"] == _g) & df["CATEGORY"].apply(_is_core_cat) & (df["BRAND_BUCKET"] == "HP"))
                     blocks.extend([
-                        (f"{geo} Overall (Core)", geo_core_s,    False, geo_fmb_overall),
-                        (f"{geo} VT (Core)",      geo_core_vt_s, False, geo_fmb_vt),
-                        (f"{geo} HP (Core)",      geo_core_hp_s, False, geo_fmb_hp),
+                        (f"{geo} Overall (Core)", geo_core_s,    False, geo_fmb_overall, geo_core_dd),
+                        (f"{geo} VT (Core)",      geo_core_vt_s, False, geo_fmb_vt,      geo_core_vt_dd),
+                        (f"{geo} HP (Core)",      geo_core_hp_s, False, geo_fmb_hp,      geo_core_hp_dd),
                     ])
 
             # New breakdown — actual-only, no FMB (FMB is category-
@@ -7942,23 +8116,37 @@ def render_dbr():
                         geo_new[geo_new["BRAND_BUCKET"] == "HP"][numeric_cols].sum()
                         if (geo_new["BRAND_BUCKET"] == "HP").any()
                         else pd.Series({c: 0 for c in numeric_cols}))
+                    geo_new_dd    = _day_data_for(
+                        lambda df, _g=geo: (df["GEO"] == _g) & df["CATEGORY"].apply(_is_new_cat))
+                    geo_new_vt_dd = _day_data_for(
+                        lambda df, _g=geo: (df["GEO"] == _g) & df["CATEGORY"].apply(_is_new_cat) & (df["BRAND_BUCKET"] == "VT"))
+                    geo_new_hp_dd = _day_data_for(
+                        lambda df, _g=geo: (df["GEO"] == _g) & df["CATEGORY"].apply(_is_new_cat) & (df["BRAND_BUCKET"] == "HP"))
                     blocks.extend([
-                        (f"{geo} Overall (New)", geo_new_s,    True),
-                        (f"{geo} VT (New)",      geo_new_vt_s, True),
-                        (f"{geo} HP (New)",      geo_new_hp_s, True),
+                        (f"{geo} Overall (New)", geo_new_s,    True, None, geo_new_dd),
+                        (f"{geo} VT (New)",      geo_new_vt_s, True, None, geo_new_vt_dd),
+                        (f"{geo} HP (New)",      geo_new_hp_s, True, None, geo_new_hp_dd),
                     ])
 
-            _render_dbr_mini_table(blocks, key_suffix=geo)
+            _render_dbr_mini_table(blocks, key_suffix=geo,
+                                    day_data_dates=day_data_dates,
+                                    range_days=range_days)
 
     # ── Compact legend ──
     st.caption(
-        "Rows: **FMB** (blue — full-month budget, not pro-rated), "
-        "**Budget** (peach — budget for selected date range), "
-        "**Actual** (green), **% Achievement** (pink, Actual ÷ Budget). "
+        "**Rows:** FMB (blue — full-month budget, not pro-rated), "
+        "Budget (peach — budget for selected date range), "
+        "Actual (green), % Achievement (pink, Actual ÷ Budget). "
         "Each country expander shows that GEO's own Overall first, then "
         "Core (VT/HP) and New (VT/HP) breakdowns when data is available. "
         "CM1% / ACoS% / CM2% are expressed as a percent of Net Revenue; "
-        "the % Achievement column repeats the absolute ratio."
+        "the % Achievement column repeats the absolute ratio.  \n"
+        f"**Right-edge day columns:** Y-2 = {_y2_d.strftime('%d %b')}, "
+        f"Y-1 = {_y1_d.strftime('%d %b')}, "
+        f"Yest = {_y0_d.strftime('%d %b')} (anchored to the 3pm IST "
+        "data cut-off). Actual row shows that day's actuals; Budget "
+        f"row shows pro-rated daily budget (range budget ÷ {range_days} "
+        "days); FMB and % Achievement cells are dashed in this strip."
     )
 
     # ── Debug: brand-bucket assignment + FMB Net Revenue per brand ──
