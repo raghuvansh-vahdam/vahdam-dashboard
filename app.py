@@ -7230,8 +7230,10 @@ def _nb_periods(effective_today_):
     # Current month MTD
     mtd_start = today_.replace(day=1)
     periods.append((f"{mtd_start.strftime('%b')} MTD", mtd_start, today_, "month"))
-    # 4 rolling 7-day weeks
-    for w in range(1, 5):
+    # 4 rolling 7-day weeks — displayed left-to-right oldest → newest
+    # (Wk-4 first, Wk-1 last) so the visual flow continues the
+    # chronological direction of the monthly columns above.
+    for w in range(4, 0, -1):
         w_end   = today_ - timedelta(days=(w - 1) * 7)
         w_start = w_end - timedelta(days=6)
         periods.append((f"Wk-{w}", w_start, w_end, "week"))
@@ -7249,7 +7251,8 @@ def _nb_asin_in_list(asin_list):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_nb_geos_with_data():
     """Return GEOs that have ANY ASIN in CATEGORY ∈ (Coffee, Supplements).
-    USA always included (hardcoded list)."""
+    USA always promoted first; "All" prepended so the user can roll all
+    GEOs into a single view."""
     df = run_query(f"""
         SELECT DISTINCT GEO
         FROM {TABLE}
@@ -7260,28 +7263,61 @@ def get_nb_geos_with_data():
     geos = sorted(df["GEO"].dropna().unique().tolist()) if not df.empty else []
     if "USA" not in geos:
         geos = ["USA"] + geos
-    # Promote USA to front, keep rest alpha
-    ordered = ["USA"] + [g for g in geos if g != "USA"]
+    ordered = ["All", "USA"] + [g for g in geos if g != "USA"]
     return ordered
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_nb_asin_universe(geo):
-    """Return the ASIN universe for a GEO's New Business:
-       USA → hardcoded list (kept order from spec).
-       Other GEOs → auto-detect via CATEGORY ∈ (Coffee, Supplements)."""
+    """Return DataFrame[ASIN, PRODUCT_NAME, GEO] for the New Business set.
+       USA → hardcoded list (kept order from spec, GEO column filled in).
+       Other GEOs → auto-detect via CATEGORY ∈ (Coffee, Supplements).
+       "All" → concatenate USA + every auto-detected GEO's universe."""
+    if geo == "All":
+        # Recurse and stack each individual GEO's universe.
+        parts = []
+        for g in get_nb_geos_with_data():
+            if g == "All":
+                continue
+            sub = get_nb_asin_universe(g)
+            if not sub.empty:
+                parts.append(sub)
+        if not parts:
+            return pd.DataFrame(columns=["ASIN", "PRODUCT_NAME", "GEO"])
+        out = pd.concat(parts, ignore_index=True)
+        # Sort: USA rows first (matches hardcoded order), then alpha by GEO.
+        out["_geo_order"] = out["GEO"].apply(lambda g: 0 if g == "USA" else 1)
+        return (out.sort_values(["_geo_order", "GEO", "PRODUCT_NAME"])
+                   .drop(columns="_geo_order")
+                   .reset_index(drop=True))
     if geo == "USA":
-        return [a for a, _ in _NEW_BUSINESS_USA_ASINS]
+        return pd.DataFrame(
+            [(a, n, "USA") for a, n in _NEW_BUSINESS_USA_ASINS],
+            columns=["ASIN", "PRODUCT_NAME", "GEO"],
+        )
     df = run_query(f"""
-        SELECT DISTINCT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY
+        SELECT SPLIT_PART(ASIN,' ',1) AS ASIN,
+               MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN)) AS PRODUCT_NAME
         FROM {TABLE}
         WHERE GEO = '{geo}'
           AND UPPER(TRIM(CATEGORY)) IN ('COFFEE','SUPPLEMENTS')
           AND ASIN IS NOT NULL AND TRIM(ASIN) <> ''
+        GROUP BY SPLIT_PART(ASIN,' ',1)
+        ORDER BY PRODUCT_NAME
     """)
     if df.empty:
-        return []
-    return sorted(df["ASIN_KEY"].dropna().unique().tolist())
+        return pd.DataFrame(columns=["ASIN", "PRODUCT_NAME", "GEO"])
+    df["GEO"] = geo
+    return df[["ASIN", "PRODUCT_NAME", "GEO"]].reset_index(drop=True)
+
+
+def _nb_geo_sql_filter(geo):
+    """Return the SQL fragment to filter by GEO. Returns '' (no filter)
+    when geo == 'All' so callers concatenate the rest of their WHERE
+    clauses cleanly."""
+    if not geo or geo == "All":
+        return ""
+    return f"AND GEO = '{geo}'"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -7289,10 +7325,18 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
     """Per-ASIN summary for the selected GEO + date range. Joins P&L,
     Marketing, and Sessions sources after aggregating each separately to
     avoid the join-fanout double-counting that bit get_asin_data
-    earlier (see issue #21)."""
+    earlier (see issue #21).
+
+    When geo == 'All', the GEO filter is omitted so the totals are
+    cross-marketplace (subject to the dashboard currency caveat in the
+    page caption)."""
     if not asin_csv:
         return pd.DataFrame()
-    gads = _gads_actual_sum_sql(sfx)
+    gads      = _gads_actual_sum_sql(sfx)
+    geo_pnl   = _nb_geo_sql_filter(geo)              # "AND GEO = 'X'" or ""
+    # Sessions table uses UPPER(GEO); marketing uses GEO as-is.
+    geo_mkt   = _nb_geo_sql_filter(geo)
+    geo_sess  = (f"AND UPPER(GEO) = UPPER('{geo}')" if geo and geo != "All" else "")
     return run_query(f"""
         WITH pnl AS (
             SELECT SPLIT_PART(ASIN,' ',1)                    AS ASIN_KEY,
@@ -7306,7 +7350,7 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                    SUM(CM2_ACTUAL_{sfx})                     AS CM2_ABS
             FROM {TABLE}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
-              AND GEO = '{geo}' AND {GEO_EXCL}
+              {geo_pnl} AND {GEO_EXCL}
               AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
@@ -7319,7 +7363,7 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                    SUM(CONVERSIONS)       AS PAID_UNITS
             FROM {MKTG}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
-              AND GEO = '{geo}'
+              {geo_mkt}
               AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
@@ -7328,7 +7372,7 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                    SUM(SESSIONS)          AS SESSIONS
             FROM {SALES_MKT}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
-              AND UPPER(GEO) = UPPER('{geo}')
+              {geo_sess}
               AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
             GROUP BY SPLIT_PART(ASIN,' ',1)
         )
@@ -7383,6 +7427,9 @@ def get_nb_asin_periods(asin, geo, periods_tuple, sfx):
     all_to   = max(p[2] for p in periods_tuple)
     gads     = _gads_actual_sum_sql(sfx)
 
+    geo_pnl  = _nb_geo_sql_filter(geo)
+    geo_mkt  = _nb_geo_sql_filter(geo)
+    geo_sess = (f"AND UPPER(GEO) = UPPER('{geo}')" if geo and geo != "All" else "")
     blocks = []
     for i, (lbl, d_from, d_to, kind) in enumerate(periods_tuple):
         # Each block is a SELECT that aggregates this single period for
@@ -7406,7 +7453,7 @@ def get_nb_asin_periods(asin, geo, periods_tuple, sfx):
                    COALESCE(SUM(CM2_ACTUAL_{sfx}),0)    AS CM2_ABS
             FROM {TABLE}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
-              AND GEO = '{geo}' AND {GEO_EXCL}
+              {geo_pnl} AND {GEO_EXCL}
               AND SPLIT_PART(ASIN,' ',1) = '{asin}'
         ) p
         CROSS JOIN (
@@ -7417,14 +7464,14 @@ def get_nb_asin_periods(asin, geo, periods_tuple, sfx):
                    COALESCE(SUM(CONVERSIONS),0)  AS PAID_UNITS
             FROM {MKTG}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
-              AND GEO = '{geo}'
+              {geo_mkt}
               AND SPLIT_PART(ASIN,' ',1) = '{asin}'
         ) m
         CROSS JOIN (
             SELECT COALESCE(SUM(SESSIONS),0)     AS SESSIONS
             FROM {SALES_MKT}
             WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
-              AND UPPER(GEO) = UPPER('{geo}')
+              {geo_sess}
               AND SPLIT_PART(ASIN,' ',1) = '{asin}'
         ) s
         """)
@@ -7457,98 +7504,191 @@ def render_new_business():
         f'&nbsp;&bull;&nbsp; Pace: {(d_to - d_from).days + 1} days'
         f'</div>', unsafe_allow_html=True)
 
-    # ── GEO selector ──
+    # ── GEO + Product filter row ──
     geos_avail = get_nb_geos_with_data()
     if not geos_avail:
         st.warning("No New Business GEOs found (CATEGORY in Coffee / Supplements).")
         return
-    # Defaults to USA; falls back to first available if USA somehow missing.
+    # Default → USA. "All" is also offered (first option) for cross-GEO view.
     geo_default = "USA" if "USA" in geos_avail else geos_avail[0]
-    geo = st.selectbox("GEO",
-                       geos_avail,
-                       index=geos_avail.index(geo_default),
-                       key="nb_geo",
-                       help="Switch country. USA uses your hardcoded ASIN list; "
-                            "other GEOs auto-detect ASINs with CATEGORY in "
-                            "Coffee / Supplements.")
+    fc1, fc2 = st.columns([1, 3], gap="medium")
+    with fc1:
+        geo = st.selectbox(
+            "GEO", geos_avail,
+            index=geos_avail.index(geo_default), key="nb_geo",
+            help="Switch country. **All** aggregates every GEO. USA uses your "
+                 "hardcoded 18-ASIN list; other GEOs auto-detect ASINs whose "
+                 "CATEGORY is Coffee or Supplements.")
 
-    asin_universe = get_nb_asin_universe(geo)
-    if not asin_universe:
+    # Fetch the ASIN universe for the GEO (DataFrame with ASIN / PRODUCT_NAME / GEO).
+    universe_df = get_nb_asin_universe(geo)
+    if universe_df.empty:
         st.info(f"📭 No New Business ASINs found for {geo} yet.")
         return
-    asin_csv = _nb_asin_in_list(asin_universe)
+    # Build the product picker options. When GEO=All we annotate each
+    # product with its GEO so the user can distinguish duplicates.
+    if geo == "All":
+        universe_df = universe_df.copy()
+        universe_df["DISPLAY"] = (universe_df["PRODUCT_NAME"].fillna("")
+                                  + " · "
+                                  + universe_df["GEO"].astype(str)
+                                  + "  ("
+                                  + universe_df["ASIN"].astype(str)
+                                  + ")")
+    else:
+        universe_df = universe_df.copy()
+        universe_df["DISPLAY"] = (universe_df["PRODUCT_NAME"].fillna("")
+                                  + "  ("
+                                  + universe_df["ASIN"].astype(str)
+                                  + ")")
+    product_opts = universe_df["DISPLAY"].tolist()
+
+    with fc2:
+        picked_products = st.multiselect(
+            f"Product Name ({len(product_opts)} available)",
+            product_opts, default=[],
+            placeholder="All products in scope",
+            key=f"nb_products_{geo}",
+            help="Optional. Pick one or more products to scope every "
+                 "metric and the per-ASIN breakdown below. Empty = all.")
+
+    # Filter universe → selected ASINs
+    if picked_products:
+        sel_df = universe_df[universe_df["DISPLAY"].isin(picked_products)]
+    else:
+        sel_df = universe_df
+    asin_list_filtered = sel_df["ASIN"].dropna().unique().tolist()
+    if not asin_list_filtered:
+        st.info("📭 No ASINs match the current selection.")
+        return
+    asin_csv = _nb_asin_in_list(asin_list_filtered)
 
     # ── Headline KPI cards: top row = sales/margin, bottom row = ads ──
+    # Both the selected period and the same-length prior period are
+    # fetched so each card can show a vs-prior-period delta line.
     with st.spinner("Loading New Business summary…"):
-        summary = get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx)
+        summary  = get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx)
+        summary_lp = get_nb_asin_summary(geo, asin_csv,
+                                          prev_d_from, prev_d_to, sfx)
     if summary.empty:
         st.info(f"📭 No data for {geo} New Business in the selected date range.")
         return
 
-    def _sum(c):
-        return _f(pd.to_numeric(summary[c], errors="coerce").sum()) if c in summary.columns else None
-    tot_revenue   = _sum("REVENUE")
-    tot_units     = _sum("UNITS")
-    tot_total_sp  = _sum("TOTAL_SPEND")  # PM + GADS from P&L (currency-correct)
-    tot_ad_spend  = _sum("AD_SPEND")     # MKTG-table spend (local ccy) — for PCOS
-    tot_paid_rev  = _sum("PAID_REV")     # MKTG AD_SALES (local ccy)
-    tot_sessions  = _sum("SESSIONS")
-    tot_imps      = _sum("IMPRESSIONS")
-    tot_clicks    = _sum("CLICKS")
-    tot_cm2_abs   = _sum("CM2_ABS")
+    def _sum_of(df, c):
+        if df is None or df.empty or c not in df.columns:
+            return None
+        return _f(pd.to_numeric(df[c], errors="coerce").sum())
+
+    def _sum(c):  return _sum_of(summary,    c)
+    def _sumL(c): return _sum_of(summary_lp, c)
+    tot_revenue,    lp_revenue    = _sum("REVENUE"),     _sumL("REVENUE")
+    tot_units,      lp_units      = _sum("UNITS"),       _sumL("UNITS")
+    tot_total_sp,   lp_total_sp   = _sum("TOTAL_SPEND"), _sumL("TOTAL_SPEND")
+    tot_ad_spend,   lp_ad_spend   = _sum("AD_SPEND"),    _sumL("AD_SPEND")
+    tot_paid_rev,   lp_paid_rev   = _sum("PAID_REV"),    _sumL("PAID_REV")
+    tot_sessions,   lp_sessions   = _sum("SESSIONS"),    _sumL("SESSIONS")
+    tot_imps,       lp_imps       = _sum("IMPRESSIONS"), _sumL("IMPRESSIONS")
+    tot_clicks,     lp_clicks     = _sum("CLICKS"),      _sumL("CLICKS")
+    tot_cm2_abs,    lp_cm2_abs    = _sum("CM2_ABS"),     _sumL("CM2_ABS")
 
     def _pct(a, b):
-        if a is None or b is None or not b:
-            return None
+        if a is None or b is None or not b: return None
         return a / b * 100
+    def _pct_change(cur, prev):
+        c, p = _f(cur), _f(prev)
+        if c is None or p is None or p == 0:
+            return None
+        return (c - p) / abs(p) * 100
 
     acos_pct      = _pct(tot_total_sp, tot_revenue)
     cm2_pct       = _pct(tot_cm2_abs, tot_revenue)
     cr_pct        = _pct(tot_units, tot_sessions)
     ctr_pct       = _pct(tot_clicks, tot_imps)
-    # CPC / CPM use total_spend (PM + GADS in sfx currency); clicks /
-    # impressions are unitless counts so the result is X-per-click /
-    # X-per-1000-impressions in the dashboard's currency.
     cpc           = (tot_total_sp / tot_clicks) if (tot_total_sp and tot_clicks) else None
     cpm           = (tot_total_sp / tot_imps * 1000) if (tot_total_sp and tot_imps) else None
-    # PCOS% lives entirely in MKTG's local currency so the ratio is
-    # currency-safe even when the dashboard sfx is INR.
     pcos_pct      = _pct(tot_ad_spend, tot_paid_rev)
     paid_share    = _pct(tot_paid_rev, tot_revenue)
+    # Prior-period derived values (for delta lines on ratio cards)
+    lp_acos_pct   = _pct(lp_total_sp, lp_revenue)
+    lp_cm2_pct    = _pct(lp_cm2_abs, lp_revenue)
+    lp_cr_pct     = _pct(lp_units, lp_sessions)
+    lp_ctr_pct    = _pct(lp_clicks, lp_imps)
+    lp_cpc        = (lp_total_sp / lp_clicks) if (lp_total_sp and lp_clicks) else None
+    lp_cpm        = (lp_total_sp / lp_imps * 1000) if (lp_total_sp and lp_imps) else None
+    lp_pcos_pct   = _pct(lp_ad_spend, lp_paid_rev)
+    lp_paid_share = _pct(lp_paid_rev, lp_revenue)
 
+    period_lbl = f"vs prior {(d_to - d_from).days + 1}d"
     st.markdown('<div class="section-hdr">Segment KPIs</div>', unsafe_allow_html=True)
     row1 = st.columns(5, gap="small")
     row1[0].markdown(strip_card("Revenue",  fmt_lakhs(tot_revenue),
-                                f"{len(summary)} ASINs"),
+                                f"{len(summary)} ASINs",
+                                delta=_pct_change(tot_revenue, lp_revenue),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_lakhs(lp_revenue) if lp_revenue is not None else None),
                      unsafe_allow_html=True)
-    row1[1].markdown(strip_card("Units",    fmt_units(tot_units)),
+    row1[1].markdown(strip_card("Units",    fmt_units(tot_units),
+                                delta=_pct_change(tot_units, lp_units),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_units(lp_units) if lp_units is not None else None),
                      unsafe_allow_html=True)
     row1[2].markdown(strip_card("Sessions", fmt_units(tot_sessions),
-                                f"CR: {fmt_pct(cr_pct)}"),
+                                f"CR: {fmt_pct(cr_pct)}",
+                                delta=_pct_change(tot_sessions, lp_sessions),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_units(lp_sessions) if lp_sessions is not None else None),
                      unsafe_allow_html=True)
     row1[3].markdown(strip_card("CM2 Abs",  fmt_lakhs(tot_cm2_abs),
-                                f"CM2%: {fmt_pct(cm2_pct)}"),
+                                f"CM2%: {fmt_pct(cm2_pct)}",
+                                delta=_pct_change(tot_cm2_abs, lp_cm2_abs),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_lakhs(lp_cm2_abs) if lp_cm2_abs is not None else None),
                      unsafe_allow_html=True)
     row1[4].markdown(strip_card("Total Spend (PM+GADS)", fmt_lakhs(tot_total_sp),
-                                f"ACoS: {fmt_pct(acos_pct)}"),
+                                f"ACoS: {fmt_pct(acos_pct)}",
+                                delta=_pct_change(tot_total_sp, lp_total_sp),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_lakhs(lp_total_sp) if lp_total_sp is not None else None),
                      unsafe_allow_html=True)
 
     row2 = st.columns(5, gap="small")
-    row2[0].markdown(strip_card("Impressions", fmt_units(tot_imps)),
+    row2[0].markdown(strip_card("Impressions", fmt_units(tot_imps),
+                                delta=_pct_change(tot_imps, lp_imps),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_units(lp_imps) if lp_imps is not None else None),
                      unsafe_allow_html=True)
     row2[1].markdown(strip_card("Clicks",      fmt_units(tot_clicks),
-                                f"CTR: {fmt_pct(ctr_pct)}"),
+                                f"CTR: {fmt_pct(ctr_pct)}",
+                                delta=_pct_change(tot_clicks, lp_clicks),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_units(lp_clicks) if lp_clicks is not None else None),
                      unsafe_allow_html=True)
     row2[2].markdown(strip_card("CPC",
-                                (f"₹{cpc:,.2f}" if cpc is not None else "—")),
+                                (f"₹{cpc:,.2f}" if cpc is not None else "—"),
+                                delta=_pct_change(cpc, lp_cpc),
+                                delta_suffix=period_lbl,
+                                lm_value=(f"₹{lp_cpc:,.2f}"
+                                          if lp_cpc is not None else None)),
                      unsafe_allow_html=True)
     row2[3].markdown(strip_card("CPM",
-                                (f"₹{cpm:,.2f}" if cpm is not None else "—")),
+                                (f"₹{cpm:,.2f}" if cpm is not None else "—"),
+                                delta=_pct_change(cpm, lp_cpm),
+                                delta_suffix=period_lbl,
+                                lm_value=(f"₹{lp_cpm:,.2f}"
+                                          if lp_cpm is not None else None)),
                      unsafe_allow_html=True)
     row2[4].markdown(strip_card("Paid Revenue", fmt_lakhs(tot_paid_rev),
                                 (f"PCOS: {fmt_pct(pcos_pct)}  ·  "
-                                 f"Paid Share: {fmt_pct(paid_share)}")),
+                                 f"Paid Share: {fmt_pct(paid_share)}"),
+                                delta=_pct_change(tot_paid_rev, lp_paid_rev),
+                                delta_suffix=period_lbl,
+                                lm_value=fmt_lakhs(lp_paid_rev) if lp_paid_rev is not None else None),
                      unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="font-size:11px;color:#7a6a50;margin-top:-4px;">'
+        f'Prior period for delta comparisons: '
+        f'{prev_d_from.strftime("%d %b")} – {prev_d_to.strftime("%d %b %Y")}'
+        f'</div>', unsafe_allow_html=True)
     st.markdown("")
 
     # ── ASIN summary table (sortable; click any row for detail) ──
