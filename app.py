@@ -817,6 +817,11 @@ with st.sidebar:
     if st.button("DBR", use_container_width=True, key="nav_dbr"):
         st.session_state.view = "dbr"
         st.rerun()
+    if st.button("New Business", use_container_width=True, key="nav_new_business",
+                 help="Coffee + Supplements ASINs — KPI cards, per-product "
+                      "performance summary, and a 9-period funnel breakdown."):
+        st.session_state.view = "new_business"
+        st.rerun()
     if st.button("Price Tracker", use_container_width=True, key="nav_price"):
         st.session_state.view = "price"
         st.rerun()
@@ -7175,6 +7180,604 @@ def render_dbr():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# VIEW 5c — New Business (Coffee + Supplements)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Hard-coded list of New Business ASINs for USA (Supplements + 1 Coffee SKU).
+# For other GEOs we auto-detect from CATEGORY ∈ (Coffee, Supplements). The
+# tuple is (ASIN, product_name_hint) — the hint shows up if the source
+# table doesn't have a COMMON_SKU_DESCRIPTION for that ASIN yet.
+_NEW_BUSINESS_USA_ASINS = [
+    ("B0C7N1759F", "Vahdam Ashwagandha coffee"),
+    ("B0FLDWDHG8", "Vahdam Ashwagandha 1800 mg with KSM-66"),
+    ("B0FLDWW2HL", "Vahdam Turmeric Curcumin 2000 mg with Boswellia & Piperine"),
+    ("B0FLQJ354G", "Vahdam Psyllium Husk"),
+    ("B0FLQJLCQP", "Vahdam Berberine"),
+    ("B0FLQHD86G", "Vahdam Shatavari"),
+    ("B0FLDXPTW1", "Vahdam Turmeric Ginger 1500 mg with Curcuminoids"),
+    ("B0FLQLMV1H", "Vahdam Triphala"),
+    ("B0FLQK45YC", "Vahdam Bacopa"),
+    ("B0FQV2Q4TF", "Vahdam Turmeric Curcumin 2000 mg with Boswellia & Piperine (Pack of 2)"),
+    ("B0DHCK1X3X", "Handpick Shilajit Gummies"),
+    ("B0FLDRSHZY", "Vahdam KSM-66 Ashwagandha 625 mg with Ginger & Piperine"),
+    ("B0FQV283VQ", "Vahdam Turmeric Curcumin 2000 mg with Boswellia & Piperine (Pack of 3)"),
+    ("B0FLQGFHJ2", "Vahdam Moringa"),
+    ("B0DHCJVVCC", "Handpick Shilajit Resin Big"),
+    ("B0FQV8Y8KQ", "Vahdam Turmeric Ginger 1500 mg with Curcuminoids (Pack of 2)"),
+    ("B0DHCJ1HHR", "Shilajit Resin Small"),
+    ("B0FQV3D65P", "Vahdam KSM-66 Ashwagandha 625 mg with Ginger & Piperine (Pack of 2)"),
+]
+
+
+def _nb_periods(effective_today_):
+    """Build the 9 time-period columns for the per-ASIN funnel breakdown:
+       4 prior full months + current MTD + 4 rolling 7-day weeks (Wk-1
+       newest → Wk-4 oldest).
+
+    Each tuple is `(label, d_from, d_to, kind)` where `kind` ∈ {month, week}
+    so the render code can group the headers visually if it wants to."""
+    today_ = effective_today_
+    periods = []
+    # 4 prior full months
+    for back in range(4, 0, -1):
+        m  = today_.month - back
+        y  = today_.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        m_start = date(y, m, 1)
+        m_end   = (date(y, m + 1, 1) if m < 12 else date(y + 1, 1, 1)) - timedelta(days=1)
+        periods.append((m_start.strftime("%b %Y"), m_start, m_end, "month"))
+    # Current month MTD
+    mtd_start = today_.replace(day=1)
+    periods.append((f"{mtd_start.strftime('%b')} MTD", mtd_start, today_, "month"))
+    # 4 rolling 7-day weeks
+    for w in range(1, 5):
+        w_end   = today_ - timedelta(days=(w - 1) * 7)
+        w_start = w_end - timedelta(days=6)
+        periods.append((f"Wk-{w}", w_start, w_end, "week"))
+    return periods
+
+
+def _nb_asin_in_list(asin_list):
+    """Build a safe SQL IN-list fragment for a list of ASIN strings.
+    ASINs are uppercase alphanumeric — we still quote them to be safe."""
+    if not asin_list:
+        return "''"   # empty IN-clause guard; matches nothing
+    return ", ".join(f"'{a}'" for a in asin_list)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_nb_geos_with_data():
+    """Return GEOs that have ANY ASIN in CATEGORY ∈ (Coffee, Supplements).
+    USA always included (hardcoded list)."""
+    df = run_query(f"""
+        SELECT DISTINCT GEO
+        FROM {TABLE}
+        WHERE UPPER(TRIM(CATEGORY)) IN ('COFFEE','SUPPLEMENTS')
+          AND GEO IS NOT NULL AND TRIM(GEO) <> ''
+          AND {GEO_EXCL}
+    """)
+    geos = sorted(df["GEO"].dropna().unique().tolist()) if not df.empty else []
+    if "USA" not in geos:
+        geos = ["USA"] + geos
+    # Promote USA to front, keep rest alpha
+    ordered = ["USA"] + [g for g in geos if g != "USA"]
+    return ordered
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_nb_asin_universe(geo):
+    """Return the ASIN universe for a GEO's New Business:
+       USA → hardcoded list (kept order from spec).
+       Other GEOs → auto-detect via CATEGORY ∈ (Coffee, Supplements)."""
+    if geo == "USA":
+        return [a for a, _ in _NEW_BUSINESS_USA_ASINS]
+    df = run_query(f"""
+        SELECT DISTINCT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY
+        FROM {TABLE}
+        WHERE GEO = '{geo}'
+          AND UPPER(TRIM(CATEGORY)) IN ('COFFEE','SUPPLEMENTS')
+          AND ASIN IS NOT NULL AND TRIM(ASIN) <> ''
+    """)
+    if df.empty:
+        return []
+    return sorted(df["ASIN_KEY"].dropna().unique().tolist())
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
+    """Per-ASIN summary for the selected GEO + date range. Joins P&L,
+    Marketing, and Sessions sources after aggregating each separately to
+    avoid the join-fanout double-counting that bit get_asin_data
+    earlier (see issue #21)."""
+    if not asin_csv:
+        return pd.DataFrame()
+    gads = _gads_actual_sum_sql(sfx)
+    return run_query(f"""
+        WITH pnl AS (
+            SELECT SPLIT_PART(ASIN,' ',1)                    AS ASIN_KEY,
+                   MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN)) AS PRODUCT_NAME,
+                   MAX(BRAND)                                AS BRAND,
+                   SUM(SALES_ACTUAL_{sfx})                   AS REVENUE,
+                   SUM(QTY_ACTUAL)                           AS UNITS,
+                   SUM(PM_SPEND_ACTUAL_{sfx})                AS PM_SPEND,
+                   {gads}                                    AS GADS_SPEND,
+                   SUM(CM1_ACTUAL_{sfx})                     AS CM1_ABS,
+                   SUM(CM2_ACTUAL_{sfx})                     AS CM2_ABS
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        mkt AS (
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   SUM(SPEND)             AS AD_SPEND,
+                   SUM(AD_SALES)          AS PAID_REV,
+                   SUM(IMPRESSIONS)       AS IMPRESSIONS,
+                   SUM(CLICKS)            AS CLICKS,
+                   SUM(CONVERSIONS)       AS PAID_UNITS
+            FROM {MKTG}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND GEO = '{geo}'
+              AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        sess AS (
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   SUM(SESSIONS)          AS SESSIONS
+            FROM {SALES_MKT}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND UPPER(GEO) = UPPER('{geo}')
+              AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        )
+        SELECT  p.ASIN_KEY                                            AS ASIN,
+                p.PRODUCT_NAME                                        AS PRODUCT_NAME,
+                p.BRAND                                               AS BRAND,
+                ROUND(COALESCE(p.REVENUE, 0), 0)                      AS REVENUE,
+                ROUND(COALESCE(p.UNITS, 0), 0)                        AS UNITS,
+                ROUND(COALESCE(p.REVENUE / NULLIF(p.UNITS, 0), 0), 2) AS ASP,
+                ROUND(COALESCE(p.PM_SPEND, 0)
+                      + COALESCE(p.GADS_SPEND, 0), 0)                 AS TOTAL_SPEND,
+                -- ACoS = (PM + GADS) / Revenue
+                ROUND((COALESCE(p.PM_SPEND, 0) + COALESCE(p.GADS_SPEND, 0))
+                       / NULLIF(p.REVENUE, 0) * 100, 1)               AS ACOS_PCT,
+                ROUND(COALESCE(p.CM2_ABS, 0), 0)                      AS CM2_ABS,
+                ROUND(COALESCE(p.CM2_ABS / NULLIF(p.REVENUE,0) * 100, 0), 1) AS CM2_PCT,
+                ROUND(COALESCE(s.SESSIONS, 0), 0)                     AS SESSIONS,
+                ROUND(COALESCE(p.UNITS / NULLIF(s.SESSIONS, 0) * 100, 0), 2) AS CR_PCT,
+                ROUND(COALESCE(m.IMPRESSIONS, 0), 0)                  AS IMPRESSIONS,
+                ROUND(COALESCE(m.CLICKS, 0), 0)                       AS CLICKS,
+                ROUND(COALESCE(m.CLICKS / NULLIF(m.IMPRESSIONS,0) * 100, 0), 2) AS CTR_PCT,
+                ROUND(COALESCE(m.AD_SPEND / NULLIF(m.CLICKS, 0), 0), 2)         AS CPC,
+                ROUND(COALESCE(m.PAID_REV, 0), 0)                     AS PAID_REV,
+                ROUND(COALESCE(m.AD_SPEND, 0), 0)                     AS AD_SPEND
+        FROM pnl p
+        LEFT JOIN mkt  m  ON p.ASIN_KEY = m.ASIN_KEY
+        LEFT JOIN sess s  ON p.ASIN_KEY = s.ASIN_KEY
+        ORDER BY REVENUE DESC NULLS LAST
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_nb_asin_periods(asin, geo, periods_tuple, sfx):
+    """Per-period funnel breakdown for ONE ASIN across the 9 periods.
+    Returns one row per period. Each metric is aggregated with
+    SUM(CASE WHEN DAY ∈ period) so overlapping ranges (e.g. May MTD
+    overlaps with all four weekly windows) are handled correctly.
+
+    Returns the wide form (one row per period) with columns:
+        PERIOD, ORDER_IDX, KIND, D_FROM, D_TO,
+        REVENUE, UNITS, PM_SPEND, GADS_SPEND, CM1_ABS, CM2_ABS,
+        AD_SPEND, PAID_REV, IMPRESSIONS, CLICKS, PAID_UNITS,
+        SESSIONS
+
+    `periods_tuple` is a tuple of (label, d_from, d_to, kind) — passed as
+    a tuple so Streamlit's caching can hash it."""
+    if not asin:
+        return pd.DataFrame()
+    # Cover the union of all period ranges in WHERE so we read the
+    # smallest possible slice. Period filtering happens via SUM(CASE).
+    all_from = min(p[1] for p in periods_tuple)
+    all_to   = max(p[2] for p in periods_tuple)
+    gads     = _gads_actual_sum_sql(sfx)
+
+    blocks = []
+    for i, (lbl, d_from, d_to, kind) in enumerate(periods_tuple):
+        # Each block is a SELECT that aggregates this single period for
+        # all three source tables via cross join (each sub-CTE returns
+        # exactly one row). UNION ALL across periods gives 9 rows.
+        # The label is escaped via REPLACE in case it ever contains '.
+        lbl_esc = lbl.replace("'", "''")
+        blocks.append(f"""
+        SELECT '{lbl_esc}' AS PERIOD, {i} AS ORDER_IDX, '{kind}' AS KIND,
+               DATE '{d_from}' AS D_FROM, DATE '{d_to}' AS D_TO,
+               p.REVENUE, p.UNITS, p.PM_SPEND, p.GADS_SPEND,
+               p.CM1_ABS, p.CM2_ABS,
+               m.AD_SPEND, m.PAID_REV, m.IMPRESSIONS, m.CLICKS, m.PAID_UNITS,
+               s.SESSIONS
+        FROM (
+            SELECT COALESCE(SUM(SALES_ACTUAL_{sfx}),0)  AS REVENUE,
+                   COALESCE(SUM(QTY_ACTUAL),0)          AS UNITS,
+                   COALESCE(SUM(PM_SPEND_ACTUAL_{sfx}),0) AS PM_SPEND,
+                   {gads}                               AS GADS_SPEND,
+                   COALESCE(SUM(CM1_ACTUAL_{sfx}),0)    AS CM1_ABS,
+                   COALESCE(SUM(CM2_ACTUAL_{sfx}),0)    AS CM2_ABS
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND SPLIT_PART(ASIN,' ',1) = '{asin}'
+        ) p
+        CROSS JOIN (
+            SELECT COALESCE(SUM(SPEND),0)        AS AD_SPEND,
+                   COALESCE(SUM(AD_SALES),0)     AS PAID_REV,
+                   COALESCE(SUM(IMPRESSIONS),0)  AS IMPRESSIONS,
+                   COALESCE(SUM(CLICKS),0)       AS CLICKS,
+                   COALESCE(SUM(CONVERSIONS),0)  AS PAID_UNITS
+            FROM {MKTG}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND GEO = '{geo}'
+              AND SPLIT_PART(ASIN,' ',1) = '{asin}'
+        ) m
+        CROSS JOIN (
+            SELECT COALESCE(SUM(SESSIONS),0)     AS SESSIONS
+            FROM {SALES_MKT}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              AND UPPER(GEO) = UPPER('{geo}')
+              AND SPLIT_PART(ASIN,' ',1) = '{asin}'
+        ) s
+        """)
+    sql = "\n            UNION ALL\n".join(blocks) + "\n            ORDER BY ORDER_IDX"
+    return run_query(sql)
+
+
+def render_new_business():
+    """New Business (Coffee + Supplements) — KPI cards + per-ASIN summary
+    + clickable drill-down with a per-ASIN 9-period funnel breakdown.
+
+    Date range follows the sidebar's d_from / d_to for the KPI cards and
+    summary table; the per-ASIN breakdown is anchored to its own fixed
+    9-period grid (4 prior months + MTD + 4 rolling weeks)."""
+    st.markdown('<div class="page-title">New Business &mdash; Coffee + Supplements</div>',
+                 unsafe_allow_html=True)
+
+    # Effective-today honours the same 3pm-IST cutoff used elsewhere.
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    _now_ist = datetime.now(_IST)
+    if _now_ist.hour >= 15:
+        eff_today = _now_ist.date() - timedelta(days=1)
+    else:
+        eff_today = _now_ist.date() - timedelta(days=2)
+
+    st.markdown(
+        f'<div class="page-sub">{d_from.strftime("%d %b %Y")} '
+        f'&rarr; {d_to.strftime("%d %b %Y")} '
+        f'&nbsp;&bull;&nbsp; Currency: {"INR (₹)" if use_inr else "Local"} '
+        f'&nbsp;&bull;&nbsp; Pace: {(d_to - d_from).days + 1} days'
+        f'</div>', unsafe_allow_html=True)
+
+    # ── GEO selector ──
+    geos_avail = get_nb_geos_with_data()
+    if not geos_avail:
+        st.warning("No New Business GEOs found (CATEGORY in Coffee / Supplements).")
+        return
+    # Defaults to USA; falls back to first available if USA somehow missing.
+    geo_default = "USA" if "USA" in geos_avail else geos_avail[0]
+    geo = st.selectbox("GEO",
+                       geos_avail,
+                       index=geos_avail.index(geo_default),
+                       key="nb_geo",
+                       help="Switch country. USA uses your hardcoded ASIN list; "
+                            "other GEOs auto-detect ASINs with CATEGORY in "
+                            "Coffee / Supplements.")
+
+    asin_universe = get_nb_asin_universe(geo)
+    if not asin_universe:
+        st.info(f"📭 No New Business ASINs found for {geo} yet.")
+        return
+    asin_csv = _nb_asin_in_list(asin_universe)
+
+    # ── Headline KPI cards: top row = sales/margin, bottom row = ads ──
+    with st.spinner("Loading New Business summary…"):
+        summary = get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx)
+    if summary.empty:
+        st.info(f"📭 No data for {geo} New Business in the selected date range.")
+        return
+
+    def _sum(c):
+        return _f(pd.to_numeric(summary[c], errors="coerce").sum()) if c in summary.columns else None
+    tot_revenue   = _sum("REVENUE")
+    tot_units     = _sum("UNITS")
+    tot_total_sp  = _sum("TOTAL_SPEND")  # PM + GADS from P&L (currency-correct)
+    tot_ad_spend  = _sum("AD_SPEND")     # MKTG-table spend (local ccy) — for PCOS
+    tot_paid_rev  = _sum("PAID_REV")     # MKTG AD_SALES (local ccy)
+    tot_sessions  = _sum("SESSIONS")
+    tot_imps      = _sum("IMPRESSIONS")
+    tot_clicks    = _sum("CLICKS")
+    tot_cm2_abs   = _sum("CM2_ABS")
+
+    def _pct(a, b):
+        if a is None or b is None or not b:
+            return None
+        return a / b * 100
+
+    acos_pct      = _pct(tot_total_sp, tot_revenue)
+    cm2_pct       = _pct(tot_cm2_abs, tot_revenue)
+    cr_pct        = _pct(tot_units, tot_sessions)
+    ctr_pct       = _pct(tot_clicks, tot_imps)
+    # CPC / CPM use total_spend (PM + GADS in sfx currency); clicks /
+    # impressions are unitless counts so the result is X-per-click /
+    # X-per-1000-impressions in the dashboard's currency.
+    cpc           = (tot_total_sp / tot_clicks) if (tot_total_sp and tot_clicks) else None
+    cpm           = (tot_total_sp / tot_imps * 1000) if (tot_total_sp and tot_imps) else None
+    # PCOS% lives entirely in MKTG's local currency so the ratio is
+    # currency-safe even when the dashboard sfx is INR.
+    pcos_pct      = _pct(tot_ad_spend, tot_paid_rev)
+    paid_share    = _pct(tot_paid_rev, tot_revenue)
+
+    st.markdown('<div class="section-hdr">Segment KPIs</div>', unsafe_allow_html=True)
+    row1 = st.columns(5, gap="small")
+    row1[0].markdown(strip_card("Revenue",  fmt_lakhs(tot_revenue),
+                                f"{len(summary)} ASINs"),
+                     unsafe_allow_html=True)
+    row1[1].markdown(strip_card("Units",    fmt_units(tot_units)),
+                     unsafe_allow_html=True)
+    row1[2].markdown(strip_card("Sessions", fmt_units(tot_sessions),
+                                f"CR: {fmt_pct(cr_pct)}"),
+                     unsafe_allow_html=True)
+    row1[3].markdown(strip_card("CM2 Abs",  fmt_lakhs(tot_cm2_abs),
+                                f"CM2%: {fmt_pct(cm2_pct)}"),
+                     unsafe_allow_html=True)
+    row1[4].markdown(strip_card("Total Spend (PM+GADS)", fmt_lakhs(tot_total_sp),
+                                f"ACoS: {fmt_pct(acos_pct)}"),
+                     unsafe_allow_html=True)
+
+    row2 = st.columns(5, gap="small")
+    row2[0].markdown(strip_card("Impressions", fmt_units(tot_imps)),
+                     unsafe_allow_html=True)
+    row2[1].markdown(strip_card("Clicks",      fmt_units(tot_clicks),
+                                f"CTR: {fmt_pct(ctr_pct)}"),
+                     unsafe_allow_html=True)
+    row2[2].markdown(strip_card("CPC",
+                                (f"₹{cpc:,.2f}" if cpc is not None else "—")),
+                     unsafe_allow_html=True)
+    row2[3].markdown(strip_card("CPM",
+                                (f"₹{cpm:,.2f}" if cpm is not None else "—")),
+                     unsafe_allow_html=True)
+    row2[4].markdown(strip_card("Paid Revenue", fmt_lakhs(tot_paid_rev),
+                                (f"PCOS: {fmt_pct(pcos_pct)}  ·  "
+                                 f"Paid Share: {fmt_pct(paid_share)}")),
+                     unsafe_allow_html=True)
+    st.markdown("")
+
+    # ── ASIN summary table (sortable; click any row for detail) ──
+    st.markdown('<div class="section-hdr">Product Performance Summary '
+                '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                '— click any row to drill into the 9-period funnel below'
+                '</span></div>', unsafe_allow_html=True)
+
+    disp = summary.copy().reset_index(drop=True)
+    # Hide ZERO-revenue ASINs by default? No — show them so the user
+    # can spot fully-stale launches. Sort already puts them at the end.
+    show_cols = [
+        ("ASIN",        "ASIN"),
+        ("PRODUCT_NAME","Product"),
+        ("REVENUE",     "Revenue"),
+        ("UNITS",       "Units"),
+        ("ASP",         "ASP"),
+        ("SESSIONS",    "Sessions"),
+        ("CR_PCT",      "CR%"),
+        ("IMPRESSIONS", "Impressions"),
+        ("CTR_PCT",     "CTR%"),
+        ("CLICKS",      "Clicks"),
+        ("AD_SPEND",    "Ad Spend"),
+        ("ACOS_PCT",    "ACoS%"),
+        ("CM2_ABS",     "CM2 Abs"),
+        ("CM2_PCT",     "CM2%"),
+    ]
+    src_cols  = [s for s, _ in show_cols if s in disp.columns]
+    label_map = {s: l for s, l in show_cols}
+    table_df  = disp[src_cols].rename(columns=label_map).reset_index(drop=True)
+
+    currency_sym = ("₹" if use_inr else "")
+    col_cfg = {
+        "ASIN":        st.column_config.TextColumn("ASIN", width="small", pinned=True),
+        "Product":     st.column_config.TextColumn("Product", width="large", pinned=True),
+        "Revenue":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
+        "Units":       st.column_config.NumberColumn(format="%,d"),
+        "ASP":         st.column_config.NumberColumn(format=f"{currency_sym}%,.2f"),
+        "Sessions":    st.column_config.NumberColumn(format="%,d"),
+        "CR%":         st.column_config.NumberColumn(format="%.2f%%"),
+        "Impressions": st.column_config.NumberColumn(format="%,d"),
+        "CTR%":        st.column_config.NumberColumn(format="%.2f%%"),
+        "Clicks":      st.column_config.NumberColumn(format="%,d"),
+        "Ad Spend":    st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
+        "ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
+        "CM2 Abs":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
+        "CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
+    }
+
+    sel_event = st.dataframe(
+        table_df, use_container_width=True, height=460,
+        hide_index=True, column_config=col_cfg,
+        on_select="rerun", selection_mode="single-row",
+        key=f"nb_summary_{geo}",
+    )
+    try:
+        picked_idx = (sel_event.selection.rows
+                      if sel_event and getattr(sel_event, "selection", None) else [])
+    except Exception:
+        picked_idx = []
+
+    # ── Per-ASIN drill-down ──
+    if picked_idx:
+        sel_row   = disp.iloc[picked_idx[0]]
+        sel_asin  = sel_row["ASIN"]
+        sel_name  = sel_row.get("PRODUCT_NAME") or sel_asin
+    else:
+        # Default to the top-revenue ASIN so the page is never empty.
+        sel_row   = disp.iloc[0]
+        sel_asin  = sel_row["ASIN"]
+        sel_name  = sel_row.get("PRODUCT_NAME") or sel_asin
+
+    st.markdown(
+        f'<div class="section-hdr" style="margin-top:18px;">'
+        f'Funnel breakdown · '
+        f'<span style="color:#AB8743;">{sel_asin}</span> &nbsp;·&nbsp; '
+        f'<span style="font-size:13px;color:#7a6a50;font-weight:500;">{sel_name}</span>'
+        f'</div>',
+        unsafe_allow_html=True)
+
+    periods = _nb_periods(eff_today)
+    periods_tuple = tuple(periods)
+    with st.spinner(f"Loading 9-period breakdown for {sel_asin}…"):
+        pdf = get_nb_asin_periods(sel_asin, geo, periods_tuple, sfx)
+
+    if pdf.empty:
+        st.info("📭 No data for this ASIN across the 9 periods.")
+        return
+
+    # Ensure period order matches our spec
+    pdf = pdf.sort_values("ORDER_IDX").reset_index(drop=True)
+
+    # ── Compute every funnel metric per period in pandas ──
+    def _num(c):
+        return pd.to_numeric(pdf[c], errors="coerce").fillna(0) if c in pdf.columns \
+               else pd.Series([0] * len(pdf))
+    revenue     = _num("REVENUE")
+    units       = _num("UNITS")
+    pm_spend    = _num("PM_SPEND")
+    gads_spend  = _num("GADS_SPEND")
+    cm1_abs     = _num("CM1_ABS")
+    cm2_abs     = _num("CM2_ABS")
+    ad_spend    = _num("AD_SPEND")        # marketing-table spend
+    paid_rev    = _num("PAID_REV")
+    impressions = _num("IMPRESSIONS")
+    clicks      = _num("CLICKS")
+    paid_units  = _num("PAID_UNITS")
+    sessions    = _num("SESSIONS")
+
+    # IMPORTANT: MKTG.SPEND / MKTG.AD_SALES are LOCAL currency per GEO
+    # (USD for USA, GBP for UK, ...). P&L's PM_SPEND / SALES are in
+    # `sfx` (INR or LOCAL). To keep the Spend / CPC / CPM cells
+    # currency-consistent with the dashboard's currency toggle, we use
+    # P&L's PM + GADS for them. PCOS% stays MKTG-derived (numerator
+    # and denominator share local currency so the ratio is unitless).
+    total_spend = pm_spend + gads_spend
+    asp         = revenue / units.replace(0, pd.NA)
+    cr_pct      = units   / sessions.replace(0, pd.NA) * 100
+    ctr_pct     = clicks  / impressions.replace(0, pd.NA) * 100
+    cpc         = total_spend / clicks.replace(0, pd.NA)
+    cpm         = total_spend / impressions.replace(0, pd.NA) * 1000
+    # Paid % is currency-mixed (local AD_SALES vs sfx Revenue). Best-
+    # effort — meaningful only when sfx=LOCAL. Inherited approximation
+    # from the existing dashboard; flagged in the caption below.
+    paid_share  = paid_rev / revenue.replace(0, pd.NA) * 100
+    pcos_pct    = ad_spend / paid_rev.replace(0, pd.NA) * 100
+    acos_pct    = total_spend / revenue.replace(0, pd.NA) * 100
+    cm1_pct     = cm1_abs / revenue.replace(0, pd.NA) * 100
+    cm2_pct     = cm2_abs / revenue.replace(0, pd.NA) * 100
+
+    # Format-per-metric helpers
+    def _fmt_n(v):
+        if v is None or pd.isna(v): return "—"
+        n = float(v)
+        return f"{int(round(n)):,}" if abs(n) >= 1 else "0"
+    def _fmt_money(v):
+        if v is None or pd.isna(v): return "—"
+        n = float(v)
+        if abs(n) >= 1e7: return f"{currency_sym}{n/1e7:,.2f} Cr"
+        if abs(n) >= 1e5: return f"{currency_sym}{n/1e5:,.2f} L"
+        if abs(n) >= 1e3: return f"{currency_sym}{n/1e3:,.1f} K"
+        return f"{currency_sym}{n:,.0f}"
+    def _fmt_money_per(v, dec=2):
+        if v is None or pd.isna(v): return "—"
+        return f"{currency_sym}{float(v):,.{dec}f}"
+    def _fmt_pct(v, dec=2):
+        if v is None or pd.isna(v): return "—"
+        return f"{float(v):.{dec}f}%"
+
+    # Funnel rows in the order the user picked. "Spend" = PM + GADS from
+    # P&L (currency-correct vs sfx). Paid Revenue is from MKTG (local
+    # currency only).
+    funnel_rows = [
+        ("Impressions",  impressions, _fmt_n),
+        ("CTR%",         ctr_pct,     _fmt_pct),
+        ("Clicks",       clicks,      _fmt_n),
+        ("CPC",          cpc,         _fmt_money_per),
+        ("CPM",          cpm,         _fmt_money_per),
+        ("Sessions",     sessions,    _fmt_n),
+        ("CR%",          cr_pct,      _fmt_pct),
+        ("Units",        units,       _fmt_n),
+        ("ASP",          asp,         _fmt_money_per),
+        ("Revenue",      revenue,     _fmt_money),
+        ("Paid Revenue", paid_rev,    _fmt_money),
+        ("Paid %",       paid_share,  _fmt_pct),
+        ("Spend",        total_spend, _fmt_money),
+        ("PCOS%",        pcos_pct,    _fmt_pct),
+        ("ACoS%",        acos_pct,    _fmt_pct),
+        ("CM1%",         cm1_pct,     _fmt_pct),
+        ("CM2%",         cm2_pct,     _fmt_pct),
+        ("CM2 Abs",      cm2_abs,     _fmt_money),
+    ]
+
+    period_labels = pdf["PERIOD"].tolist()
+    # Build the wide breakdown DataFrame: rows = metric, columns = period
+    rows = []
+    for metric_label, series, fmtter in funnel_rows:
+        row = {"Metric": metric_label}
+        for i, lbl in enumerate(period_labels):
+            row[lbl] = fmtter(series.iloc[i] if i < len(series) else None)
+        rows.append(row)
+    breakdown = pd.DataFrame(rows, columns=["Metric"] + period_labels)
+
+    # Highlight the most-recent week (Wk-1) and current MTD with a soft tint
+    # so the eye lands there first.
+    def _style_breakdown(row):
+        s   = [""] * len(row)
+        idx = row.index.tolist()
+        metric = row.get("Metric", "")
+        # Section grouping: bold the headline rows (Revenue, CM2 Abs, ACoS%)
+        if metric in ("Revenue", "CM2 Abs", "ACoS%"):
+            s = ["font-weight:700;" + (x or "") for x in s]
+        return s
+
+    bkd_col_cfg = {"Metric": st.column_config.TextColumn(
+        "Metric", width="small", pinned=True)}
+    for lbl in period_labels:
+        bkd_col_cfg[lbl] = st.column_config.TextColumn(lbl, width="small")
+
+    st.dataframe(
+        breakdown.style.apply(_style_breakdown, axis=1).hide(axis="index"),
+        use_container_width=True,
+        height=min(740, 48 + len(breakdown) * 35),
+        hide_index=True,
+        column_config=bkd_col_cfg,
+    )
+
+    # Caption explaining columns
+    mtd_lbl = next((p[0] for p in periods if p[3] == "month" and "MTD" in p[0]), "MTD")
+    st.caption(
+        f"**Columns**: 4 prior full months + **{mtd_lbl}** (1 → today's "
+        f"data cut-off based on the 3pm IST rule) + 4 rolling 7-day "
+        f"windows ending {periods[-4][2].strftime('%d %b')} (Wk-1) "
+        f"back to {periods[-1][1].strftime('%d %b')} (Wk-4). "
+        f"**Funnel order** scans top-to-bottom: awareness → traffic → "
+        f"conversion → revenue → margin. "
+        f"**Sources**: Impressions / Clicks / Paid Revenue come from "
+        f"VAHDAM_AMAZON_MARKETING (Amazon Ads only); Sessions from "
+        f"VAHDAM_AMAZON_SALES_MARKETING; Revenue / Units / Spend / "
+        f"CM1 / CM2 from the P&L table. "
+        f"**Currency note**: Paid Revenue and PCOS% are derived from "
+        f"the marketing table which stores values in local currency "
+        f"(USD/GBP/EUR/CAD/…). The PCOS% ratio is unit-safe; the Paid "
+        f"Revenue cell and Paid % column should be read as INR-ish "
+        f"only when the dashboard currency toggle is set to *Local*."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 6 — Customer Insights
 # ═══════════════════════════════════════════════════════════════════════════════
 # Theme columns in the reviews table. (column_in_table, display_label)
@@ -7975,6 +8578,8 @@ elif view == "pnl":
     render_pnl()
 elif view == "dbr":
     render_dbr()
+elif view == "new_business":
+    render_new_business()
 elif view == "price":
     render_price_tracker()
 elif view == "customer_insights":
