@@ -1194,10 +1194,27 @@ with st.sidebar:
         st.rerun()
 
     # ── Refresh data ──
+    # Clear ALL @st.cache_data results EXCEPT the Keepa price-tracker
+    # functions. Keepa charges a token per ASIN refresh, so the Price
+    # Tracker is locked to one auto-refresh per day at 14:00 IST (see
+    # `_keepa_refresh_window`). No user can force-burn the daily quota
+    # via this button.
     st.markdown("---")
     if st.button("🔄 Refresh data", use_container_width=True, key="refresh_data",
-                 help="Clear cache and refetch from Snowflake"):
-        st.cache_data.clear()
+                 help="Clear Snowflake cache and refetch. Price Tracker "
+                      "refreshes once a day at 2pm IST and is NOT cleared "
+                      "by this button — see the Price Tracker page for "
+                      "the lockout reason."):
+        _keepa_protected = {"_fetch_keepa_chunk", "fetch_keepa_products"}
+        for _name, _obj in list(globals().items()):
+            if _name in _keepa_protected:
+                continue
+            _clr = getattr(_obj, "clear", None)
+            if callable(_clr):
+                try:
+                    _clr()
+                except Exception:
+                    pass
         st.rerun()
     from datetime import datetime as _dt
     st.markdown(f"<div style='font-size:10.5px;color:#AB8743;text-align:center;"
@@ -5932,9 +5949,33 @@ def _value_as_of(csv_arr, target_dt):
     return last_val
 
 
+def _keepa_refresh_window():
+    """Return the current daily Keepa refresh window as an ISO date
+    string. The window flips at 14:00 IST every day — before 14:00 IST
+    we're still on yesterday's window, after we're on today's.
+
+    Why: Keepa charges a token per ASIN refresh. We deliberately want
+    exactly ONE refresh per day across the whole team. Passing this
+    string into the cached fetch as an extra argument means the cache
+    key changes ONLY when the daily window flips, so any extra calls
+    during the same day hit cache. Sidebar 'Refresh data' is also
+    wired to skip Keepa caches so no one can force-burn tokens."""
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(IST)
+    if now.hour < 14:
+        # Still in yesterday's 2-PM-to-2-PM window
+        d = (now - timedelta(days=1)).date()
+    else:
+        d = now.date()
+    return d.isoformat()
+
+
 @st.cache_data(ttl=86400, show_spinner=False)  # 24-hour cache
-def _fetch_keepa_chunk(asins_tuple, domain_code):
-    """Internal: fetch ONE chunk (≤50 ASINs) from Keepa. Cached per chunk."""
+def _fetch_keepa_chunk(asins_tuple, domain_code, refresh_window):
+    """Internal: fetch ONE chunk (≤50 ASINs) from Keepa. Cached per chunk.
+    `refresh_window` is the value returned by `_keepa_refresh_window()`;
+    it is used purely as a cache-key discriminator so the entry rotates
+    at 14:00 IST each day rather than at an arbitrary 24-hour interval."""
     if not keepa_available():
         return {"_error": "Keepa API key not configured in secrets.toml"}
     try:
@@ -6080,17 +6121,23 @@ def fetch_keepa_products(asins_tuple, domain_code, chunk_size=50):
     """Public wrapper: auto-chunks large ASIN lists into multiple cached calls.
 
     Keepa accepts up to ~100 ASINs per request, but 50 is a safer default that
-    keeps URLs short and lets each chunk cache independently."""
+    keeps URLs short and lets each chunk cache independently.
+
+    The current daily window string (`_keepa_refresh_window()`) is threaded
+    in as a cache-key discriminator so the cache rotates exactly once per
+    day at 14:00 IST. The sidebar 'Refresh data' button is wired to skip
+    Keepa caches so no manual force-refresh can burn through tokens."""
     asins = list(asins_tuple)
     if not asins:
         return {}
+    window = _keepa_refresh_window()
     if len(asins) <= chunk_size:
-        return _fetch_keepa_chunk(tuple(asins), domain_code)
+        return _fetch_keepa_chunk(tuple(asins), domain_code, window)
 
     merged = {}
     for i in range(0, len(asins), chunk_size):
         chunk = tuple(asins[i:i + chunk_size])
-        part = _fetch_keepa_chunk(chunk, domain_code)
+        part = _fetch_keepa_chunk(chunk, domain_code, window)
         if "_error" in part and i == 0:
             # First chunk failed — bubble it up so the UI shows the error.
             return part
@@ -6182,21 +6229,33 @@ def render_price_tracker():
                 continue
 
             # ── Keepa quota / refresh-cadence info bar ──
+            # Daily refresh window flips at 14:00 IST. Show the next
+            # refresh time so the team knows when fresh data will land.
             tl    = data.get("_tokens_left")
             rate  = data.get("_refill_rate")
+            _IST  = timezone(timedelta(hours=5, minutes=30))
+            _now_ist = datetime.now(_IST)
+            _next_refresh = (
+                _now_ist.replace(hour=14, minute=0, second=0, microsecond=0)
+                if _now_ist.hour < 14
+                else (_now_ist + timedelta(days=1))
+                       .replace(hour=14, minute=0, second=0, microsecond=0)
+            )
             bits  = []
             if tl is not None:
                 bits.append(f"🪙 <b>{int(tl):,}</b> tokens left")
             if rate:
                 bits.append(f"refill <b>{rate}</b>/min")
             bits.append(
-                "data refreshes every <b>24 h</b> "
-                "(use sidebar <i>Refresh data</i> to force-update)"
+                "🔒 auto-refresh <b>once daily @ 2:00 PM IST</b> "
+                f"(next: {_next_refresh.strftime('%d %b · %I:%M %p IST')}) "
+                "&nbsp;·&nbsp; manual refresh is disabled to protect the "
+                "Keepa daily quota"
             )
             st.markdown(
                 '<div style="background:#faf5ea;border:1px solid #e8dfc9;'
-                'border-radius:6px;padding:6px 12px;margin:4px 0 10px 0;'
-                'font-size:11.5px;color:#5a4d35;">'
+                'border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;'
+                'font-size:11.5px;color:#5a4d35;line-height:1.5;">'
                 + " &nbsp;·&nbsp; ".join(bits) +
                 '</div>',
                 unsafe_allow_html=True)
@@ -6715,198 +6774,12 @@ def render_price_tracker():
                             else:
                                 st.caption("No review history for this ASIN.")
 
-            # ── ASIN multi-pick chart grid (collapsed by default) ──
-            picks: list = []
-            with st.expander(
-                "📊 Compare multiple ASINs — mini-chart grid", expanded=False):
-                st.markdown(
-                    '<div style="font-size:11.5px;color:#7a6a50;'
-                    'margin-bottom:6px;">Three charts per row · last 2 years '
-                    'of price history.</div>',
-                    unsafe_allow_html=True)
-                options = sorted(asins, key=_sort_key)
-                search_q = st.text_input(
-                    "🔍 Search ASIN or title",
-                    key=f"price_search_{geo}",
-                    placeholder="e.g. B0BJK5GPRD or 'masala chai'",
-                ).strip().lower()
-                if search_q:
-                    options = [
-                        a for a in options
-                        if search_q in a.lower()
-                        or search_q in (data.get(a, {}).get("title") or "").lower()
-                    ]
-                    if not options:
-                        st.info(f"No ASINs matched “{search_q}”.")
-                # Empty default so the chart grid stays empty until the user
-                # explicitly opens this expander and picks ASINs. Avoids
-                # auto-rendering ~6 charts every page load.
-                # Key suffixed with "_v2" so stale picks from the previous
-                # version of this widget are ignored — guarantees the grid
-                # starts empty on every fresh page load.
-                picks = st.multiselect(
-                    f"Select ASINs to chart ({len(options)} available)",
-                    options=options,
-                    default=[],
-                    format_func=_label_for,
-                    key=f"price_picks_v2_{geo}",
-                    placeholder="Pick one or more ASINs…",
-                ) if options else []
-                if not picks:
-                    st.info(
-                        "Pick one or more ASINs above to populate the "
-                        "chart grid. Use the Deep-dive section above for a "
-                        "single-ASIN granular view."
-                    )
-
-            ROW = 3
-            for row_start in range(0, len(picks), ROW):
-                cols = st.columns(ROW, gap="medium")
-                for i, asin in enumerate(picks[row_start:row_start + ROW]):
-                    with cols[i]:
-                        if asin not in data:
-                            st.markdown(
-                                f"<div class='pnl-strip' style='height:auto;'>"
-                                f"<div class='pnl-strip-label'>{asin}</div>"
-                                f"<div style='color:#8b1a1a;font-size:11px;'>"
-                                f"Not found in Keepa response</div></div>",
-                                unsafe_allow_html=True)
-                            continue
-                        d = data[asin]
-                        title_short = (d["title"][:55] + "…") \
-                            if len(d["title"]) > 55 else d["title"]
-                        budget_price = budgets.get(asin)
-
-                        # Restrict pts to last 2 years for both anomaly + chart
-                        amazon_pts_2y = [p for p in d["amazon_pts"]
-                                         if p[0] >= two_years_ago]
-                        new_pts_2y    = [p for p in d["new_pts"]
-                                         if p[0] >= two_years_ago]
-
-                        # Price header
-                        last = d.get("last_amazon") or d.get("last_new") or d.get("last_buybox")
-                        last_label = ("Amazon" if d.get("last_amazon")
-                                      else "New" if d.get("last_new")
-                                      else "Buy Box" if d.get("last_buybox")
-                                      else "—")
-                        last_str = f"{d['currency']}{last:.2f}" if last else "—"
-                        anomaly = _detect_price_anomaly(
-                            amazon_pts_2y or new_pts_2y,
-                            budget=budget_price)
-                        bb_missing = d.get("buybox_present") is False
-                        bb_yday    = d.get("buybox_yesterday")
-                        if bb_missing:
-                            bord = "#8b1a1a"
-                        elif anomaly.get("flag"):
-                            bord = "#AB8743"
-                        else:
-                            bord = "#d6ccba"
-                        flag_html = ""
-                        if bb_missing:
-                            flag_html = ("<span style='color:#8b1a1a;font-weight:700;"
-                                         "font-size:11px;'>🛒 No Buy Box (yest.)</span>")
-                        elif anomaly.get("flag"):
-                            arrow = "▲" if anomaly["direction"] == "up" else "▼"
-                            clr = "#1a7a3e" if anomaly["direction"] == "up" else "#8b1a1a"
-                            basis_tag = ("vs budget" if anomaly.get("basis") == "budget"
-                                         else "vs 7d avg")
-                            flag_html = (f"<span style='color:{clr};font-weight:700;"
-                                          f"font-size:11px;'>{arrow} "
-                                          f"{abs(anomaly['change_pct']):.1f}% "
-                                          f"<span style='font-weight:500;color:#7a6a50;'>"
-                                          f"{basis_tag}</span></span>")
-                        budget_html = ""
-                        if budget_price:
-                            budget_html = (f"<span class='small-muted' "
-                                           f"style='font-size:10.5px;'>Budget "
-                                           f"{d['currency']}{budget_price:.2f}</span>")
-                        bb_yday_html = ""
-                        if bb_yday is not None and not bb_missing:
-                            bb_yday_html = (f"<span class='small-muted' "
-                                            f"style='font-size:10.5px;'>BB yest. "
-                                            f"{d['currency']}{bb_yday:.2f}</span>")
-                        meta_html = " &nbsp;·&nbsp; ".join(
-                            x for x in [budget_html, bb_yday_html] if x)
-                        if meta_html:
-                            meta_html = (f"<div style='font-size:10.5px;"
-                                         f"color:#7a6a50;margin-top:2px;'>"
-                                         f"{meta_html}</div>")
-                        st.markdown(
-                            f"<div style='background:#fff;border:1px solid {bord};"
-                            f"border-radius:8px;padding:8px 12px;"
-                            f"margin-bottom:4px;'>"
-                            f"<div style='font-size:11px;color:#AB8743;"
-                            f"font-weight:700;letter-spacing:0.4px;'>{asin}</div>"
-                            f"<div style='font-size:18px;font-weight:700;"
-                            f"color:#004A2B;'>{last_str} "
-                            f"<span class='small-muted' style='font-size:10px;"
-                            f"font-weight:500;'>{last_label}</span> "
-                            f"{flag_html}</div>"
-                            f"<div style='font-size:10.5px;color:#7a6a50;"
-                            f"line-height:1.3;'>{title_short}</div>"
-                            f"{meta_html}"
-                            f"</div>", unsafe_allow_html=True)
-
-                        # Mini Plotly chart — last 2 years only
-                        if HAS_PLOTLY and (amazon_pts_2y or new_pts_2y):
-                            fig = go.Figure()
-                            if amazon_pts_2y:
-                                xs, ys = zip(*amazon_pts_2y)
-                                fig.add_trace(go.Scatter(
-                                    x=xs, y=ys, mode="lines",
-                                    name="Amazon",
-                                    line=dict(color="#004A2B", width=1.6),
-                                    hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
-                                                   f"Amazon: {d['currency']}%{{y:.2f}}"
-                                                   "<extra></extra>")))
-                            if new_pts_2y:
-                                xs, ys = zip(*new_pts_2y)
-                                fig.add_trace(go.Scatter(
-                                    x=xs, y=ys, mode="lines",
-                                    name="New",
-                                    line=dict(color="#AB8743", width=1.2,
-                                              dash="dot"),
-                                    hovertemplate=(f"<b>%{{x|%d %b %Y}}</b><br>"
-                                                   f"New: {d['currency']}%{{y:.2f}}"
-                                                   "<extra></extra>")))
-                            # Budget horizontal reference line
-                            if budget_price:
-                                fig.add_hline(
-                                    y=budget_price,
-                                    line=dict(color="#8b1a1a", width=1.1,
-                                              dash="dash"),
-                                    annotation_text=(f"Budget "
-                                                     f"{d['currency']}"
-                                                     f"{budget_price:.2f}"),
-                                    annotation_position="top left",
-                                    annotation_font=dict(size=9,
-                                                         color="#8b1a1a"),
-                                )
-                            fig.update_layout(
-                                plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
-                                height=140,
-                                margin=dict(l=10, r=10, t=6, b=20),
-                                showlegend=False,
-                                hovermode="x",
-                                hoverlabel=dict(bgcolor="#ffffff",
-                                                bordercolor="#004A2B",
-                                                font=dict(size=11, color="#171717")),
-                            )
-                            fig.update_xaxes(
-                                showgrid=False,
-                                tickfont=dict(size=9, color="#7a6a50"),
-                                nticks=4,
-                                range=[two_years_ago, _d.datetime.utcnow()],
-                            )
-                            fig.update_yaxes(showgrid=True,
-                                              gridcolor="rgba(171,135,67,0.15)",
-                                              tickfont=dict(size=9, color="#7a6a50"),
-                                              tickprefix=d["currency"],
-                                              nticks=4)
-                            st.plotly_chart(fig, use_container_width=True,
-                                            config={"displayModeBar": False})
-                        else:
-                            st.caption("No history available (last 2 years)")
+            # The "📊 Compare multiple ASINs — mini-chart grid" section
+            # (search box + multiselect + 3-col chart grid) was removed
+            # per user request. The Deep-dive expander above (single
+            # ASIN, granular charts) and the per-ASIN summary table
+            # below cover the remaining use cases without rendering a
+            # variable-size grid that the team didn't use.
 
             # ── End-of-tab: per-ASIN summary table (all ASINs, downloadable) ──
             st.markdown('<div class="section-hdr" style="margin-top:22px;">'
