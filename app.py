@@ -8640,7 +8640,6 @@ def render_category():
     disp["Units"]       = disp["UNITS_ACT"].apply(fmt_units)
     disp["LY Units"]    = disp["UNITS_LY"].apply(fmt_units)
     disp["CM1%"]        = disp["CM1_PCT_ACT"].apply(fmt_pct)
-    disp["CM1% LY"]     = disp["CM1_LY"].apply(fmt_pct)
     disp["ACoS%"]       = disp["ACOS_PCT_ACT"].apply(fmt_pct)
     disp["ACoS% LY"]    = disp["ACOS_LY"].apply(fmt_pct)
     disp["CM2%"]        = disp["CM2_PCT_ACT"].apply(fmt_pct)
@@ -8649,10 +8648,13 @@ def render_category():
     disp["Rev vs LY"]   = pd.to_numeric(disp["SALES_DELTA"], errors="coerce")
     disp["Units vs LY"] = pd.to_numeric(disp["UNITS_DELTA"], errors="coerce")
 
+    # CM1% LY and CM2 Abs LY are intentionally omitted per design ask —
+    # the category team scans current margin + ACoS history; LY margin
+    # and LY CM2-Abs add noise without changing the call to action.
     show_cols = ["SUB_CATEGORY",
                  "Revenue", "LY Rev", "Rev vs LY",
                  "Units", "LY Units", "Units vs LY",
-                 "CM1%", "CM1% LY",
+                 "CM1%",
                  "ACoS%", "ACoS% LY",
                  "CM2%", "CM2 Abs"]
     table_df = (disp[show_cols]
