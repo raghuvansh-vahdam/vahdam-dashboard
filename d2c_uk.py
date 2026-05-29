@@ -26,85 +26,75 @@ def render(run_query):
     *app.py* that executes a SQL string against Snowflake and returns a
     pandas DataFrame with uppercase column names."""
 
-    # ─── BEIGE THEME (D2C-only) ──────────────────────────────────────────────
+    # ─── D2C THEME (Amazon-matched cream/green/saffron) ──────────────────────
+    # Inherits the main app's .page-title / .section-hdr / .pnl-strip CSS
+    # so the D2C tab visually reads as the same product. Below we add a
+    # restyled comparison-table class (.vahdam-d2c-table) replacing the
+    # old brown beige tables — same palette as the Amazon Sub-Cat tables.
     st.markdown("""
     <style>
-    .stApp {
-        background: linear-gradient(135deg, #f5efe0 0%, #ede4cf 50%, #e8dcc0 100%);
-        color: #3e2f1c;
-    }
-    [data-testid="stHeader"] { background: rgba(245, 239, 224, 0.85); }
-    .stMarkdown, .stCaption, p, label, span { color: #4a3520 !important; }
-    .stButton>button {
-        background: #c9a66b; color: #3e2f1c; border: 1px solid #a8814a;
-        border-radius: 8px; font-weight: 600; transition: all 0.25s ease;
-    }
-    .stButton>button:hover {
-        background: #b58a4b; color: #fff; transform: translateY(-1px);
-        box-shadow: 0 4px 10px rgba(120, 80, 30, 0.25);
-    }
-    .stButton>button[kind="primary"] { background: #8b5a2b; color: #fff; border-color: #6b3f17; }
-    [data-testid="stMetric"] {
-        background: rgba(255, 250, 235, 0.7); border: 1px solid #d2b88a;
-        border-radius: 12px; padding: 14px; box-shadow: 0 2px 6px rgba(120, 80, 30, 0.08);
-    }
-    [data-testid="stMetricLabel"] { color: #6b4a23 !important; }
-    [data-testid="stMetricValue"] { color: #3e2f1c !important; }
-    .stAlert {
-        background: rgba(220, 200, 160, 0.4) !important; border-left: 4px solid #8b5a2b !important;
-        border-radius: 8px; color: #3e2f1c !important;
-    }
-    .stDateInput input, .stTextInput input, .stSelectbox div[data-baseweb="select"] > div {
-        background: #fbf6e9 !important; border: 1px solid #c9a66b !important;
-        border-radius: 8px; color: #3e2f1c !important;
-    }
-    [data-testid="stDataFrame"] {
-        background: rgba(255, 250, 235, 0.6); border-radius: 10px;
-        border: 1px solid #d2b88a; padding: 4px;
-    }
-    .beige-table {
+    .vahdam-d2c-table {
         width: 100%; border-collapse: separate; border-spacing: 0;
-        background: rgba(255, 250, 235, 0.85); border-radius: 12px; overflow: hidden;
-        border: 1px solid #c9a66b; font-family: 'Helvetica', sans-serif; font-size: 13px;
-        box-shadow: 0 4px 14px rgba(120, 80, 30, 0.10); margin: 8px 0 18px 0;
+        background: #FFFFFF; border-radius: 10px; overflow: hidden;
+        border: 1px solid #d6ccba; border-top: 3px solid #004A2B;
+        font-family: 'Inter', 'Proxima Nova', Arial, sans-serif;
+        font-size: 13px; color: #171717;
+        box-shadow: 0 2px 8px rgba(0,74,43,0.08);
+        margin: 8px 0 20px 0;
     }
-    .beige-table th {
-        background: linear-gradient(180deg, #b58a4b 0%, #8b5a2b 100%);
-        color: #fff8e8; padding: 10px 12px; text-align: left;
-        font-weight: 600; letter-spacing: 0.3px; border-bottom: 2px solid #6b3f17;
+    .vahdam-d2c-table th {
+        background: linear-gradient(180deg, #004A2B 0%, #2E7D32 100%);
+        color: #FBF5EA; padding: 11px 14px; text-align: left;
+        font-weight: 700; letter-spacing: 0.4px; font-size: 12px;
+        text-transform: uppercase;
+        border-bottom: 2px solid #AB8743;
     }
-    .beige-table th.selected-col { background: linear-gradient(180deg, #d4a04a 0%, #b07418 100%); }
-    .beige-table td {
-        padding: 9px 12px; border-bottom: 1px solid #ead9b5;
-        color: #3e2f1c; vertical-align: middle;
+    .vahdam-d2c-table th.selected-col {
+        background: linear-gradient(180deg, #AB8743 0%, #7a5c00 100%);
+        color: #FBF5EA;
     }
-    .beige-table tr:nth-child(even) td { background: rgba(245, 235, 210, 0.45); }
-    .beige-table tr:hover td { background: rgba(212, 160, 74, 0.18); transition: background 0.2s ease; }
-    .beige-table td.selected-col { background: rgba(212, 160, 74, 0.22) !important; font-weight: 600; }
-    .beige-table td.metric-name { font-weight: 600; color: #5b3a1b; background: rgba(212, 184, 138, 0.25); }
-    .delta-up   { color: #1f7a3a; font-weight: 600; font-size: 11px; margin-left: 6px; }
-    .delta-down { color: #b3261e; font-weight: 600; font-size: 11px; margin-left: 6px; }
-    .delta-flat { color: #8a7558; font-weight: 600; font-size: 11px; margin-left: 6px; }
-    .preset-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+    .vahdam-d2c-table td {
+        padding: 10px 14px; border-bottom: 1px solid #ede4d0;
+        color: #1a1a1a; vertical-align: middle;
+    }
+    .vahdam-d2c-table tr:nth-child(even) td { background: #faf5ea; }
+    .vahdam-d2c-table tr:hover td { background: #f4eed8; transition: background 0.18s ease; }
+    .vahdam-d2c-table td.selected-col {
+        background: #fef3d6 !important; font-weight: 600; color: #5a4d35;
+    }
+    .vahdam-d2c-table td.metric-name {
+        font-weight: 700; color: #004A2B; background: #f4eed8;
+        letter-spacing: 0.2px;
+    }
+    .delta-up   { color: #1a7a3e; font-weight: 700; font-size: 11px; margin-left: 6px; }
+    .delta-down { color: #8b1a1a; font-weight: 700; font-size: 11px; margin-left: 6px; }
+    .delta-flat { color: #7a6a50; font-weight: 600; font-size: 11px; margin-left: 6px; }
     </style>
     """, unsafe_allow_html=True)
 
-    st.title("UK — D2C Dashboard")
+    snapshot_time = datetime.now().strftime("%d %b %Y · %H:%M:%S")
+    st.markdown('<div class="page-title">D2C &mdash; United Kingdom</div>',
+                 unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="page-sub">Snapshot {snapshot_time} '
+        f'&nbsp;·&nbsp; Currency: <b>GBP (£)</b> '
+        f'&nbsp;·&nbsp; Source: Shopify UK + Meta Ads + Google Ads'
+        f'</div>',
+        unsafe_allow_html=True)
 
-    snapshot_time = datetime.now().strftime("%d %b %Y, %H:%M:%S")
-    st.caption(f"Snapshot generated: {snapshot_time}. Hard refresh (⌘⇧R / Ctrl⇧R) to regenerate.")
-    st.markdown("**Currency:** GBP")
     st.info(
-        "The 4 month columns are literal & never change. "
-        "The **Selected Range** column at left reflects the date-range picker below (default: Last 7 Days). "
-        "Each value shows a % change vs. the next-older period — green ↑ for increase, red ↓ for decrease. "
-        "Cohort LTV + Retention sections below also follow the picker."
+        "The 4 month columns are literal and never change. "
+        "The **Selected Range** column at left reflects the date-range picker below "
+        "(default: Last 7 Days). Each value shows a % change vs. the next-older "
+        "period — green ▲ for increase, red ▼ for decrease. Cohort LTV + Retention "
+        "sections below also follow the picker."
     )
 
     yesterday = (datetime.today() - timedelta(days=1)).date()
 
     # ─── DATE RANGE PICKER ───────────────────────────────────────────────────
-    st.markdown("### 📅 Date Range")
+    st.markdown('<div class="section-hdr">📅 Date Range</div>',
+                 unsafe_allow_html=True)
     _PRESETS = {
         "Last 7 Days":  7,
         "Last 14 Days": 14,
@@ -208,7 +198,7 @@ def render(run_query):
     def render_beige_table(df, selected_col_name=None):
         cols = list(df.columns)
         period_cols = [c for c in cols if c != "Metric"]
-        html = ["<table class='beige-table'><thead><tr>"]
+        html = ["<table class='vahdam-d2c-table'><thead><tr>"]
         html.append("<th>Metric</th>")
         for c in period_cols:
             cls = "selected-col" if c == selected_col_name else ""
@@ -236,11 +226,15 @@ def render(run_query):
         month_minus3_start.strftime("%b %Y"):  [sum_spend(df_raw, month_minus3_start, month_minus3_end)],
     }
     df_metrics = pd.DataFrame(metrics_data)
-    st.subheader("💰 Metrics Summary")
+    st.markdown('<div class="section-hdr">💰 Metrics Summary</div>',
+                 unsafe_allow_html=True)
     render_beige_table(df_metrics, selected_col_name=selected_label)
 
     # ─── META PERFORMANCE ────────────────────────────────────────────────────
-    st.markdown("### 📈 Performance (Meta, AWAR excluded)")
+    st.markdown('<div class="section-hdr">📈 Meta Performance '
+                 '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                 '— AWAR campaigns excluded</span></div>',
+                 unsafe_allow_html=True)
 
     df_meta = run_query(f"""
         SELECT
@@ -308,9 +302,11 @@ def render(run_query):
     render_beige_table(df_perf, selected_col_name=selected_label)
 
     # ─── REVENUE ─────────────────────────────────────────────────────────────
-    st.markdown("### 💷 Revenue")
-    st.caption("All Purchase revenue data is coming from Shopify. "
-               "Total Coffee includes complete order value which contains any coffee item.")
+    st.markdown('<div class="section-hdr">💷 Revenue '
+                 '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                 '— Shopify orders · Coffee = any order containing a coffee SKU'
+                 '</span></div>',
+                 unsafe_allow_html=True)
 
     df_meta_pv = run_query(f"""
         SELECT
@@ -389,7 +385,8 @@ def render(run_query):
     render_beige_table(df_rev, selected_col_name=selected_label)
 
     # ─── ROAS · CR · AOV ─────────────────────────────────────────────────────
-    st.markdown("### 🎯 ROAS · CR · AOV")
+    st.markdown('<div class="section-hdr">🎯 ROAS · CR · AOV</div>',
+                 unsafe_allow_html=True)
 
     df_shopify_orders = run_query(f"""
         WITH first_orders AS (
@@ -511,7 +508,11 @@ def render(run_query):
     render_beige_table(df_roas, selected_col_name=selected_label)
 
     # ─── P&L ─────────────────────────────────────────────────────────────────
-    st.markdown("### 📊 P&L (UK static costs CSV · FX 124 INR/GBP · Last Mile £3.50/order)")
+    st.markdown('<div class="section-hdr">📊 P&amp;L Statement '
+                 '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                 '— UK static COGS · FX 124 INR/GBP · Last Mile £3.50/order'
+                 '</span></div>',
+                 unsafe_allow_html=True)
     FX_RATE = 124.0
     LAST_MILE_PER_ORDER = 3.50
 
@@ -628,8 +629,9 @@ def render(run_query):
     render_beige_table(df_pnl, selected_col_name=selected_label)
 
     # ─── COHORT LTV + SUBSCRIPTION RETENTION ─────────────────────────────────
-    st.markdown("---")
-    st.markdown("## Cohort LTV & Subscription Retention")
+    st.markdown('<div class="section-hdr" style="margin-top:24px;">'
+                 'Cohort LTV &amp; Subscription Retention'
+                 '</div>', unsafe_allow_html=True)
 
     _c1, _c2 = st.columns(2)
     with _c1:
@@ -644,7 +646,10 @@ def render(run_query):
         st.error("'From' date must be on or before 'To'.")
         st.stop()
 
-    st.markdown("### Cohort LTV — customers acquired in picker window")
+    st.markdown('<div class="section-hdr">Cohort LTV '
+                 '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                 '— customers acquired in picker window</span></div>',
+                 unsafe_allow_html=True)
     st.caption(
         "Customer = unique email (lowercased). "
         "Net revenue = order total − refunds. "
@@ -684,10 +689,33 @@ def render(run_query):
         cumulative_revenue = round(float(df_cohort_raw["REVENUE"].sum()), 2)
         ltv_per_customer   = round(cumulative_revenue / cohort_size, 2) if cohort_size else 0.0
 
-        _k1, _k2, _k3 = st.columns(3)
-        _k1.metric("Cohort size",        f"{cohort_size:,} unique customers (by email)")
-        _k2.metric("Cumulative revenue", f"£{cumulative_revenue:,.2f}")
-        _k3.metric("LTV per customer",   f"£{ltv_per_customer:.2f}")
+        # Cohort headline cards — Amazon-style `.pnl-strip` so they
+        # match the rest of the dashboard's KPI look. Inline HTML
+        # because the helper lives in app.py and we don't want a
+        # circular import; the class itself is already loaded by the
+        # main app's CSS.
+        def _strip(label, value, sub=None):
+            sub_html = (f'<div class="pnl-strip-sub">{sub}</div>'
+                        if sub else "")
+            return (f'<div class="pnl-strip">'
+                    f'<div class="pnl-strip-label">{label}</div>'
+                    f'<div class="pnl-strip-val">{value}</div>'
+                    f'{sub_html}</div>')
+
+        _k1, _k2, _k3 = st.columns(3, gap="small")
+        _k1.markdown(_strip("Cohort size",
+                             f"{cohort_size:,}",
+                             "unique customers (by email)"),
+                      unsafe_allow_html=True)
+        _k2.markdown(_strip("Cumulative revenue",
+                             f"£{cumulative_revenue:,.0f}",
+                             f"over the cohort lifetime"),
+                      unsafe_allow_html=True)
+        _k3.markdown(_strip("LTV per customer",
+                             f"£{ltv_per_customer:,.2f}",
+                             "cumulative · per acquired customer"),
+                      unsafe_allow_html=True)
+        st.markdown("")
 
         _cum_rev  = 0.0
         _ltv_rows = []
@@ -720,7 +748,10 @@ def render(run_query):
     )
 
     # ─── SUBSCRIPTION RETENTION ──────────────────────────────────────────────
-    st.markdown("### Subscription Retention — Mₙ rate (30-day plans, GBP, picker window)")
+    st.markdown('<div class="section-hdr">Subscription Retention '
+                 '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                 '— Mₙ rate · 30-day plans · GBP · picker window</span></div>',
+                 unsafe_allow_html=True)
     st.caption(
         f"Window: {cohort_from.strftime('%b %d, %Y')} → {cohort_to.strftime('%b %d, %Y')} · "
         "30-day plans only · source: Loop subscription contracts"
