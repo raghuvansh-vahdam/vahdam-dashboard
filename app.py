@@ -1180,6 +1180,9 @@ with st.sidebar:
     if st.button("DBR", use_container_width=True, key="nav_dbr"):
         st.session_state.view = "dbr"
         st.rerun()
+    if st.button("Category", use_container_width=True, key="nav_category"):
+        st.session_state.view = "category"
+        st.rerun()
     if st.button("New Business", use_container_width=True, key="nav_new_business"):
         st.session_state.view = "new_business"
         st.rerun()
@@ -8330,6 +8333,357 @@ def render_dbr():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# VIEW 5d — Category (sub-category performance for the category team)
+# ═══════════════════════════════════════════════════════════════════════════════
+def render_category():
+    """Category view — built for the category team. Shows headline KPIs
+    with vs-LY deltas, a sub-category performance chart with last-year
+    overlay, top movers ribbon, and a detailed sub-category table.
+
+    Hover the chart for the full breakdown (units + revenue for both
+    the selected date range and the same range last year). Reuses
+    `get_view2` for both periods so the math stays consistent with
+    Sub-Category drilldown."""
+    st.markdown('<div class="page-title">Category &amp; Sub-Category Performance</div>',
+                 unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="page-sub">'
+        f'<b>{d_from.strftime("%d %b %Y")} → {d_to.strftime("%d %b %Y")}</b>'
+        f' &nbsp;·&nbsp; vs LY: '
+        f'<b>{ly_d_from.strftime("%d %b %Y")} → {ly_d_to.strftime("%d %b %Y")}</b>'
+        f' &nbsp;·&nbsp; Currency: {"INR (₹)" if use_inr else "Local"}'
+        f' &nbsp;·&nbsp; Pace: {_period_len} days'
+        f'</div>',
+        unsafe_allow_html=True)
+
+    where    = build_where()
+    where_ly = build_where(date_from=ly_d_from, date_to=ly_d_to)
+
+    # ── Fetch current + LY data in parallel ──
+    _ph = st.empty()
+    _ph.markdown(skel_section(rows=8, kpi=True), unsafe_allow_html=True)
+    v2_now = get_view2(where,    sfx)
+    v2_ly  = get_view2(where_ly, sfx)
+    k_now  = get_kpis(where,     sfx)
+    k_ly   = get_kpis(where_ly,  sfx)
+    _ph.empty()
+
+    if v2_now.empty:
+        st.warning("📭 No sub-category data found for this selection. "
+                   "Try widening the GEO / Brand filters or the date range.")
+        return
+
+    # ── Top KPI strip (5 cards) — Revenue / Units / CM1% / ACoS% / CM2 Abs ──
+    # Each carries the LY value + a vs-LY delta line so the category
+    # team sees growth vs the same window last year at a glance.
+    if not k_now.empty:
+        k  = k_now.iloc[0]
+        kl = k_ly.iloc[0] if not k_ly.empty else None
+
+        def _pct_change(cur, prev):
+            c, p = _f(cur), _f(prev)
+            if c is None or p is None or p == 0: return None
+            return (c - p) / abs(p) * 100
+        def _pp(cur, prev):
+            c, p = _f(cur), _f(prev)
+            if c is None or p is None: return None
+            return c - p
+
+        sales_now = _f(k.get("SALES_ACT"))
+        sales_ly  = _f(kl.get("SALES_ACT")) if kl is not None else None
+        units_now = _f(k.get("UNITS_ACT"))
+        units_ly  = _f(kl.get("UNITS_ACT")) if kl is not None else None
+        cm1_now   = _f(k.get("CM1_ACT"))
+        cm1_ly    = _f(kl.get("CM1_ACT")) if kl is not None else None
+        acos_now  = _f(k.get("ACOS_ACT"))
+        acos_ly   = _f(kl.get("ACOS_ACT")) if kl is not None else None
+        cm2a_now  = _f(k.get("CM2_ABS_ACT"))
+        cm2a_ly   = _f(kl.get("CM2_ABS_ACT")) if kl is not None else None
+
+        st.markdown('<div class="section-hdr">Headline KPIs · vs Last Year</div>',
+                     unsafe_allow_html=True)
+        cards = st.columns(5, gap="small")
+        cards[0].markdown(strip_card(
+            "Revenue", fmt_lakhs(sales_now),
+            sub=(f"LY: {fmt_lakhs(sales_ly)}" if sales_ly is not None else None),
+            delta=_pct_change(sales_now, sales_ly),
+            delta_suffix="vs LY",
+            lm_value=(fmt_lakhs(sales_ly) if sales_ly is not None else None),
+        ), unsafe_allow_html=True)
+        cards[1].markdown(strip_card(
+            "Units", fmt_units(units_now),
+            sub=(f"LY: {fmt_units(units_ly)}" if units_ly is not None else None),
+            delta=_pct_change(units_now, units_ly),
+            delta_suffix="vs LY",
+            lm_value=(fmt_units(units_ly) if units_ly is not None else None),
+        ), unsafe_allow_html=True)
+        cards[2].markdown(strip_card(
+            "CM1%", fmt_pct(cm1_now),
+            sub=(f"LY: {fmt_pct(cm1_ly)}" if cm1_ly is not None else None),
+            delta=_pp(cm1_now, cm1_ly),
+            delta_suffix="pp vs LY",
+        ), unsafe_allow_html=True)
+        cards[3].markdown(strip_card(
+            "ACoS%", fmt_pct(acos_now),
+            sub=(f"LY: {fmt_pct(acos_ly)}" if acos_ly is not None else None),
+            delta=_pp(acos_now, acos_ly),
+            delta_suffix="pp vs LY",
+            vs_b_lower_better=True,
+        ), unsafe_allow_html=True)
+        cards[4].markdown(strip_card(
+            "CM2 Abs", fmt_lakhs(cm2a_now),
+            sub=(f"LY: {fmt_lakhs(cm2a_ly)}" if cm2a_ly is not None else None),
+            delta=_pct_change(cm2a_now, cm2a_ly),
+            delta_suffix="vs LY",
+            lm_value=(fmt_lakhs(cm2a_ly) if cm2a_ly is not None else None),
+        ), unsafe_allow_html=True)
+        st.markdown("")
+
+    # ── Merge current + LY data on SUB_CATEGORY ──
+    nw = v2_now[v2_now["SUB_CATEGORY"] != "GRAND TOTAL"].copy()
+    ly = v2_ly[v2_ly["SUB_CATEGORY"]   != "GRAND TOTAL"].copy()
+    for c in ("SALES_ACT", "UNITS_ACT", "CM1_PCT_ACT",
+              "ACOS_PCT_ACT", "CM2_PCT_ACT", "CM2_ACT"):
+        if c in nw.columns:
+            nw[c] = pd.to_numeric(nw[c], errors="coerce").fillna(0)
+        if c in ly.columns:
+            ly[c] = pd.to_numeric(ly[c], errors="coerce").fillna(0)
+
+    ly_keep = ly[["SUB_CATEGORY", "SALES_ACT", "UNITS_ACT",
+                  "CM1_PCT_ACT", "ACOS_PCT_ACT",
+                  "CM2_PCT_ACT", "CM2_ACT"]].rename(columns={
+        "SALES_ACT":    "SALES_LY",
+        "UNITS_ACT":    "UNITS_LY",
+        "CM1_PCT_ACT":  "CM1_LY",
+        "ACOS_PCT_ACT": "ACOS_LY",
+        "CM2_PCT_ACT":  "CM2_PCT_LY",
+        "CM2_ACT":      "CM2_ABS_LY",
+    })
+    m = nw.merge(ly_keep, on="SUB_CATEGORY", how="left")
+    m["SALES_LY"] = pd.to_numeric(m["SALES_LY"], errors="coerce").fillna(0)
+    m["UNITS_LY"] = pd.to_numeric(m["UNITS_LY"], errors="coerce").fillna(0)
+    m["SALES_DELTA"] = ((m["SALES_ACT"] - m["SALES_LY"])
+                         / m["SALES_LY"].replace(0, pd.NA) * 100)
+    m["UNITS_DELTA"] = ((m["UNITS_ACT"] - m["UNITS_LY"])
+                         / m["UNITS_LY"].replace(0, pd.NA) * 100)
+    m = m.sort_values("SALES_ACT", ascending=False).reset_index(drop=True)
+
+    # ── Sub-Category Performance Chart (current vs LY overlay) ──
+    if HAS_PLOTLY and not m.empty:
+        st.markdown(
+            '<div class="section-hdr">Sub-Category Performance '
+            '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+            '— current period (solid) vs same period last year '
+            f'({ly_d_from.strftime("%d %b")} – {ly_d_to.strftime("%d %b %Y")}, '
+            f'translucent saffron). Hover for full breakdown.'
+            '</span></div>', unsafe_allow_html=True)
+
+        srt = m.sort_values("SALES_ACT", ascending=True)  # bottom-to-top
+        # Color current-period bars by growth tier
+        def _bar_color(d):
+            if d is None or pd.isna(d): return "#7a6a50"
+            if d >=  5:  return "#1a7a3e"      # good growth
+            if d >= -5:  return "#AB8743"      # flat-ish
+            return "#8b1a1a"                    # decline
+        bar_colors = [_bar_color(d) for d in srt["SALES_DELTA"]]
+
+        # Rich hover: current + LY units + revenue, growth %
+        hover_text = []
+        for _, r in srt.iterrows():
+            growth = r["SALES_DELTA"]
+            growth_str = (f"{growth:+.1f}%" if pd.notna(growth) else "—")
+            arrow = ("▲" if pd.notna(growth) and growth >= 0 else "▼")
+            u_growth = r["UNITS_DELTA"]
+            u_growth_str = (f"{u_growth:+.1f}%" if pd.notna(u_growth) else "—")
+            u_arrow = ("▲" if pd.notna(u_growth) and u_growth >= 0 else "▼")
+            hover_text.append(
+                f"<b style='font-size:13px;'>{r['SUB_CATEGORY']}</b><br>"
+                f"<span style='color:#7a6a50;'>──────────────────</span><br>"
+                f"<span style='color:#7a6a50;'>Current "
+                f"({d_from.strftime('%d %b')} – {d_to.strftime('%d %b %Y')})</span><br>"
+                f"&nbsp;&nbsp;Revenue: <b>{fmt_lakhs(r['SALES_ACT'])}</b><br>"
+                f"&nbsp;&nbsp;Units:&nbsp;&nbsp;&nbsp; <b>{fmt_units(r['UNITS_ACT'])}</b><br>"
+                f"<br>"
+                f"<span style='color:#7a6a50;'>Last Year "
+                f"({ly_d_from.strftime('%d %b')} – {ly_d_to.strftime('%d %b %Y')})</span><br>"
+                f"&nbsp;&nbsp;Revenue: <b>{fmt_lakhs(r['SALES_LY'])}</b><br>"
+                f"&nbsp;&nbsp;Units:&nbsp;&nbsp;&nbsp; <b>{fmt_units(r['UNITS_LY'])}</b><br>"
+                f"<br>"
+                f"<b>Rev vs LY: {arrow} {growth_str}</b><br>"
+                f"<b>Units vs LY: {u_arrow} {u_growth_str}</b>"
+            )
+
+        fig = go.Figure()
+        # Ghost LY bar first so it sits behind the current bar
+        fig.add_trace(go.Bar(
+            x=srt["SALES_LY"], y=srt["SUB_CATEGORY"],
+            orientation="h", name="Last Year",
+            marker=dict(color="rgba(171,135,67,0.30)",
+                         line=dict(color="rgba(171,135,67,0.55)", width=1)),
+            text=[fmt_lakhs(v) for v in srt["SALES_LY"]],
+            textposition="outside",
+            textfont=dict(size=10, color="#7a6a50",
+                           family=_VAHDAM_FONT_FAMILY),
+            hoverinfo="skip",
+        ))
+        fig.add_trace(go.Bar(
+            x=srt["SALES_ACT"], y=srt["SUB_CATEGORY"],
+            orientation="h", name="Current",
+            marker=dict(color=bar_colors,
+                         line=dict(color="rgba(0,74,43,0.4)", width=1)),
+            text=[fmt_lakhs(v) for v in srt["SALES_ACT"]],
+            textposition="outside",
+            textfont=dict(size=11, color="#171717",
+                           family=_VAHDAM_FONT_FAMILY),
+            customdata=hover_text,
+            hovertemplate="%{customdata}<extra></extra>",
+        ))
+        n = len(srt)
+        fig.update_layout(
+            barmode="group", bargap=0.30, bargroupgap=0.06,
+            height=max(260, 60 + n * 42),
+            plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
+            font=dict(family=_VAHDAM_FONT_FAMILY, color="#171717"),
+            margin=dict(l=20, r=80, t=28, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                         xanchor="left", x=0, bgcolor="rgba(0,0,0,0)",
+                         font=dict(size=11)),
+            xaxis=dict(title="", gridcolor="rgba(171,135,67,0.15)",
+                        griddash="dot", zeroline=False, showline=False),
+            yaxis=dict(title="", tickfont=dict(size=13, color="#004A2B",
+                                                family=_VAHDAM_FONT_FAMILY),
+                        showline=False),
+            hoverlabel=dict(bgcolor="#FFFFFF", bordercolor="#004A2B",
+                             font=dict(size=12, family=_VAHDAM_FONT_FAMILY),
+                             align="left"),
+        )
+        vahdam_plotly(fig, key="cat_perf_chart")
+        st.caption(
+            "Solid bar color = growth tier: 🟢 ≥+5% vs LY · 🟡 −5% to +5% · 🔴 <−5%. "
+            "Saffron translucent bar = LY sales for the same calendar window. "
+            "Sub-categories sorted by current-period revenue."
+        )
+
+    # ── Top Movers Ribbon (Winners + Losers) ──
+    valid = m[m["SALES_LY"] > 0].copy()
+    if not valid.empty:
+        st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                    'Top Movers · Year over Year</div>',
+                    unsafe_allow_html=True)
+        top3 = valid.nlargest(3, "SALES_DELTA")
+        bot3 = valid.nsmallest(3, "SALES_DELTA")
+        wc, lc = st.columns(2, gap="medium")
+        with wc:
+            st.markdown('<div style="font-size:11px;font-weight:700;color:#004A2B;'
+                         'letter-spacing:1.5px;text-transform:uppercase;'
+                         'margin-bottom:8px;">🏆 Top 3 Winners</div>',
+                         unsafe_allow_html=True)
+            for _, r in top3.iterrows():
+                d = r["SALES_DELTA"]
+                st.markdown(
+                    f'<div style="background:#d6ece1;border-left:3px solid #1a7a3e;'
+                    f'padding:10px 14px;margin-bottom:8px;border-radius:6px;">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:baseline;">'
+                    f'<b style="color:#004A2B;font-size:14px;">{r["SUB_CATEGORY"]}</b>'
+                    f'<span style="color:#1a7a3e;font-weight:700;font-size:14px;">'
+                    f'▲ {d:+.1f}%</span></div>'
+                    f'<div style="font-size:11px;color:#5a4d35;margin-top:2px;">'
+                    f'{fmt_lakhs(r["SALES_ACT"])} · '
+                    f'<span style="color:#7a6a50;">LY {fmt_lakhs(r["SALES_LY"])}</span>'
+                    f'</div></div>',
+                    unsafe_allow_html=True)
+        with lc:
+            st.markdown('<div style="font-size:11px;font-weight:700;color:#8b1a1a;'
+                         'letter-spacing:1.5px;text-transform:uppercase;'
+                         'margin-bottom:8px;">⚠️ Bottom 3 Losers</div>',
+                         unsafe_allow_html=True)
+            for _, r in bot3.iterrows():
+                d = r["SALES_DELTA"]
+                arrow = "▼" if d < 0 else "▲"
+                st.markdown(
+                    f'<div style="background:#fde8e8;border-left:3px solid #8b1a1a;'
+                    f'padding:10px 14px;margin-bottom:8px;border-radius:6px;">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:baseline;">'
+                    f'<b style="color:#8b1a1a;font-size:14px;">{r["SUB_CATEGORY"]}</b>'
+                    f'<span style="color:#8b1a1a;font-weight:700;font-size:14px;">'
+                    f'{arrow} {d:+.1f}%</span></div>'
+                    f'<div style="font-size:11px;color:#5a4d35;margin-top:2px;">'
+                    f'{fmt_lakhs(r["SALES_ACT"])} · '
+                    f'<span style="color:#7a6a50;">LY {fmt_lakhs(r["SALES_LY"])}</span>'
+                    f'</div></div>',
+                    unsafe_allow_html=True)
+
+    # ── Sub-Category Detail Table ──
+    st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                'Sub-Category Detail Table '
+                '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                '— click any column header to sort'
+                '</span></div>', unsafe_allow_html=True)
+    disp = m.copy()
+    disp["Revenue"]     = disp["SALES_ACT"].apply(fmt_lakhs)
+    disp["LY Rev"]      = disp["SALES_LY"].apply(fmt_lakhs)
+    disp["Units"]       = disp["UNITS_ACT"].apply(fmt_units)
+    disp["LY Units"]    = disp["UNITS_LY"].apply(fmt_units)
+    disp["CM1%"]        = disp["CM1_PCT_ACT"].apply(fmt_pct)
+    disp["CM1% LY"]     = disp["CM1_LY"].apply(fmt_pct)
+    disp["ACoS%"]       = disp["ACOS_PCT_ACT"].apply(fmt_pct)
+    disp["ACoS% LY"]    = disp["ACOS_LY"].apply(fmt_pct)
+    disp["CM2%"]        = disp["CM2_PCT_ACT"].apply(fmt_pct)
+    disp["CM2 Abs"]     = disp["CM2_ACT"].apply(fmt_lakhs)
+    # Keep the deltas NUMERIC for native column sort + colored cells
+    disp["Rev vs LY"]   = pd.to_numeric(disp["SALES_DELTA"], errors="coerce")
+    disp["Units vs LY"] = pd.to_numeric(disp["UNITS_DELTA"], errors="coerce")
+
+    show_cols = ["SUB_CATEGORY",
+                 "Revenue", "LY Rev", "Rev vs LY",
+                 "Units", "LY Units", "Units vs LY",
+                 "CM1%", "CM1% LY",
+                 "ACoS%", "ACoS% LY",
+                 "CM2%", "CM2 Abs"]
+    table_df = (disp[show_cols]
+                .rename(columns={"SUB_CATEGORY": "Sub-Category"})
+                .reset_index(drop=True))
+
+    _rev_d = table_df["Rev vs LY"].reset_index(drop=True)
+    _uni_d = table_df["Units vs LY"].reset_index(drop=True)
+
+    def _style_cat(row):
+        s = [""] * len(row)
+        idx = row.index.tolist()
+        if "Rev vs LY" in idx:
+            s[idx.index("Rev vs LY")] = color_pp_delta(
+                _f(_rev_d.iloc[row.name]), attention=5, alarm=15)
+        if "Units vs LY" in idx:
+            s[idx.index("Units vs LY")] = color_pp_delta(
+                _f(_uni_d.iloc[row.name]), attention=5, alarm=15)
+        return s
+
+    st.dataframe(
+        table_df.style.apply(_style_cat, axis=1).hide(axis="index"),
+        use_container_width=True,
+        height=min(560, 50 + len(table_df) * 36),
+        hide_index=True,
+        column_config={
+            "Sub-Category": st.column_config.TextColumn(
+                "Sub-Category", width="medium", pinned=True),
+            "Rev vs LY":   st.column_config.NumberColumn(
+                "Rev vs LY", format="%+.1f%%",
+                help="Revenue growth vs the same date range last year."),
+            "Units vs LY": st.column_config.NumberColumn(
+                "Units vs LY", format="%+.1f%%",
+                help="Units growth vs the same date range last year."),
+        },
+    )
+    st.caption(
+        "🟢 ≥+5% growth · ⚪ −5% to +5% (gray, in tolerance) · "
+        "🟡 −15% to −5% · 🔴 <−15%. ACoS% includes PM + GADS / Sales "
+        "in both periods so the comparison is apples-to-apples. "
+        "All currency values follow the sidebar currency toggle "
+        f"(currently **{'INR (₹)' if use_inr else 'Local'}**)."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 5c — New Business (Coffee + Supplements)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Hard-coded list of New Business ASINs for USA (Supplements + 1 Coffee SKU).
@@ -10093,6 +10447,8 @@ try:
         render_pnl()
     elif view == "dbr":
         render_dbr()
+    elif view == "category":
+        render_category()
     elif view == "new_business":
         render_new_business()
     elif view == "price":
