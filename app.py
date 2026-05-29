@@ -3,7 +3,6 @@ import snowflake.connector
 import pandas as pd
 import calendar
 import math
-import textwrap
 from datetime import date, datetime, timedelta, timezone
 
 try:
@@ -43,11 +42,7 @@ def _check_password():
     # visually embedded in the central card via CSS (no separate empty
     # strip above it any more). Login-only CSS lives inside this
     # function so it does NOT leak into the authenticated app.
-    # textwrap.dedent strips the common leading-whitespace prefix that
-    # the Python function indentation adds. Without it markdown would
-    # treat every CSS line as a code block (4+ leading spaces = code in
-    # CommonMark) and render the styles as visible text on the page.
-    st.markdown(textwrap.dedent("""
+    st.markdown("""
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -321,7 +316,7 @@ def _check_password():
         .vahdam-poem { font-size: 13px; }
       }
     </style>
-    """), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
     # Reusable inline SVG markup for the leaves + emblem. Kept inline so
     # they paint immediately without a separate asset request.
