@@ -1053,6 +1053,87 @@ if "_url_synced" not in st.session_state:
         pass
     st.session_state._url_synced = True
 
+# ── Top-level domain tabs (Amazon / D2C) ──────────────────────────────────────
+# Two horizontal tabs rendered above every view. The Amazon side keeps
+# the full existing dashboard (sidebar + router below). Clicking D2C
+# delegates to d2c_uk.render(run_query) which paints its own beige
+# theme + Shopify / Meta / Google Ads dashboards using the same
+# Snowflake connection helper.
+if "top_tab" not in st.session_state:
+    st.session_state.top_tab = "amazon"
+
+# Styling: pill-shaped tabs sitting at the top of the main content area.
+# Saffron underline on the active tab so it visually anchors the page
+# without competing with the page-title below.
+st.markdown("""
+<style>
+.vahdam-toptabs {
+    display: flex; gap: 4px; align-items: center;
+    border-bottom: 1px solid #d6ccba;
+    margin: -8px 0 14px 0; padding: 0 0 0 0;
+}
+.vahdam-toptabs > div { flex: 0 0 auto; }
+.vahdam-toptabs [data-testid="stButton"] button {
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 3px solid transparent !important;
+    border-radius: 0 !important;
+    color: #7a6a50 !important;
+    font-weight: 600 !important;
+    font-size: 14px !important;
+    letter-spacing: 0.4px !important;
+    padding: 10px 22px !important;
+    box-shadow: none !important;
+    transition: color 0.2s ease, border-color 0.2s ease !important;
+}
+.vahdam-toptabs [data-testid="stButton"] button:hover {
+    color: #004A2B !important;
+    background: rgba(0,74,43,0.04) !important;
+    border-bottom-color: rgba(171,135,67,0.4) !important;
+    transform: none !important;
+}
+.vahdam-toptabs [data-testid="stButton"] button[kind="primary"] {
+    color: #004A2B !important;
+    border-bottom-color: #AB8743 !important;
+    background: rgba(171,135,67,0.06) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="vahdam-toptabs">', unsafe_allow_html=True)
+_tt_c1, _tt_c2, _tt_spacer = st.columns([1, 1, 8], gap="small")
+with _tt_c1:
+    if st.button("🛒  Amazon",
+                 use_container_width=True,
+                 key="top_tab_amazon",
+                 type=("primary" if st.session_state.top_tab == "amazon"
+                       else "secondary")):
+        st.session_state.top_tab = "amazon"
+        st.rerun()
+with _tt_c2:
+    if st.button("🛍  D2C  (UK)",
+                 use_container_width=True,
+                 key="top_tab_d2c",
+                 type=("primary" if st.session_state.top_tab == "d2c"
+                       else "secondary")):
+        st.session_state.top_tab = "d2c"
+        st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
+
+if st.session_state.top_tab == "d2c":
+    # Hide the Amazon sidebar entirely — D2C has its own date picker.
+    st.markdown(
+        '<style>section[data-testid="stSidebar"]'
+        '{display:none !important;}</style>',
+        unsafe_allow_html=True)
+    try:
+        import d2c_uk
+        d2c_uk.render(run_query)
+    except Exception as _d2c_err:
+        st.error(f"D2C dashboard failed to render: "
+                 f"{type(_d2c_err).__name__}: {_d2c_err}")
+    st.stop()
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.image("vahdam_logo.webp", use_container_width=True)
