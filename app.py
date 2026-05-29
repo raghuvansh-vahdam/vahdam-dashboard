@@ -3,6 +3,9 @@ import snowflake.connector
 import pandas as pd
 import calendar
 import math
+import hmac
+import hashlib
+import time
 from datetime import date, datetime, timedelta, timezone
 
 try:
@@ -20,11 +23,49 @@ st.set_page_config(
 )
 
 # ── Password gate ─────────────────────────────────────────────────────────────
+_AUTH_TOKEN_TTL = 86400  # 24 hours in seconds
+
+
+def _make_auth_token(secret):
+    """Build a URL-safe `<timestamp>.<hmac>` token. The HMAC is computed
+    over the timestamp with the dashboard password as the secret, so a
+    new token can only be forged by someone who already has the password.
+    Truncated to 32 hex chars (128 bits of HMAC-SHA256) — overkill for an
+    internal dashboard but cheap to verify."""
+    ts = int(time.time())
+    sig = hmac.new(secret.encode("utf-8"),
+                    str(ts).encode("utf-8"),
+                    hashlib.sha256).hexdigest()[:32]
+    return f"{ts}.{sig}"
+
+
+def _verify_auth_token(token, secret, max_age=_AUTH_TOKEN_TTL):
+    """Return True if `token` was minted by `_make_auth_token(secret)`
+    less than `max_age` seconds ago. Uses hmac.compare_digest so a wrong
+    token can't be timed."""
+    if not token or "." not in token:
+        return False
+    try:
+        ts_str, sig = token.split(".", 1)
+        ts = int(ts_str)
+    except (ValueError, AttributeError):
+        return False
+    if time.time() - ts > max_age:
+        return False
+    expected = hmac.new(secret.encode("utf-8"),
+                         str(ts).encode("utf-8"),
+                         hashlib.sha256).hexdigest()[:32]
+    return hmac.compare_digest(sig, expected)
+
+
 def _check_password():
     """Gate the entire app behind a shared password from secrets.
 
-    Sets st.session_state.auth_ok=True on success. Re-renders the login form
-    on every wrong attempt until the right password is entered.
+    Persistence: after a successful login we add a signed token to the
+    URL (`?auth=...`). On every subsequent page load — including hard
+    refreshes — that token is verified and, if valid + less than 24h
+    old, the password form is skipped entirely. The user can bookmark
+    the URL with the token and stay logged in until it expires.
     """
     try:
         expected = st.secrets["auth"]["password"]
@@ -33,6 +74,27 @@ def _check_password():
 
     if st.session_state.get("auth_ok"):
         return True
+
+    # ── Persistent-login check: read a signed token from the URL ──
+    # `st.query_params` returns a string for known keys (or None if
+    # absent). Streamlit treats repeated keys as lists, so we coerce.
+    try:
+        url_token = st.query_params.get("auth")
+        if isinstance(url_token, list):
+            url_token = url_token[0] if url_token else None
+    except Exception:
+        url_token = None
+    if url_token and _verify_auth_token(url_token, expected):
+        st.session_state.auth_ok = True
+        return True
+    # If a token was present but failed verification (expired / tampered),
+    # strip it from the URL so the user doesn't see the stale broken
+    # parameter sitting there after they re-authenticate.
+    if url_token:
+        try:
+            del st.query_params["auth"]
+        except Exception:
+            pass
 
     # Hide the sidebar on the login page. The previous version had a
     # `<div class="login-card">` markdown wrapper meant to wrap the
@@ -113,6 +175,12 @@ def _check_password():
             # Clear the typed password from session state for safety
             if "_pw_input" in st.session_state:
                 del st.session_state["_pw_input"]
+            # Mint a 24h URL token so refresh / bookmark keeps the user
+            # logged in. `st.query_params` writes survive the rerun.
+            try:
+                st.query_params["auth"] = _make_auth_token(expected)
+            except Exception:
+                pass
             st.rerun()
         else:
             st.error("❌ Incorrect password.")
