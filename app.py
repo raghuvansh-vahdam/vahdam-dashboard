@@ -34,22 +34,66 @@ def _check_password():
     if st.session_state.get("auth_ok"):
         return True
 
-    # Hide the sidebar on the login page
+    # Hide the sidebar on the login page. The previous version had a
+    # `<div class="login-card">` markdown wrapper meant to wrap the
+    # password input + button, but Streamlit native components render
+    # OUTSIDE markdown HTML — so the card showed up as an empty white
+    # rectangle floating above the actual input. We drop that empty div
+    # entirely and style Streamlit's own input + button wrappers as a
+    # single unified card via the `[data-testid=...]` selectors below.
     st.markdown("""
     <style>
       section[data-testid="stSidebar"] { display: none !important; }
       [data-testid="stAppViewContainer"] > .main { background:#FBF5EA; }
+
       .login-wrap { max-width: 380px; margin: 8vh auto 0 auto; text-align: center; }
       .login-logo { font-size: 32px; font-weight: 700; color: #004A2B;
                     letter-spacing: 4px; margin-bottom: 4px; }
       .login-sub  { font-size: 12px; color: #AB8743; letter-spacing: 3px;
                     text-transform: uppercase; margin-bottom: 28px; }
-      .login-card { background: #ffffff; border: 1px solid #d6ccba;
-                    border-top: 3px solid #004A2B; border-radius: 10px;
-                    padding: 24px 28px; box-shadow: 0 4px 14px rgba(0,74,43,0.10); }
-      .login-card label { font-size: 12px !important; color: #AB8743 !important;
-                          font-weight: 700; letter-spacing: 0.5px;
-                          text-transform: uppercase; }
+
+      /* Constrain the main block to the same 380px width so the input
+         and button visually line up under the wordmark. */
+      [data-testid="stMainBlockContainer"] {
+          max-width: 460px; margin: 0 auto;
+      }
+
+      /* The text-input wrapper is the new "card". White background,
+         soft amber border, dark-green top accent, soft shadow — same
+         visual identity as the old empty `.login-card` but now actually
+         containing the input. */
+      [data-testid="stTextInput"] {
+          background: #ffffff;
+          border: 1px solid #d6ccba;
+          border-top: 3px solid #004A2B;
+          border-radius: 10px;
+          padding: 18px 22px 14px 22px;
+          box-shadow: 0 4px 14px rgba(0,74,43,0.10);
+          margin-bottom: 12px;
+      }
+      [data-testid="stTextInput"] label {
+          font-size: 12px !important; color: #AB8743 !important;
+          font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+      }
+      [data-testid="stTextInput"] [data-baseweb="input"],
+      [data-testid="stTextInput"] input {
+          background: #FBF5EA !important;
+          border: 1px solid #E0D5BA !important;
+          border-radius: 8px !important;
+      }
+      [data-testid="stTextInput"] input:focus,
+      [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {
+          border-color: #004A2B !important;
+          box-shadow: 0 0 0 3px rgba(0,74,43,0.10) !important;
+      }
+
+      /* Unlock button — pair it visually with the card */
+      [data-testid="stButton"] button {
+          border-radius: 10px !important;
+          padding: 12px !important;
+          font-weight: 600 !important;
+          letter-spacing: 0.3px !important;
+      }
     </style>
     """, unsafe_allow_html=True)
 
@@ -57,7 +101,7 @@ def _check_password():
         '<div class="login-wrap">'
         '<div class="login-logo">VAHDAM</div>'
         '<div class="login-sub">Amazon P&amp;L Dashboard</div>'
-        '<div class="login-card">', unsafe_allow_html=True)
+        '</div>', unsafe_allow_html=True)
 
     pw = st.text_input("Password", type="password", key="_pw_input",
                        placeholder="Enter password to continue")
@@ -73,8 +117,8 @@ def _check_password():
         else:
             st.error("❌ Incorrect password.")
 
-    st.markdown('</div><div style="text-align:center;color:#7a6a50;font-size:11px;'
-                'margin-top:16px;">Internal dashboard · Vahdam India</div></div>',
+    st.markdown('<div style="text-align:center;color:#7a6a50;font-size:11px;'
+                'margin-top:16px;">Internal dashboard · Vahdam India</div>',
                 unsafe_allow_html=True)
     st.stop()
 
