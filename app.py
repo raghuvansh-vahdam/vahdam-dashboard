@@ -8417,11 +8417,12 @@ def render_category():
             delta_suffix="vs LY",
             lm_value=(fmt_units(units_ly) if units_ly is not None else None),
         ), unsafe_allow_html=True)
+        # CM1% and CM2 Abs are intentionally shown as plain value cards
+        # (no LY sub-line, no vs-LY delta). The YoY signal lives in the
+        # Revenue / Units / ACoS cards — adding LY for margin metrics
+        # crowds the strip without changing the action.
         cards[2].markdown(strip_card(
             "CM1%", fmt_pct(cm1_now),
-            sub=(f"LY: {fmt_pct(cm1_ly)}" if cm1_ly is not None else None),
-            delta=_pp(cm1_now, cm1_ly),
-            delta_suffix="pp vs LY",
         ), unsafe_allow_html=True)
         cards[3].markdown(strip_card(
             "ACoS%", fmt_pct(acos_now),
@@ -8432,10 +8433,6 @@ def render_category():
         ), unsafe_allow_html=True)
         cards[4].markdown(strip_card(
             "CM2 Abs", fmt_lakhs(cm2a_now),
-            sub=(f"LY: {fmt_lakhs(cm2a_ly)}" if cm2a_ly is not None else None),
-            delta=_pct_change(cm2a_now, cm2a_ly),
-            delta_suffix="vs LY",
-            lm_value=(fmt_lakhs(cm2a_ly) if cm2a_ly is not None else None),
         ), unsafe_allow_html=True)
         st.markdown("")
 
