@@ -8462,10 +8462,21 @@ def render_category():
     m = nw.merge(ly_keep, on="SUB_CATEGORY", how="left")
     m["SALES_LY"] = pd.to_numeric(m["SALES_LY"], errors="coerce").fillna(0)
     m["UNITS_LY"] = pd.to_numeric(m["UNITS_LY"], errors="coerce").fillna(0)
-    m["SALES_DELTA"] = ((m["SALES_ACT"] - m["SALES_LY"])
-                         / m["SALES_LY"].replace(0, pd.NA) * 100)
-    m["UNITS_DELTA"] = ((m["UNITS_ACT"] - m["UNITS_LY"])
-                         / m["UNITS_LY"].replace(0, pd.NA) * 100)
+    # Use float("nan") (NOT pd.NA) for the divide-by-zero guard. pd.NA
+    # would promote the resulting column to a Float64 nullable extension
+    # dtype, which DataFrame.nlargest / nsmallest can't sort and would
+    # raise TypeError later (e.g. when a Brand filter narrows the slice
+    # so some sub-cats have zero LY revenue).
+    _sales_ly_safe = m["SALES_LY"].replace(0, float("nan"))
+    _units_ly_safe = m["UNITS_LY"].replace(0, float("nan"))
+    m["SALES_DELTA"] = pd.to_numeric(
+        (m["SALES_ACT"] - m["SALES_LY"]) / _sales_ly_safe * 100,
+        errors="coerce",
+    ).astype("float64")
+    m["UNITS_DELTA"] = pd.to_numeric(
+        (m["UNITS_ACT"] - m["UNITS_LY"]) / _units_ly_safe * 100,
+        errors="coerce",
+    ).astype("float64")
     m = m.sort_values("SALES_ACT", ascending=False).reset_index(drop=True)
 
     # ── Sub-Category Performance Chart (current vs LY overlay) ──
@@ -8565,7 +8576,11 @@ def render_category():
         )
 
     # ── Top Movers Ribbon (Winners + Losers) ──
-    valid = m[m["SALES_LY"] > 0].copy()
+    # Filter on SALES_DELTA being finite too (defensive — guards against
+    # any NaN that might still slip past the float("nan") guard above).
+    valid = m[(m["SALES_LY"] > 0)
+              & m["SALES_DELTA"].notna()
+              & ~m["SALES_DELTA"].isin([float("inf"), float("-inf")])].copy()
     if not valid.empty:
         st.markdown('<div class="section-hdr" style="margin-top:18px;">'
                     'Top Movers · Year over Year</div>',
