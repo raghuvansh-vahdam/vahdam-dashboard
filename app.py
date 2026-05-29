@@ -1703,10 +1703,14 @@ def get_view1(where, sfx):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_view1_spark(where, sfx):
-    """Daily sales per GEO×CHANNEL for sparkline column."""
+    """Daily sales per GEO×CHANNEL for sparkline column.
+    Returns both Actual and Budget so the Daily Sales chart can plot the
+    budget trajectory alongside actuals — important when the selected
+    range is in the future and the actuals column is all zeros."""
     return run_query(f"""
         SELECT GEO, CHANNEL, DAY,
-               ROUND(SUM(SALES_ACTUAL_{sfx}),0) AS SALES_ACT
+               ROUND(SUM(SALES_ACTUAL_{sfx}),0) AS SALES_ACT,
+               ROUND(SUM(SALES_BUDGET_{sfx}),0) AS SALES_BUD
         FROM {TABLE} WHERE {where}
         GROUP BY GEO, CHANNEL, DAY
         ORDER BY DAY
@@ -3919,10 +3923,39 @@ def render_ceo():
                 with fc1:
                     st.markdown(fc_html, unsafe_allow_html=True)
 
+    # ── Future-date banner ──
+    # When the entire selected range is past `effective_today`, actuals
+    # are zero — both the Country Perf bars and the Daily Sales line
+    # would otherwise collapse to a flat line. We surface a banner
+    # explaining the view has switched to budget-only, and the charts
+    # below adapt: Country Perf bars sort by Budget Revenue, Daily
+    # Sales adds a Budget line so the trajectory still tells a story.
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    _now_ist = datetime.now(_IST)
+    if _now_ist.hour >= 15:
+        _eff_today = _now_ist.date() - timedelta(days=1)
+    else:
+        _eff_today = _now_ist.date() - timedelta(days=2)
+    _is_future_range = d_from > _eff_today
+    if _is_future_range:
+        st.markdown(
+            f'<div style="background:linear-gradient(135deg,#FBF5EA 0%,#F4E9CC 100%);'
+            f'border-left:3px solid #AB8743;border-radius:6px;padding:10px 14px;'
+            f'margin:14px 0 6px 0;font-size:12.5px;color:#5a4d35;line-height:1.5;">'
+            f'<b style="color:#7a5c00;">📅 Future date range selected.</b> '
+            f'No actuals exist for {d_from.strftime("%d %b")}–{d_to.strftime("%d %b %Y")} '
+            f'yet (the warehouse is at {_eff_today.strftime("%d %b %Y")}). '
+            f'KPI cards and charts below show <b>Budget (FMB)</b> figures '
+            f'for all GEOs so you can review the plan.'
+            f'</div>', unsafe_allow_html=True)
+
     # ── Country Performance · interactive (Plotly, hover for full KPIs) ──
     if not df.empty:
+        _section_label = ("Country Performance · Budget Allocation"
+                          if _is_future_range
+                          else "Country Performance · Revenue vs Budget")
         st.markdown('<div class="section-hdr" style="margin-top:18px;">'
-                    'Country Performance · Revenue vs Budget '
+                    f'{_section_label} '
                     '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
                     '— hover for full P&amp;L · click any bar to drill in</span>'
                     '</div>', unsafe_allow_html=True)
@@ -3957,33 +3990,60 @@ def render_ceo():
                     st.rerun()
 
     # ── Daily Sales sparkline ──
+    # Always plot BOTH Actual and Budget daily lines. When the range
+    # is in the future the Actual line is flat at zero, but the Budget
+    # line keeps the chart informative. Past/current ranges show the
+    # gap-to-plan visually.
     spark = get_view1_spark(where, sfx)
     if not spark.empty and HAS_PLOTLY:
-        spark["DAY"] = pd.to_datetime(spark["DAY"])
-        daily = spark.groupby("DAY")["SALES_ACT"].sum().reset_index()
-        peak  = daily["SALES_ACT"].abs().max() or 0
-        if peak >= 1e7:  div, unit = 1e7, "Cr"
+        spark["DAY"]       = pd.to_datetime(spark["DAY"])
+        spark["SALES_ACT"] = pd.to_numeric(spark["SALES_ACT"], errors="coerce").fillna(0)
+        spark["SALES_BUD"] = pd.to_numeric(spark.get("SALES_BUD", 0), errors="coerce").fillna(0)
+        daily = (spark.groupby("DAY")[["SALES_ACT", "SALES_BUD"]]
+                       .sum().reset_index())
+        peak  = max(daily["SALES_ACT"].abs().max() or 0,
+                    daily["SALES_BUD"].abs().max() or 0)
+        if peak >= 1e7:   div, unit = 1e7, "Cr"
         elif peak >= 1e5: div, unit = 1e5, "L"
         elif peak >= 1e3: div, unit = 1e3, "K"
         else:             div, unit = 1, ""
-        fig = go.Figure(go.Scatter(
+
+        fig = go.Figure()
+        # Budget line first (saffron dashed) — sits behind the actual.
+        fig.add_trace(go.Scatter(
+            x=daily["DAY"], y=daily["SALES_BUD"]/div,
+            mode="lines+markers", name="Budget",
+            line=dict(color="#AB8743", width=2, dash="dash"),
+            marker=dict(size=4, color="#AB8743"),
+            hovertemplate=(f"<b>%{{x|%d %b}}</b><br>"
+                            f"Budget: {sym}%{{y:.2f}}{unit}<extra></extra>"),
+        ))
+        # Actual line (forest green, filled area).
+        fig.add_trace(go.Scatter(
             x=daily["DAY"], y=daily["SALES_ACT"]/div,
-            mode="lines+markers", fill="tozeroy",
+            mode="lines+markers", name="Actual",
             line=dict(color="#004A2B", width=2.5),
             marker=dict(size=5, color="#004A2B"),
-            fillcolor="rgba(0,74,43,0.08)",
-            hovertemplate=f"<b>%{{x|%d %b}}</b><br>{sym}%{{y:.2f}}{unit}<extra></extra>",
+            fill="tozeroy", fillcolor="rgba(0,74,43,0.08)",
+            hovertemplate=(f"<b>%{{x|%d %b}}</b><br>"
+                            f"Actual: {sym}%{{y:.2f}}{unit}<extra></extra>"),
         ))
         fig.update_layout(
-            title=dict(text=f"<b>Daily Sales</b> (₹ {unit})",
+            title=dict(text=f"<b>Daily Sales · Actual vs Budget</b> (₹ {unit})",
                        font=dict(size=15, color="#004A2B")),
             plot_bgcolor="#FBF5EA", paper_bgcolor="#FBF5EA",
-            height=260, margin=dict(l=40, r=40, t=50, b=40),
-            showlegend=False,
+            height=280, margin=dict(l=40, r=40, t=50, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                         xanchor="left", x=0, bgcolor="rgba(0,0,0,0)",
+                         font=dict(size=11)),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#FFFFFF", bordercolor="#004A2B",
+                             font=dict(size=12)),
         )
-        fig.update_xaxes(showgrid=True, gridcolor="rgba(171,135,67,0.15)")
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(171,135,67,0.15)",
+                          griddash="dot")
         fig.update_yaxes(showgrid=True, gridcolor="rgba(171,135,67,0.15)",
-                          title_text=f"₹ {unit}".strip())
+                          griddash="dot", title_text=f"₹ {unit}".strip())
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     # ── AI Insights (#17) ──
