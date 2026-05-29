@@ -1056,11 +1056,14 @@ if "_url_synced" not in st.session_state:
 # ── Top-level domain tabs (Amazon / D2C) ──────────────────────────────────────
 # Two horizontal tabs rendered above every view. The Amazon side keeps
 # the full existing dashboard (sidebar + router below). Clicking D2C
-# delegates to d2c_uk.render(run_query) which paints its own beige
-# theme + Shopify / Meta / Google Ads dashboards using the same
-# Snowflake connection helper.
+# delegates to d2c_uk.render(run_query) or d2c_usa.render(run_query) —
+# both modules paint their own cream / green / saffron theme + Shopify /
+# Meta / Google Ads dashboards using the same Snowflake connection helper.
 if "top_tab" not in st.session_state:
     st.session_state.top_tab = "amazon"
+# Inside D2C: which geography to show. UK is the historical default.
+if "d2c_geo" not in st.session_state:
+    st.session_state.d2c_geo = "UK"
 
 # Styling: pill-shaped tabs sitting at the top of the main content area.
 # Saffron underline on the active tab so it visually anchors the page
@@ -1111,7 +1114,7 @@ with _tt_c1:
         st.session_state.top_tab = "amazon"
         st.rerun()
 with _tt_c2:
-    if st.button("🛍  D2C  (UK)",
+    if st.button("🛍  D2C",
                  use_container_width=True,
                  key="top_tab_d2c",
                  type=("primary" if st.session_state.top_tab == "d2c"
@@ -1126,9 +1129,69 @@ if st.session_state.top_tab == "d2c":
         '<style>section[data-testid="stSidebar"]'
         '{display:none !important;}</style>',
         unsafe_allow_html=True)
+
+    # ── D2C GEO selector (UK / USA) ─────────────────────────────────────
+    # A second-tier pill row sitting just under the Amazon/D2C tabs.
+    # Each geo gets its own module: d2c_uk.render(run_query) and
+    # d2c_usa.render(run_query). State key `d2c_geo` lives in
+    # st.session_state and persists across reruns.
+    st.markdown("""
+    <style>
+    .vahdam-geotabs {
+        display: flex; gap: 8px; align-items: center;
+        margin: 0 0 14px 0; padding: 4px 0;
+    }
+    .vahdam-geotabs [data-testid="stButton"] button {
+        background: #FBF5EA !important;
+        border: 1px solid #d6ccba !important;
+        color: #4a3520 !important;
+        font-weight: 600 !important;
+        font-size: 13px !important;
+        border-radius: 999px !important;
+        padding: 6px 18px !important;
+        box-shadow: none !important;
+    }
+    .vahdam-geotabs [data-testid="stButton"] button:hover {
+        border-color: #AB8743 !important;
+        color: #004A2B !important;
+        background: rgba(171,135,67,0.08) !important;
+    }
+    .vahdam-geotabs [data-testid="stButton"] button[kind="primary"] {
+        background: linear-gradient(180deg, #004A2B 0%, #2E7D32 100%) !important;
+        color: #FBF5EA !important;
+        border: 1px solid #003b22 !important;
+        box-shadow: 0 2px 6px rgba(0,74,43,0.18) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="vahdam-geotabs">', unsafe_allow_html=True)
+    _gc1, _gc2, _gspacer = st.columns([1, 1, 8], gap="small")
+    with _gc1:
+        if st.button("🇬🇧  D2C UK",
+                     use_container_width=True,
+                     key="d2c_geo_uk",
+                     type=("primary" if st.session_state.d2c_geo == "UK"
+                           else "secondary")):
+            st.session_state.d2c_geo = "UK"
+            st.rerun()
+    with _gc2:
+        if st.button("🇺🇸  D2C USA",
+                     use_container_width=True,
+                     key="d2c_geo_usa",
+                     type=("primary" if st.session_state.d2c_geo == "USA"
+                           else "secondary")):
+            st.session_state.d2c_geo = "USA"
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
     try:
-        import d2c_uk
-        d2c_uk.render(run_query)
+        if st.session_state.d2c_geo == "USA":
+            import d2c_usa
+            d2c_usa.render(run_query)
+        else:
+            import d2c_uk
+            d2c_uk.render(run_query)
     except Exception as _d2c_err:
         st.error(f"D2C dashboard failed to render: "
                  f"{type(_d2c_err).__name__}: {_d2c_err}")
