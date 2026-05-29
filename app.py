@@ -34,360 +34,34 @@ def _check_password():
     if st.session_state.get("auth_ok"):
         return True
 
-    # ── Login page: full visual redesign ──
-    # Load Playfair Display (serif) + Inter so the brand mark reads like
-    # a tea-house menu, not a software form. Botanical SVGs in the
-    # corners and a steaming tea-cup emblem at the top reinforce the
-    # Tea / Botanicals / Supplements identity. Password input is
-    # visually embedded in the central card via CSS (no separate empty
-    # strip above it any more). Login-only CSS lives inside this
-    # function so it does NOT leak into the authenticated app.
+    # Hide the sidebar on the login page
     st.markdown("""
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
       section[data-testid="stSidebar"] { display: none !important; }
-
-      /* ── Page canvas: layered cream gradient + botanical motif ── */
-      [data-testid="stAppViewContainer"],
-      [data-testid="stMain"],
-      [data-testid="stAppViewContainer"] > .main {
-        background:
-          radial-gradient(circle at 12% 88%, rgba(0,74,43,0.08) 0%, transparent 45%),
-          radial-gradient(circle at 88% 14%, rgba(171,135,67,0.10) 0%, transparent 48%),
-          radial-gradient(circle at 50% 50%, rgba(255,255,255,0.35) 0%, transparent 60%),
-          linear-gradient(180deg, #FCF8EE 0%, #F4ECD8 100%) !important;
-        background-attachment: fixed !important;
-      }
-      [data-testid="stMainBlockContainer"] { padding-top: 0 !important; }
-
-      /* ── Botanical leaves in the four corners ── */
-      .vahdam-leaf {
-        position: fixed;
-        width: 220px; height: 220px;
-        pointer-events: none;
-        z-index: 0;
-        opacity: 0.22;
-        filter: blur(0.2px);
-      }
-      .vahdam-leaf--tl { top: -42px;  left: -52px;  transform: rotate(-22deg); animation: vahdam-leaf-sway-a 9s ease-in-out infinite; }
-      .vahdam-leaf--tr { top: -36px;  right: -48px; transform: rotate(34deg);  animation: vahdam-leaf-sway-b 11s ease-in-out infinite; }
-      .vahdam-leaf--bl { bottom: -50px; left: -54px;  transform: rotate(155deg); animation: vahdam-leaf-sway-b 10s ease-in-out infinite; }
-      .vahdam-leaf--br { bottom: -42px; right: -50px; transform: rotate(-148deg); animation: vahdam-leaf-sway-a 12s ease-in-out infinite; }
-      @keyframes vahdam-leaf-sway-a {
-        0%, 100% { transform: rotate(var(--ang, -22deg)) translate(0, 0); }
-        50%      { transform: rotate(calc(var(--ang, -22deg) + 3.5deg)) translate(3px, -4px); }
-      }
-      @keyframes vahdam-leaf-sway-b {
-        0%, 100% { transform: rotate(var(--ang, 34deg)) translate(0, 0); }
-        50%      { transform: rotate(calc(var(--ang, 34deg) - 3.5deg)) translate(-3px, 4px); }
-      }
-      .vahdam-leaf--tl { --ang: -22deg; }
-      .vahdam-leaf--tr { --ang:  34deg; }
-      .vahdam-leaf--bl { --ang: 155deg; }
-      .vahdam-leaf--br { --ang: -148deg; }
-
-      /* ── Outer shell ── */
-      .vahdam-shell {
-        position: relative; z-index: 2;
-        max-width: 500px;
-        margin: 6vh auto 0 auto;
-        padding: 16px 28px 28px;
-        text-align: center;
-        animation: vahdam-fade-up 0.85s cubic-bezier(.2,.7,.2,1);
-      }
-      @keyframes vahdam-fade-up {
-        from { opacity: 0; transform: translateY(18px); }
-        to   { opacity: 1; transform: translateY(0); }
-      }
-
-      /* ── Steaming tea-cup emblem ── */
-      .vahdam-emblem {
-        width: 78px; height: 78px;
-        margin: 14px auto 18px;
-        display: flex; align-items: center; justify-content: center;
-      }
-      .vahdam-emblem .steam path {
-        opacity: 0.7;
-        transform-origin: bottom center;
-        animation: steam-rise 2.6s ease-in-out infinite;
-      }
-      .vahdam-emblem .steam path:nth-child(2) { animation-delay: -0.9s; }
-      .vahdam-emblem .steam path:nth-child(3) { animation-delay: -1.8s; }
-      @keyframes steam-rise {
-        0%   { transform: translateY(0)     scaleY(1);    opacity: 0.0; }
-        25%  { transform: translateY(-2px)  scaleY(1.05); opacity: 0.85; }
-        70%  { transform: translateY(-6px)  scaleY(1.10); opacity: 0.5; }
-        100% { transform: translateY(-10px) scaleY(1.15); opacity: 0.0; }
-      }
-
-      /* ── Brand mark ── */
-      .vahdam-logo {
-        font-family: 'Playfair Display', Georgia, 'Times New Roman', serif;
-        font-size: 56px;
-        font-weight: 600;
-        color: #004A2B;
-        letter-spacing: 14px;
-        line-height: 1;
-        margin: 0 0 6px;
-        text-indent: 14px;   /* visual balance with the wide tracking */
-        text-shadow: 0 1px 0 rgba(255,255,255,0.4);
-      }
-      .vahdam-tagline {
-        font-family: 'Inter', sans-serif;
-        font-size: 10.5px;
-        font-weight: 700;
-        color: #AB8743;
-        letter-spacing: 5.5px;
-        text-transform: uppercase;
-        margin-bottom: 20px;
-      }
-
-      /* ── Decorative divider (three dots + thin lines) ── */
-      .vahdam-divider {
-        display: flex; align-items: center; justify-content: center;
-        gap: 10px; margin: 12px auto 18px; width: 60%;
-      }
-      .vahdam-divider .line {
-        flex: 1; height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(171,135,67,0.5), transparent);
-      }
-      .vahdam-divider .dot {
-        width: 5px; height: 5px; border-radius: 50%;
-        background: #AB8743; opacity: 0.6;
-      }
-      .vahdam-divider .leaf-icon {
-        width: 14px; height: 14px;
-        color: #AB8743; opacity: 0.7;
-      }
-
-      /* ── Tagline ── */
-      .vahdam-poem {
-        font-family: 'Playfair Display', Georgia, serif;
-        font-size: 15px;
-        font-style: italic;
-        font-weight: 400;
-        color: #5a4d35;
-        line-height: 1.65;
-        margin: 4px 0 26px;
-        letter-spacing: 0.2px;
-      }
-      .vahdam-poem b {
-        color: #004A2B; font-style: normal; font-weight: 600;
-        letter-spacing: 0.4px;
-      }
-
-      /* ── Login card: the password input + button get visually wrapped
-            in a single glass card via the surrounding empty markdown
-            divs `.vahdam-card-top` / `.vahdam-card-bot` plus z-index
-            stacking so Streamlit's native input sits inside the card. ── */
-      .vahdam-card-frame {
-        position: relative;
-        background: rgba(255, 253, 247, 0.88);
-        border: 1px solid rgba(171,135,67,0.30);
-        border-radius: 18px;
-        padding: 28px 28px 22px;
-        margin: 4px 0 12px;
-        backdrop-filter: blur(10px);
-        box-shadow:
-          0 20px 50px rgba(0,74,43,0.10),
-          0 6px 14px rgba(0,74,43,0.06),
-          inset 0 1px 0 rgba(255,255,255,0.7);
-      }
-      .vahdam-card-frame::before {
-        content: ""; position: absolute;
-        top: 0; left: 28px; right: 28px;
-        height: 3px;
-        background: linear-gradient(90deg,
-          transparent 0%, #AB8743 25%, #004A2B 50%, #AB8743 75%, transparent 100%);
-        opacity: 0.85;
-        border-radius: 3px;
-      }
-      .vahdam-card-hdr {
-        font-family: 'Playfair Display', Georgia, serif;
-        font-size: 18px;
-        font-weight: 600;
-        color: #004A2B;
-        margin-bottom: 4px;
-        letter-spacing: 0.3px;
-      }
-      .vahdam-card-sub {
-        font-family: 'Inter', sans-serif;
-        font-size: 11px;
-        color: #AB8743;
-        letter-spacing: 2px;
-        text-transform: uppercase;
-        margin-bottom: 14px;
-        font-weight: 600;
-      }
-
-      /* ── Style Streamlit's native input + button (login page only) ── */
-      .vahdam-shell [data-testid="stTextInput"] label {
-        font-family: 'Inter', sans-serif;
-        font-size: 10.5px !important;
-        font-weight: 700 !important;
-        color: #AB8743 !important;
-        letter-spacing: 2.5px;
-        text-transform: uppercase;
-        margin-bottom: 6px;
-      }
-      .vahdam-shell [data-testid="stTextInput"] input,
-      .vahdam-shell [data-baseweb="input"] {
-        background: #FFFFFF !important;
-        border: 1.5px solid #E0D5BA !important;
-        border-radius: 12px !important;
-        padding: 14px 18px !important;
-        font-size: 15px !important;
-        font-family: 'Inter', sans-serif !important;
-        color: #1a1a1a !important;
-        transition: all 0.2s ease !important;
-        box-shadow: 0 1px 2px rgba(0,74,43,0.04) inset !important;
-      }
-      .vahdam-shell [data-testid="stTextInput"] input::placeholder {
-        color: #B5A98E !important;
-        font-style: italic;
-      }
-      .vahdam-shell [data-testid="stTextInput"] input:focus,
-      .vahdam-shell [data-baseweb="input"]:focus-within {
-        border-color: #004A2B !important;
-        box-shadow:
-          0 0 0 4px rgba(0,74,43,0.08),
-          0 2px 6px rgba(0,74,43,0.10) !important;
-        outline: none !important;
-      }
-
-      .vahdam-shell [data-testid="stButton"] button {
-        background: linear-gradient(135deg, #004A2B 0%, #2E7D32 100%) !important;
-        border: none !important;
-        border-radius: 12px !important;
-        padding: 14px 20px !important;
-        font-family: 'Inter', sans-serif !important;
-        font-size: 14px !important;
-        font-weight: 600 !important;
-        letter-spacing: 1.2px !important;
-        text-transform: uppercase !important;
-        color: #FBF5EA !important;
-        box-shadow: 0 8px 18px rgba(0,74,43,0.24) !important;
-        transition: all 0.22s ease !important;
-        margin-top: 6px;
-      }
-      .vahdam-shell [data-testid="stButton"] button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 12px 28px rgba(0,74,43,0.32) !important;
-        background: linear-gradient(135deg, #003a22 0%, #2E7D32 100%) !important;
-      }
-      .vahdam-shell [data-testid="stButton"] button:active {
-        transform: translateY(0);
-      }
-
-      /* ── Error message styling ── */
-      .vahdam-shell [data-testid="stAlertContainer"] {
-        background: rgba(255, 235, 235, 0.85) !important;
-        border-left: 3px solid #8b1a1a !important;
-        border-radius: 8px !important;
-        margin-top: 12px;
-      }
-
-      /* ── Foot badge ── */
-      .vahdam-foot {
-        margin-top: 28px;
-        text-align: center;
-        font-family: 'Inter', sans-serif;
-        font-size: 10.5px;
-        color: #AB8743;
-        letter-spacing: 3px;
-        text-transform: uppercase;
-        opacity: 0.85;
-      }
-      .vahdam-foot .heart { color: #8b1a1a; }
-      .vahdam-foot .est {
-        display: block; margin-top: 6px;
-        font-family: 'Playfair Display', serif;
-        font-style: italic; font-size: 10.5px;
-        letter-spacing: 1.4px; text-transform: none;
-        color: #7a6a50;
-      }
-
-      /* Mobile: shrink corner leaves + tighter padding */
-      @media (max-width: 600px) {
-        .vahdam-leaf { width: 140px; height: 140px; }
-        .vahdam-shell { padding: 8px 18px 20px; }
-        .vahdam-logo { font-size: 40px; letter-spacing: 10px; }
-        .vahdam-poem { font-size: 13px; }
-      }
+      [data-testid="stAppViewContainer"] > .main { background:#FBF5EA; }
+      .login-wrap { max-width: 380px; margin: 8vh auto 0 auto; text-align: center; }
+      .login-logo { font-size: 32px; font-weight: 700; color: #004A2B;
+                    letter-spacing: 4px; margin-bottom: 4px; }
+      .login-sub  { font-size: 12px; color: #AB8743; letter-spacing: 3px;
+                    text-transform: uppercase; margin-bottom: 28px; }
+      .login-card { background: #ffffff; border: 1px solid #d6ccba;
+                    border-top: 3px solid #004A2B; border-radius: 10px;
+                    padding: 24px 28px; box-shadow: 0 4px 14px rgba(0,74,43,0.10); }
+      .login-card label { font-size: 12px !important; color: #AB8743 !important;
+                          font-weight: 700; letter-spacing: 0.5px;
+                          text-transform: uppercase; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Reusable inline SVG markup for the leaves + emblem. Kept inline so
-    # they paint immediately without a separate asset request.
-    _LEAF_SVG = """<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
-        <defs>
-          <linearGradient id="vlg" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%"  stop-color="#004A2B" stop-opacity="0.85"/>
-            <stop offset="100%" stop-color="#1a7a3e" stop-opacity="0.55"/>
-          </linearGradient>
-        </defs>
-        <path d="M50 6 C30 22 20 48 27 76 C34 92 50 96 50 96 C50 96 66 92 73 76 C80 48 70 22 50 6 Z"
-              fill="url(#vlg)"/>
-        <path d="M50 6 L50 96" stroke="#003a22" stroke-width="0.7" opacity="0.45"/>
-        <path d="M50 22 Q38 28 32 38" stroke="#003a22" stroke-width="0.4" opacity="0.32" fill="none"/>
-        <path d="M50 22 Q62 28 68 38" stroke="#003a22" stroke-width="0.4" opacity="0.32" fill="none"/>
-        <path d="M50 42 Q35 50 28 58" stroke="#003a22" stroke-width="0.4" opacity="0.32" fill="none"/>
-        <path d="M50 42 Q65 50 72 58" stroke="#003a22" stroke-width="0.4" opacity="0.32" fill="none"/>
-        <path d="M50 64 Q38 70 33 78" stroke="#003a22" stroke-width="0.4" opacity="0.28" fill="none"/>
-        <path d="M50 64 Q62 70 67 78" stroke="#003a22" stroke-width="0.4" opacity="0.28" fill="none"/>
-      </svg>"""
-
-    _CUP_SVG = """<svg viewBox="0 0 90 90" xmlns="http://www.w3.org/2000/svg" width="78" height="78">
-        <g class="steam" fill="none" stroke="#AB8743" stroke-width="2.2" stroke-linecap="round">
-          <path d="M28 22 Q30 16 28 8" />
-          <path d="M44 20 Q46 12 44 4" />
-          <path d="M60 22 Q62 16 60 8" />
-        </g>
-        <path d="M16 32 L74 32 L70 70 Q70 76 64 76 L26 76 Q20 76 20 70 Z"
-              fill="#004A2B" stroke="#003a22" stroke-width="1.2" stroke-linejoin="round"/>
-        <path d="M74 42 Q86 42 86 56 Q86 70 74 68"
-              fill="none" stroke="#004A2B" stroke-width="3" stroke-linecap="round"/>
-        <ellipse cx="45" cy="80" rx="36" ry="3" fill="#AB8743" opacity="0.55"/>
-        <path d="M26 36 L28 64" stroke="#FBF5EA" stroke-width="1.2" opacity="0.32"/>
-        <path d="M30 38 Q45 36 60 38" stroke="#AB8743" stroke-width="1" opacity="0.6" fill="none"/>
-      </svg>"""
-
-    # Corner leaves — rendered first so they sit behind the central shell.
     st.markdown(
-        f'<div class="vahdam-leaf vahdam-leaf--tl">{_LEAF_SVG}</div>'
-        f'<div class="vahdam-leaf vahdam-leaf--tr">{_LEAF_SVG}</div>'
-        f'<div class="vahdam-leaf vahdam-leaf--bl">{_LEAF_SVG}</div>'
-        f'<div class="vahdam-leaf vahdam-leaf--br">{_LEAF_SVG}</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f'<div class="vahdam-shell">'
-        f'  <div class="vahdam-emblem">{_CUP_SVG}</div>'
-        f'  <h1 class="vahdam-logo">VAHDAM</h1>'
-        f'  <div class="vahdam-tagline">Tea · Botanicals · Supplements</div>'
-        f'  <div class="vahdam-divider">'
-        f'    <span class="line"></span>'
-        f'    <span class="dot"></span>'
-        f'    <span class="dot"></span>'
-        f'    <span class="dot"></span>'
-        f'    <span class="line"></span>'
-        f'  </div>'
-        f'  <div class="vahdam-poem">'
-        f'    Sourced from the <b>Himalayas</b>.<br>'
-        f'    Crafted in <b>India</b>. &nbsp;Served <b>worldwide</b>.'
-        f'  </div>'
-        f'  <div class="vahdam-card-frame">'
-        f'    <div class="vahdam-card-hdr">Welcome back</div>'
-        f'    <div class="vahdam-card-sub">Amazon P&amp;L Dashboard</div>',
-        unsafe_allow_html=True,
-    )
+        '<div class="login-wrap">'
+        '<div class="login-logo">VAHDAM</div>'
+        '<div class="login-sub">Amazon P&amp;L Dashboard</div>'
+        '<div class="login-card">', unsafe_allow_html=True)
 
     pw = st.text_input("Password", type="password", key="_pw_input",
                        placeholder="Enter password to continue")
-    submitted = st.button("🔓 Unlock Dashboard",
-                          use_container_width=True, type="primary")
+    submitted = st.button("🔓 Unlock", use_container_width=True, type="primary")
 
     if submitted:
         if pw == expected:
@@ -397,17 +71,11 @@ def _check_password():
                 del st.session_state["_pw_input"]
             st.rerun()
         else:
-            st.error("❌ Incorrect password. Please try again.")
+            st.error("❌ Incorrect password.")
 
-    st.markdown(
-        '  </div>'  # close .vahdam-card-frame
-        '  <div class="vahdam-foot">'
-        '    Internal Dashboard · Vahdam <span class="heart">♥</span> India'
-        '    <span class="est">— est. 2015 · with love from the foothills of the Himalayas —</span>'
-        '  </div>'
-        '</div>',  # close .vahdam-shell
-        unsafe_allow_html=True,
-    )
+    st.markdown('</div><div style="text-align:center;color:#7a6a50;font-size:11px;'
+                'margin-top:16px;">Internal dashboard · Vahdam India</div></div>',
+                unsafe_allow_html=True)
     st.stop()
 
 _check_password()
