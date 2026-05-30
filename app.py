@@ -1053,17 +1053,211 @@ if "_url_synced" not in st.session_state:
         pass
     st.session_state._url_synced = True
 
-# ── Top-level domain tabs (Amazon / D2C) ──────────────────────────────────────
-# Two horizontal tabs rendered above every view. The Amazon side keeps
-# the full existing dashboard (sidebar + router below). Clicking D2C
-# delegates to d2c_uk.render(run_query) or d2c_usa.render(run_query) —
-# both modules paint their own cream / green / saffron theme + Shopify /
-# Meta / Google Ads dashboards using the same Snowflake connection helper.
+# ── Channel landing page + Top-level domain tabs (Amazon / D2C / TikTok) ─────
+# After login, the user lands on a channel-picker page with three cards
+# (Amazon, D2C, TikTok). Once a channel is chosen, ``channel_chosen``
+# flips True and the normal dashboard renders. A "← Channels" button in
+# the tab row lets the user return to the picker any time.
+#
+# Routing:
+#   channel_chosen=False                            → landing page (this file)
+#   top_tab == "amazon"   (default after picker)    → Amazon dashboard (below)
+#   top_tab == "d2c"                                → d2c_uk.py / d2c_usa.py
+#   top_tab == "tiktok"                             → TikTok "Coming Soon" page
 if "top_tab" not in st.session_state:
     st.session_state.top_tab = "amazon"
+if "channel_chosen" not in st.session_state:
+    st.session_state.channel_chosen = False
 # Inside D2C: which geography to show. UK is the historical default.
 if "d2c_geo" not in st.session_state:
     st.session_state.d2c_geo = "UK"
+
+# ── LANDING PAGE (channel picker, shown right after login) ──────────────────
+if not st.session_state.channel_chosen:
+    # Hide sidebar entirely on the picker page — it's distracting and
+    # not useful until the user has picked a channel.
+    st.markdown(
+        '<style>section[data-testid="stSidebar"]'
+        '{display:none !important;}</style>',
+        unsafe_allow_html=True)
+
+    st.markdown("""
+    <style>
+    .channel-hero {
+        text-align: center;
+        margin: 24px 0 28px 0;
+    }
+    .channel-hero h1 {
+        font-family: 'Playfair Display', 'Georgia', serif;
+        font-size: 38px; font-weight: 700;
+        color: #004A2B; margin: 6px 0 4px 0;
+        letter-spacing: 0.2px;
+    }
+    .channel-hero p {
+        color: #7a6a50; font-size: 14px;
+        letter-spacing: 0.6px; text-transform: uppercase;
+        margin: 0;
+    }
+    .channel-card {
+        background: #FFFFFF;
+        border: 1px solid #d6ccba;
+        border-top: 3px solid #004A2B;
+        border-radius: 14px;
+        padding: 30px 22px 18px 22px;
+        text-align: center;
+        box-shadow: 0 4px 14px rgba(0,74,43,0.08);
+        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        min-height: 240px;
+        display: flex; flex-direction: column; justify-content: space-between;
+    }
+    .channel-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 12px 26px rgba(0,74,43,0.16);
+        border-color: #AB8743;
+    }
+    .channel-card.coming-soon {
+        background: linear-gradient(135deg, #FBF5EA 0%, #f4eed8 100%);
+        border-top-color: #AB8743;
+    }
+    .channel-icon {
+        font-size: 60px; line-height: 1; margin-bottom: 10px;
+    }
+    .channel-title {
+        font-family: 'Playfair Display', 'Georgia', serif;
+        font-size: 22px; font-weight: 700;
+        color: #004A2B; margin-bottom: 6px;
+        letter-spacing: 0.3px;
+    }
+    .channel-desc {
+        color: #5a4d35; font-size: 12.5px; line-height: 1.55;
+        min-height: 70px;
+    }
+    .channel-badge {
+        display: inline-block;
+        background: #AB8743; color: #FBF5EA;
+        font-size: 10px; font-weight: 700;
+        padding: 3px 10px; border-radius: 999px;
+        letter-spacing: 0.8px; text-transform: uppercase;
+        margin-bottom: 10px;
+    }
+    .channel-row [data-testid="stButton"] button {
+        background: linear-gradient(180deg, #004A2B 0%, #2E7D32 100%) !important;
+        color: #FBF5EA !important;
+        border: 1px solid #003b22 !important;
+        border-radius: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.4px !important;
+        padding: 10px 18px !important;
+        box-shadow: 0 2px 6px rgba(0,74,43,0.18) !important;
+        transition: all 0.18s ease !important;
+    }
+    .channel-row [data-testid="stButton"] button:hover {
+        background: linear-gradient(180deg, #003b22 0%, #1e6b22 100%) !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 12px rgba(0,74,43,0.28) !important;
+    }
+    .channel-row .disabled-btn [data-testid="stButton"] button {
+        background: #d6ccba !important;
+        color: #7a6a50 !important;
+        border: 1px solid #c0b39a !important;
+        cursor: not-allowed !important;
+    }
+    .channel-row .disabled-btn [data-testid="stButton"] button:hover {
+        background: #d6ccba !important;
+        transform: none !important;
+        box-shadow: none !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Logo (smaller + centered)
+    _llc1, _llc2, _llc3 = st.columns([3, 2, 3])
+    with _llc2:
+        try:
+            st.image("vahdam_logo.webp", use_container_width=True)
+        except Exception:
+            pass
+
+    st.markdown(
+        '<div class="channel-hero">'
+        '<h1>Vahdam Dashboard</h1>'
+        '<p>Select a channel to continue</p>'
+        '</div>',
+        unsafe_allow_html=True)
+
+    st.markdown('<div class="channel-row">', unsafe_allow_html=True)
+    _ccol_pad_l, _cc1, _cc2, _cc3, _ccol_pad_r = st.columns([1, 3, 3, 3, 1], gap="large")
+
+    # ── AMAZON ──────────────────────────────────────────────────────────
+    with _cc1:
+        st.markdown("""
+        <div class="channel-card">
+            <div>
+                <div class="channel-icon">🛒</div>
+                <div class="channel-title">Amazon</div>
+                <div class="channel-desc">
+                    India · USA · UK · CA · UAE · AU · EU<br>
+                    P&amp;L · DBR · Sub-Cat · ASINs · Customer Insights · Price Tracker
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Open Amazon  →", key="channel_card_amazon",
+                     use_container_width=True):
+            st.session_state.channel_chosen = True
+            st.session_state.top_tab = "amazon"
+            st.rerun()
+
+    # ── D2C ─────────────────────────────────────────────────────────────
+    with _cc2:
+        st.markdown("""
+        <div class="channel-card">
+            <div>
+                <div class="channel-icon">🛍️</div>
+                <div class="channel-title">D2C</div>
+                <div class="channel-desc">
+                    UK &amp; USA Shopify storefronts<br>
+                    Coffee · Tea &amp; Botanicals · Supplements ·
+                    Cohort LTV · Subscription Retention
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Open D2C  →", key="channel_card_d2c",
+                     use_container_width=True):
+            st.session_state.channel_chosen = True
+            st.session_state.top_tab = "d2c"
+            st.rerun()
+
+    # ── TIKTOK (placeholder) ────────────────────────────────────────────
+    with _cc3:
+        st.markdown("""
+        <div class="channel-card coming-soon">
+            <div>
+                <span class="channel-badge">Coming Soon</span>
+                <div class="channel-icon">🎵</div>
+                <div class="channel-title">TikTok Shop</div>
+                <div class="channel-desc">
+                    Data integration in progress.<br>
+                    Spend · GMV · CR · Creator performance — landing here soon.
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Preview TikTok  →", key="channel_card_tiktok",
+                     use_container_width=True):
+            st.session_state.channel_chosen = True
+            st.session_state.top_tab = "tiktok"
+            st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="text-align:center;color:#7a6a50;font-size:11px;'
+        'letter-spacing:1.4px;text-transform:uppercase;margin-top:36px;">'
+        'Internal dashboard · Vahdam India</div>',
+        unsafe_allow_html=True)
+    st.stop()
 
 # Styling: pill-shaped tabs sitting at the top of the main content area.
 # Saffron underline on the active tab so it visually anchors the page
@@ -1104,7 +1298,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="vahdam-toptabs">', unsafe_allow_html=True)
-_tt_c1, _tt_c2, _tt_spacer = st.columns([1, 1, 8], gap="small")
+# 4 slots: Home (back to channel picker) + Amazon + D2C + TikTok, then
+# a flexible spacer to push the pills left.
+_tt_home, _tt_c1, _tt_c2, _tt_c3, _tt_spacer = st.columns([1, 1, 1, 1, 6], gap="small")
+with _tt_home:
+    if st.button("← Channels",
+                 use_container_width=True,
+                 key="top_tab_home"):
+        st.session_state.channel_chosen = False
+        st.rerun()
 with _tt_c1:
     if st.button("🛒  Amazon",
                  use_container_width=True,
@@ -1121,7 +1323,48 @@ with _tt_c2:
                        else "secondary")):
         st.session_state.top_tab = "d2c"
         st.rerun()
+with _tt_c3:
+    if st.button("🎵  TikTok",
+                 use_container_width=True,
+                 key="top_tab_tiktok",
+                 type=("primary" if st.session_state.top_tab == "tiktok"
+                       else "secondary")):
+        st.session_state.top_tab = "tiktok"
+        st.rerun()
 st.markdown('</div>', unsafe_allow_html=True)
+
+if st.session_state.top_tab == "tiktok":
+    # TikTok integration is not built yet — render a friendly
+    # "Coming Soon" page. Sidebar stays hidden since there are no
+    # filters to apply.
+    st.markdown(
+        '<style>section[data-testid="stSidebar"]'
+        '{display:none !important;}</style>',
+        unsafe_allow_html=True)
+    st.markdown("""
+    <div style="text-align:center; padding: 80px 20px 40px 20px;">
+        <div style="font-size: 120px; line-height: 1; margin-bottom: 12px;">🎵</div>
+        <h1 style="font-family:'Playfair Display','Georgia',serif;
+                   color:#004A2B; font-size: 36px; margin: 0 0 6px 0;">
+            TikTok Shop &mdash; Coming Soon
+        </h1>
+        <p style="color:#7a6a50; font-size: 14px; max-width: 560px;
+                  margin: 8px auto 24px auto; line-height: 1.6;">
+            We're wiring up the TikTok data pipeline. Once it lands,
+            this tab will show Spend, GMV, conversion rate, creator
+            performance, and P&amp;L roll-ups alongside Amazon and D2C.
+        </p>
+        <div style="display:inline-block;
+                    background: linear-gradient(135deg, #FBF5EA 0%, #f4eed8 100%);
+                    border: 1px solid #d6ccba; border-radius: 12px;
+                    padding: 16px 22px; color:#5a4d35; font-size: 13px;
+                    box-shadow: 0 2px 8px rgba(0,74,43,0.08);">
+            Switch to <b>Amazon</b> or <b>D2C</b> using the tabs above
+            to view live data.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
 
 if st.session_state.top_tab == "d2c":
     # Hide the Amazon sidebar entirely — D2C has its own date picker.
