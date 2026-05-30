@@ -1298,38 +1298,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="vahdam-toptabs">', unsafe_allow_html=True)
-# 4 slots: Home (back to channel picker) + Amazon + D2C + TikTok, then
-# a flexible spacer to push the pills left.
-_tt_home, _tt_c1, _tt_c2, _tt_c3, _tt_spacer = st.columns([1, 1, 1, 1, 6], gap="small")
+# Only the "← Channels" back-link is shown inside a channel.
+# The channel switcher (Amazon / D2C / TikTok) lives on the landing
+# page so we don't have to think about per-user channel locks here —
+# the picker page is the single source of truth for "which channel
+# can this user enter?" once those locks land.
+_tt_home, _tt_spacer = st.columns([1, 9], gap="small")
 with _tt_home:
     if st.button("← Channels",
                  use_container_width=True,
                  key="top_tab_home"):
         st.session_state.channel_chosen = False
-        st.rerun()
-with _tt_c1:
-    if st.button("🛒  Amazon",
-                 use_container_width=True,
-                 key="top_tab_amazon",
-                 type=("primary" if st.session_state.top_tab == "amazon"
-                       else "secondary")):
-        st.session_state.top_tab = "amazon"
-        st.rerun()
-with _tt_c2:
-    if st.button("🛍  D2C",
-                 use_container_width=True,
-                 key="top_tab_d2c",
-                 type=("primary" if st.session_state.top_tab == "d2c"
-                       else "secondary")):
-        st.session_state.top_tab = "d2c"
-        st.rerun()
-with _tt_c3:
-    if st.button("🎵  TikTok",
-                 use_container_width=True,
-                 key="top_tab_tiktok",
-                 type=("primary" if st.session_state.top_tab == "tiktok"
-                       else "secondary")):
-        st.session_state.top_tab = "tiktok"
         st.rerun()
 st.markdown('</div>', unsafe_allow_html=True)
 
