@@ -9221,6 +9221,10 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
     # Sessions table uses UPPER(GEO); marketing uses GEO as-is.
     geo_mkt   = _nb_geo_sql_filter(geo)
     geo_sess  = (f"AND UPPER(GEO) = UPPER('{geo}')" if geo and geo != "All" else "")
+    # Inventory table uses UPPER(GEO). For geo='All', sum the latest
+    # snapshot across all geos so each marketplace contributes its own
+    # FBA + ADW pool exactly once.
+    geo_inv   = (f"AND UPPER(GEO) = UPPER('{geo}')" if geo and geo != "All" else "")
     return run_query(f"""
         WITH pnl AS (
             SELECT SPLIT_PART(ASIN,' ',1)                    AS ASIN_KEY,
@@ -9259,6 +9263,33 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
               {geo_sess}
               AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
             GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        inv AS (
+            -- Pick the LATEST snapshot per (ASIN, GEO) from the inventory
+            -- table — the table stores ~14 daily snapshots with DATE as
+            -- text 'DD-MON-YYYY'. For geo='All' we SUM across geos so
+            -- each marketplace contributes its FBA + ADW pool exactly
+            -- once; for a single geo there's just one row per ASIN.
+            SELECT
+                UPPER(SPLIT_PART(latest.ASIN, ' ', 1))  AS ASIN_KEY,
+                SUM(COALESCE(latest.FBAINV, 0))         AS FBA_INV,
+                SUM(COALESCE(latest.ADWINV, 0))         AS ADW_INV
+            FROM (
+                SELECT
+                    ASIN, GEO, FBAINV, ADWINV,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY UPPER(SPLIT_PART(ASIN, ' ', 1)), UPPER(GEO)
+                        ORDER BY TRY_TO_DATE(DATE, 'DD-MON-YYYY') DESC NULLS LAST
+                    ) AS rn
+                FROM {INV_3P}
+                WHERE ASIN IS NOT NULL
+                  AND UPPER(ASIN) NOT IN ('ASIN', '')
+                  AND DATE <> 'Date'
+                  {geo_inv}
+                  AND UPPER(SPLIT_PART(ASIN, ' ', 1)) IN ({asin_csv})
+            ) latest
+            WHERE latest.rn = 1
+            GROUP BY UPPER(SPLIT_PART(latest.ASIN, ' ', 1))
         )
         SELECT  p.ASIN_KEY                                            AS ASIN,
                 p.PRODUCT_NAME                                        AS PRODUCT_NAME,
@@ -9280,10 +9311,14 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                 ROUND(COALESCE(m.CLICKS / NULLIF(m.IMPRESSIONS,0) * 100, 0), 2) AS CTR_PCT,
                 ROUND(COALESCE(m.AD_SPEND / NULLIF(m.CLICKS, 0), 0), 2)         AS CPC,
                 ROUND(COALESCE(m.PAID_REV, 0), 0)                     AS PAID_REV,
-                ROUND(COALESCE(m.AD_SPEND, 0), 0)                     AS AD_SPEND
+                ROUND(COALESCE(m.AD_SPEND, 0), 0)                     AS AD_SPEND,
+                -- Latest-snapshot inventory. For USA we add ADW + FBA;
+                -- other geos report only FBA (ADW will be 0).
+                ROUND(COALESCE(i.FBA_INV, 0) + COALESCE(i.ADW_INV, 0), 0) AS TOTAL_INV
         FROM pnl p
         LEFT JOIN mkt  m  ON p.ASIN_KEY = m.ASIN_KEY
         LEFT JOIN sess s  ON p.ASIN_KEY = s.ASIN_KEY
+        LEFT JOIN inv  i  ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
         ORDER BY REVENUE DESC NULLS LAST
     """)
 
@@ -9657,6 +9692,9 @@ def render_new_business():
         ("PRODUCT_NAME","Product"),
         ("REVENUE",     "Revenue"),
         ("UNITS",       "Units"),
+        # Inventory between Units + ASP so the run-rate context (Units sold
+        # vs Inventory on hand) is visible side-by-side.
+        ("TOTAL_INV",   "Inventory"),
         ("ASP",         "ASP"),
         ("SESSIONS",    "Sessions"),
         ("CR_PCT",      "CR%"),
@@ -9678,6 +9716,11 @@ def render_new_business():
         "Product":     st.column_config.TextColumn("Product", width="large", pinned=True),
         "Revenue":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
         "Units":       st.column_config.NumberColumn(format="%,d"),
+        "Inventory":   st.column_config.NumberColumn(
+            format="%,d",
+            help="Latest 3P-inv snapshot per ASIN. USA = FBA + ADW; other "
+                 "geos = FBA only. For GEO='All', totals are summed across "
+                 "marketplaces (each contributes its latest snapshot once)."),
         "ASP":         st.column_config.NumberColumn(format=f"{currency_sym}%,.2f"),
         "Sessions":    st.column_config.NumberColumn(format="%,d"),
         "CR%":         st.column_config.NumberColumn(format="%.2f%%"),
