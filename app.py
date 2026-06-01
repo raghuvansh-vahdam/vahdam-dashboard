@@ -2717,7 +2717,10 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
 
     # Defensive Google Ads sum — yields 0 when GOOGLE_SPEND_ACTUAL_<sfx>
     # is missing from the schema (e.g. older snapshot).
-    gads_sum_sql = _gads_actual_sum_sql(sfx)
+    gads_sum_sql  = _gads_actual_sum_sql(sfx)
+    # Per-row form (without SUM wrapper) for the 7-day rolling SUM(CASE…)
+    # inside the `roll` CTE below.
+    gads_col_expr = _gads_actual_col_expr(sfx)
 
     return run_query(f"""
         WITH pnl AS (
@@ -2754,12 +2757,19 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             -- 3pm-IST-cutoff effective day) so partial-day data never
             -- contaminates the averages and the windows are stable
             -- regardless of the user-selected period.
+            -- Also aggregates 7-day revenue + PM spend + GADS spend
+            -- so the SELECT can derive the Past-7-Day ACoS% column
+            -- (same formula as ACoS Act, just on the 7-day window
+            -- ending eff_today).
             SELECT
                 SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
                 SUM(CASE WHEN DAY = '{d_y}'                                  THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_1D,
                 SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_7D,
                 SUM(CASE WHEN DAY BETWEEN '{d_14}' AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_14D,
-                SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D
+                SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D,
+                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{eff_today}' THEN COALESCE(SALES_ACTUAL_{sfx},0)    ELSE 0 END) AS REV_7D,
+                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{eff_today}' THEN COALESCE(PM_SPEND_ACTUAL_{sfx},0) ELSE 0 END) AS SPEND_7D,
+                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{eff_today}' THEN {gads_col_expr}                  ELSE 0 END) AS GADS_7D
             FROM {TABLE}
             WHERE DAY BETWEEN '{d_30}' AND '{eff_today}'
               AND GEO = '{geo}' AND {GEO_EXCL}
@@ -2858,6 +2868,11 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             -- next to PM Spend / ACoS%).
             ROUND(COALESCE(p.SPEND_ACT_RAW, 0), 0)                                  AS ACT_SPEND,
             ROUND(COALESCE(p.GADS_SPEND_ACT_RAW, 0), 0)                             AS GADS_SPEND_ACT,
+            -- Past-7-Day ACoS% — same formula as ACoS Act, just on the
+            -- 7-day window ending eff_today (the 3pm-IST effective day).
+            -- (PM Spend 7d + GADS Spend 7d) / Revenue 7d × 100.
+            ROUND((COALESCE(r.SPEND_7D, 0) + COALESCE(r.GADS_7D, 0))
+                    / NULLIF(r.REV_7D, 0) * 100, 1)                                  AS ACT_ACOS_7D_PCT,
             -- Margin / ad-cost % (ratios of selected-period absolutes)
             -- ACoS Actual = (PM Spend + Google Ads Spend) / Sales × 100
             ROUND(p.CM1_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM1_PCT,
@@ -2977,6 +2992,16 @@ def _gads_actual_sum_sql(sfx):
     all_cols = discover_pnl_cols()
     g = f"GOOGLE_SPEND_ACTUAL_{sfx}"
     return f"COALESCE(SUM({g}),0)" if g in all_cols else "CAST(0 AS NUMBER)"
+
+
+def _gads_actual_col_expr(sfx):
+    """Per-row reference to GOOGLE_SPEND_ACTUAL_<sfx>, NULL-safe. Use
+    when you need to wrap the column inside a CASE WHEN (or any other
+    expression that runs per row, not as the outer aggregate). Returns
+    `COALESCE(<col>,0)` if the column exists, else literal `0`."""
+    all_cols = discover_pnl_cols()
+    g = f"GOOGLE_SPEND_ACTUAL_{sfx}"
+    return f"COALESCE({g},0)" if g in all_cols else "0"
 
 
 def _run_pnl_query(sql_template, retry_on_missing_col=True):
@@ -5026,6 +5051,8 @@ def render_subcategory():
             "**Sessions / CR%** for the selected date range. "
             "**ASP Bud/Act** = Revenue ÷ Units. "
             "**Lag** = Budget − Actual (positive = behind plan). "
+            "**7d ACoS%** = (PM Spend 7d + GADS Spend 7d) ÷ Sales 7d × 100, "
+            "anchored to the same effective day as the 7d/14d/30d averages. "
             f"**PM** = {_pm_start.strftime('%b %Y')} "
             f"({_pm_start.strftime('%d %b')}–{_pm_end.strftime('%d %b')}). "
             f"**PM-1** = {_pm1_start.strftime('%b %Y')} "
@@ -5093,6 +5120,9 @@ def render_subcategory():
                 ("ACT_ACOS_PCT",    "Act ACoS%"),
                 ("ACT_SPEND",       "PM Spend"),
                 ("GADS_SPEND_ACT",  "GADS Spend"),
+                # Past-7-Day ACoS% — same (PM+GADS)/Sales formula as Act ACoS%
+                # but on the 7-day window ending the 3pm-IST effective day.
+                ("ACT_ACOS_7D_PCT", "7d ACoS%"),
                 ("BUD_CM2_PCT",     "Bud CM2%"),
                 ("ACT_CM2_PCT",     "Act CM2%"),
                 # Previous full month
@@ -5224,6 +5254,12 @@ def render_subcategory():
                     help="Google Ads spend — actuals. Currently surfaced "
                          "for USA + CA where the data is loaded; other GEOs "
                          "will show 0."),
+                "7d ACoS%":        st.column_config.NumberColumn(
+                    format="%.1f%%",
+                    help="Past-7-day ACoS = (PM Spend 7d + GADS Spend 7d) "
+                         "÷ Sales 7d × 100. The 7-day window ends on the "
+                         "3pm-IST effective day (same anchor as Yesterday / "
+                         "7d Avg / 14d Avg / 30d Avg)."),
                 "Bud CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
                 "Act CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
                 # Previous month (anchored to today)
