@@ -2587,14 +2587,25 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                            anchored to today)
       * Previous-1 month : Sessions, CR%, Units, ACoS%
     """
-    today_ = date.today()
-    d_30 = today_ - timedelta(days=29)
-    d_14 = today_ - timedelta(days=13)
-    d_7  = today_ - timedelta(days=6)
-    d_y  = today_ - timedelta(days=1)
-    # Previous full calendar month and the one before it
-    prev_m_end   = today_.replace(day=1) - timedelta(days=1)
-    prev_m_start = prev_m_end.replace(day=1)
+    # 3pm IST data-load cutoff. The warehouse refresh lands ~15:00 IST,
+    # so before 3pm the freshest fully-loaded day is day-before-yesterday;
+    # after 3pm it's yesterday. Anchor the "Yesterday Units" column AND
+    # the 7d / 14d / 30d rolling windows to this effective day so
+    # partial-day data never contaminates the averages.
+    _IST       = timezone(timedelta(hours=5, minutes=30))
+    _now_ist   = datetime.now(_IST)
+    eff_today  = (_now_ist.date() - timedelta(days=1)
+                  if _now_ist.hour >= 15
+                  else _now_ist.date() - timedelta(days=2))
+    d_y  = eff_today                          # "Yesterday Units" column
+    d_7  = eff_today - timedelta(days=6)      # 7-day window  ending d_y (incl.)
+    d_14 = eff_today - timedelta(days=13)     # 14-day window ending d_y
+    d_30 = eff_today - timedelta(days=29)     # 30-day window ending d_y
+    # Previous full calendar month and the one before it — anchored to
+    # the calendar month containing eff_today so PM/PM-1 stay stable
+    # regardless of the 3pm flip.
+    prev_m_end    = eff_today.replace(day=1) - timedelta(days=1)
+    prev_m_start  = prev_m_end.replace(day=1)
     prev_m1_end   = prev_m_start - timedelta(days=1)
     prev_m1_start = prev_m1_end.replace(day=1)
 
@@ -2721,17 +2732,18 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
         roll AS (
-            -- Rolling unit-velocity windows. Always last 30 days from
-            -- TODAY so the run-rate columns are stable regardless of the
-            -- user-selected period.
+            -- Rolling unit-velocity windows. Anchored to `eff_today` (the
+            -- 3pm-IST-cutoff effective day) so partial-day data never
+            -- contaminates the averages and the windows are stable
+            -- regardless of the user-selected period.
             SELECT
                 SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
-                SUM(CASE WHEN DAY = '{d_y}'                                THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_1D,
-                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_7D,
-                SUM(CASE WHEN DAY BETWEEN '{d_14}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_14D,
-                SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{today_}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D
+                SUM(CASE WHEN DAY = '{d_y}'                                  THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_1D,
+                SUM(CASE WHEN DAY BETWEEN '{d_7}'  AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_7D,
+                SUM(CASE WHEN DAY BETWEEN '{d_14}' AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_14D,
+                SUM(CASE WHEN DAY BETWEEN '{d_30}' AND '{eff_today}' THEN COALESCE(QTY_ACTUAL,0) ELSE 0 END) AS U_30D
             FROM {TABLE}
-            WHERE DAY BETWEEN '{d_30}' AND '{today_}'
+            WHERE DAY BETWEEN '{d_30}' AND '{eff_today}'
               AND GEO = '{geo}' AND {GEO_EXCL}
               AND ASIN IS NOT NULL AND ASIN != ''
             GROUP BY SPLIT_PART(ASIN,' ',1)
@@ -4981,16 +4993,26 @@ def render_subcategory():
         f"(velocity · inventory · budget vs actual)",
         expanded=False):
         # Build a small caption that names the two prev-month windows
-        # the user will actually see in the table.
-        _today    = date.today()
-        _pm_end   = _today.replace(day=1) - timedelta(days=1)
-        _pm_start = _pm_end.replace(day=1)
-        _pm1_end  = _pm_start - timedelta(days=1)
-        _pm1_start= _pm1_end.replace(day=1)
+        # the user will actually see in the table — anchored to the
+        # 3pm-IST effective day so PM/PM-1 align with the rolling
+        # 7d/14d/30d windows below.
+        _IST_CAP   = timezone(timedelta(hours=5, minutes=30))
+        _now_ist_c = datetime.now(_IST_CAP)
+        _eff_today = (_now_ist_c.date() - timedelta(days=1)
+                      if _now_ist_c.hour >= 15
+                      else _now_ist_c.date() - timedelta(days=2))
+        _pm_end    = _eff_today.replace(day=1) - timedelta(days=1)
+        _pm_start  = _pm_end.replace(day=1)
+        _pm1_end   = _pm_start - timedelta(days=1)
+        _pm1_start = _pm1_end.replace(day=1)
         st.caption(
             "One row per ASIN sold in this GEO (regardless of sub-category). "
-            "**Yesterday Units** is the units sold yesterday. "
-            "**7d / 14d / 30d** are daily averages (sum ÷ days). "
+            f"**Yesterday Units** = units sold on **{_eff_today.strftime('%d %b')}** "
+            "(the freshest fully-loaded day; anchored to the 3pm IST data cut-off — "
+            "before 3pm IST this is the day-before-yesterday, after 3pm it is "
+            "real yesterday). "
+            "**7d / 14d / 30d** are daily averages over the windows ending on that "
+            "same day (sum ÷ days). "
             "**Cover Days** = Total Inv ÷ max daily run-rate across 7d/14d/30d. "
             "**Sessions / CR%** for the selected date range. "
             "**ASP Bud/Act** = Revenue ÷ Units. "
