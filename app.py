@@ -1582,9 +1582,11 @@ with st.sidebar:
     st.markdown("---")
     if st.button("🔄 Refresh data", use_container_width=True, key="refresh_data",
                  help="Clear Snowflake cache and refetch. Price Tracker "
-                      "refreshes once a day at 2pm IST and is NOT cleared "
-                      "by this button — see the Price Tracker page for "
-                      "the lockout reason."):
+                      "auto-refreshes once a day per geo: 2pm IST for "
+                      "USA/UK/DE/FR, 3pm IST for CA/IT/ES/AUS/UAE (small "
+                      "geos wait so Keepa tokens have replenished). "
+                      "This button does NOT clear Keepa caches — see "
+                      "the Price Tracker page for the lockout reason."):
         _keepa_protected = {"_fetch_keepa_chunk", "fetch_keepa_products"}
         for _name, _obj in list(globals().items()):
             if _name in _keepa_protected:
@@ -6386,25 +6388,54 @@ def _value_as_of(csv_arr, target_dt):
     return last_val
 
 
-def _keepa_refresh_window():
+# Small-marketplace Keepa domain codes — CA, IT, ES, AUS, UAE. These
+# geos refresh at 15:00 IST instead of 14:00 IST because Keepa daily
+# tokens have replenished by then; if we tried at 14:00 alongside the
+# big geos, the smaller geos sometimes got token-starved and skipped
+# their refresh. (Big geos = USA / UK / DE / FR.)
+_KEEPA_SMALL_GEO_DOMAINS = {6, 8, 9, 13, 17}   # CA · IT · ES · AUS · UAE
+
+# One-off force-refresh discriminator for the small geos. Bump this
+# string whenever you need to force a fresh Keepa pull for IT/ES/CA/
+# AUS/UAE outside the normal 15:00 IST daily flip — e.g. if their
+# data went stale because tokens ran out yesterday. Each bump burns
+# ~5 chunks of tokens, so use sparingly.
+_KEEPA_SMALL_GEO_FORCE_TOKEN = "2026-06-01-populate-v1"
+
+
+def _keepa_refresh_window(domain_code=None):
     """Return the current daily Keepa refresh window as an ISO date
-    string. The window flips at 14:00 IST every day — before 14:00 IST
-    we're still on yesterday's window, after we're on today's.
+    string. The window flips at 14:00 IST for the big geos (USA / UK /
+    DE / FR) and 15:00 IST for the small ones (CA / IT / ES / AUS /
+    UAE) — by then Keepa's token bucket has replenished so the smaller
+    marketplaces are no longer competing with the big-asin-count refreshes.
 
     Why: Keepa charges a token per ASIN refresh. We deliberately want
-    exactly ONE refresh per day across the whole team. Passing this
-    string into the cached fetch as an extra argument means the cache
-    key changes ONLY when the daily window flips, so any extra calls
-    during the same day hit cache. Sidebar 'Refresh data' is also
-    wired to skip Keepa caches so no one can force-burn tokens."""
+    exactly ONE refresh per day per geo across the whole team. Passing
+    this string into the cached fetch as an extra argument means the
+    cache key changes ONLY when the geo's daily window flips, so any
+    extra calls during the same day hit cache. Sidebar 'Refresh data'
+    is also wired to skip Keepa caches so no one can force-burn tokens.
+
+    `domain_code` controls which flip-hour applies. Passing None
+    preserves the legacy 14:00 IST behaviour for callers that don't
+    know which marketplace they're hitting."""
     IST = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(IST)
-    if now.hour < 14:
-        # Still in yesterday's 2-PM-to-2-PM window
+    is_small = domain_code in _KEEPA_SMALL_GEO_DOMAINS
+    flip_hour = 15 if is_small else 14
+    if now.hour < flip_hour:
+        # Still in yesterday's window
         d = (now - timedelta(days=1)).date()
     else:
         d = now.date()
-    return d.isoformat()
+    base = d.isoformat()
+    # Force-refresh discriminator: append the bumpable token so the
+    # cache misses the next time IT/ES/CA/AUS/UAE are loaded after a
+    # bump. The big geos are unaffected.
+    if is_small:
+        return f"{base}-small-{_KEEPA_SMALL_GEO_FORCE_TOKEN}"
+    return base
 
 
 @st.cache_data(ttl=86400, show_spinner=False)  # 24-hour cache
@@ -6560,14 +6591,16 @@ def fetch_keepa_products(asins_tuple, domain_code, chunk_size=50):
     Keepa accepts up to ~100 ASINs per request, but 50 is a safer default that
     keeps URLs short and lets each chunk cache independently.
 
-    The current daily window string (`_keepa_refresh_window()`) is threaded
-    in as a cache-key discriminator so the cache rotates exactly once per
-    day at 14:00 IST. The sidebar 'Refresh data' button is wired to skip
-    Keepa caches so no manual force-refresh can burn through tokens."""
+    The current daily window string (`_keepa_refresh_window(domain_code)`)
+    is threaded in as a cache-key discriminator so the cache rotates
+    exactly once per day per geo: 14:00 IST for the big geos (USA/UK/
+    DE/FR) and 15:00 IST for the small ones (CA/IT/ES/AUS/UAE). The
+    sidebar 'Refresh data' button is wired to skip Keepa caches so no
+    manual force-refresh can burn through tokens."""
     asins = list(asins_tuple)
     if not asins:
         return {}
-    window = _keepa_refresh_window()
+    window = _keepa_refresh_window(domain_code)
     if len(asins) <= chunk_size:
         return _fetch_keepa_chunk(tuple(asins), domain_code, window)
 
