@@ -929,6 +929,26 @@ GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
 GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
 
+# ── Effective-today helper (3pm IST data-load cutoff) ────────────────────────
+# Warehouse refresh lands ~15:00 IST. Anywhere we display a "yesterday"
+# value or close a rolling 7d/14d/30d/90d window, we anchor to *this*
+# function's return — NOT `date.today()` — so partial half-loaded data
+# never sneaks into displayed totals.
+#
+#   * Before 3pm IST → return day-before-yesterday (D-2)
+#   * After  3pm IST → return real yesterday (D-1)
+#
+# Usage: `eff = _eff_today_ist()`; then `d_y = eff` for the "Yesterday"
+# column, `d_7 = eff - 6` for the 7d window, etc. The literal calendar
+# today is intentionally never the right answer for any displayed
+# total because the day is still in progress.
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+def _eff_today_ist():
+    _now_ist = datetime.now(_IST_TZ)
+    if _now_ist.hour >= 15:
+        return _now_ist.date() - timedelta(days=1)   # real yesterday
+    return _now_ist.date() - timedelta(days=2)       # day-before-yesterday
+
 # ── Connection ───────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_conn():
@@ -1452,14 +1472,8 @@ with st.sidebar:
     # the freshest complete day is the day-before-yesterday; after 3pm
     # it's yesterday. This keeps the default view free of partial
     # half-loaded data without forcing the user to fiddle with Custom
-    # Range every morning.
-    _IST          = timezone(timedelta(hours=5, minutes=30))
-    _now_ist      = datetime.now(_IST)
-    _ist_3pm_cut  = 15  # 15:00 IST cutoff
-    if _now_ist.hour >= _ist_3pm_cut:
-        effective_today = _now_ist.date() - timedelta(days=1)   # yesterday
-    else:
-        effective_today = _now_ist.date() - timedelta(days=2)   # day before yesterday
+    # Range every morning. (Single source of truth: _eff_today_ist().)
+    effective_today = _eff_today_ist()
 
     PRESET_OPTS = ["MTD", "QTD", "YTD",
                    "Last 30 Days", "Last 60 Days", "Last 90 Days",
@@ -2255,8 +2269,13 @@ def get_asin_rolling(asin, geo, sfx):
     the user picked a short window. Returns one row per day with columns
     DAY, REVENUE, UNITS, SPEND, SESSIONS. Sessions come from
     vahdam_amazon_sales_marketing — the sessions column name is discovered
-    dynamically and the column degrades gracefully to 0 if missing."""
-    today_ = date.today()
+    dynamically and the column degrades gracefully to 0 if missing.
+
+    Anchored to the 3pm-IST effective day (see _eff_today_ist) so the
+    90-day window ends on the freshest fully-loaded day — partial-day
+    today never contaminates the rolling totals.
+    """
+    today_ = _eff_today_ist()
     d_start = today_ - timedelta(days=89)
     a = asin.replace("'", "''")
 
@@ -2416,7 +2435,10 @@ def get_asin_data(where, geo, sub_cat, sfx):
     else:
         pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
 
-    today_ = date.today()
+    # Anchor the 7/14/30-day Cover-Days windows to the 3pm-IST effective
+    # day so partial-day today never lifts the max-velocity denominator
+    # (which would artificially shrink Cover Days).
+    today_ = _eff_today_ist()
     d_30 = today_ - timedelta(days=29)   # inclusive 30-day window
     d_14 = today_ - timedelta(days=13)
     d_7  = today_ - timedelta(days=6)
@@ -2587,16 +2609,12 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                            anchored to today)
       * Previous-1 month : Sessions, CR%, Units, ACoS%
     """
-    # 3pm IST data-load cutoff. The warehouse refresh lands ~15:00 IST,
-    # so before 3pm the freshest fully-loaded day is day-before-yesterday;
-    # after 3pm it's yesterday. Anchor the "Yesterday Units" column AND
-    # the 7d / 14d / 30d rolling windows to this effective day so
-    # partial-day data never contaminates the averages.
-    _IST       = timezone(timedelta(hours=5, minutes=30))
-    _now_ist   = datetime.now(_IST)
-    eff_today  = (_now_ist.date() - timedelta(days=1)
-                  if _now_ist.hour >= 15
-                  else _now_ist.date() - timedelta(days=2))
+    # 3pm IST data-load cutoff via shared helper. Before 3pm the
+    # freshest fully-loaded day is day-before-yesterday; after 3pm it's
+    # yesterday. The "Yesterday Units" column + 7d/14d/30d rolling
+    # windows all anchor to this effective day so partial-day data
+    # never contaminates the averages.
+    eff_today  = _eff_today_ist()
     d_y  = eff_today                          # "Yesterday Units" column
     d_7  = eff_today - timedelta(days=6)      # 7-day window  ending d_y (incl.)
     d_14 = eff_today - timedelta(days=13)     # 14-day window ending d_y
@@ -4325,12 +4343,7 @@ def render_ceo():
     # explaining the view has switched to budget-only, and the charts
     # below adapt: Country Perf bars sort by Budget Revenue, Daily
     # Sales adds a Budget line so the trajectory still tells a story.
-    _IST = timezone(timedelta(hours=5, minutes=30))
-    _now_ist = datetime.now(_IST)
-    if _now_ist.hour >= 15:
-        _eff_today = _now_ist.date() - timedelta(days=1)
-    else:
-        _eff_today = _now_ist.date() - timedelta(days=2)
+    _eff_today = _eff_today_ist()
     _is_future_range = d_from > _eff_today
     if _is_future_range:
         st.markdown(
@@ -4996,11 +5009,7 @@ def render_subcategory():
         # the user will actually see in the table — anchored to the
         # 3pm-IST effective day so PM/PM-1 align with the rolling
         # 7d/14d/30d windows below.
-        _IST_CAP   = timezone(timedelta(hours=5, minutes=30))
-        _now_ist_c = datetime.now(_IST_CAP)
-        _eff_today = (_now_ist_c.date() - timedelta(days=1)
-                      if _now_ist_c.hour >= 15
-                      else _now_ist_c.date() - timedelta(days=2))
+        _eff_today = _eff_today_ist()
         _pm_end    = _eff_today.replace(day=1) - timedelta(days=1)
         _pm_start  = _pm_end.replace(day=1)
         _pm1_end   = _pm_start - timedelta(days=1)
@@ -5830,7 +5839,11 @@ def render_asin_detail():
             ["Last 30 Days", "Last 7 Days", "Last 60 Days", "Last 90 Days",
              "MTD", "Match dashboard range"],
             index=0, key=f"asin_det_preset_{asin}")
-    today_ = date.today()
+    # 3pm IST cutoff: presets end on the freshest fully-loaded day so
+    # the rolling N-day windows never include a partial day. MTD is
+    # anchored to the calendar month containing that effective day —
+    # so on 1 Jun before 3pm IST, "MTD" actually shows 1 May → 30 May.
+    today_ = _eff_today_ist()
     if det_preset == "Last 7 Days":
         d1, d2 = today_ - timedelta(days=6),  today_
     elif det_preset == "Last 30 Days":
@@ -8311,13 +8324,9 @@ def render_dbr():
     # the FULL-MONTH range so we can show FMB rows. The two share an
     # identical shape, so the same slicing helpers work on both. ──
     # Plus 3 single-day fetches for the Y-2 / Y-1 / Yesterday columns
-    # that get appended to every mini-table.
-    _IST = timezone(timedelta(hours=5, minutes=30))
-    _now_ist = datetime.now(_IST)
-    if _now_ist.hour >= 15:
-        eff_today = _now_ist.date() - timedelta(days=1)
-    else:
-        eff_today = _now_ist.date() - timedelta(days=2)
+    # that get appended to every mini-table. The effective "today"
+    # respects the 3pm-IST data-load cutoff (see _eff_today_ist).
+    eff_today = _eff_today_ist()
     _y0_d = eff_today                                  # "Yesterday"
     _y1_d = eff_today - timedelta(days=1)              # Y-1
     _y2_d = eff_today - timedelta(days=2)              # Y-2
@@ -9329,12 +9338,7 @@ def render_new_business():
                  unsafe_allow_html=True)
 
     # Effective-today honours the same 3pm-IST cutoff used elsewhere.
-    _IST = timezone(timedelta(hours=5, minutes=30))
-    _now_ist = datetime.now(_IST)
-    if _now_ist.hour >= 15:
-        eff_today = _now_ist.date() - timedelta(days=1)
-    else:
-        eff_today = _now_ist.date() - timedelta(days=2)
+    eff_today = _eff_today_ist()
 
     # ── GEO + Date preset + Product filter row ──
     geos_avail = get_nb_geos_with_data()
