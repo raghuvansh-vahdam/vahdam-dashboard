@@ -9411,6 +9411,13 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                 ROUND(COALESCE(m.AD_SPEND / NULLIF(m.CLICKS, 0), 0), 2)         AS CPC,
                 ROUND(COALESCE(m.PAID_REV, 0), 0)                     AS PAID_REV,
                 ROUND(COALESCE(m.AD_SPEND, 0), 0)                     AS AD_SPEND,
+                ROUND(COALESCE(m.PAID_UNITS, 0), 0)                   AS PAID_UNITS,
+                -- Paid CVR: how often a click on a sponsored placement
+                -- turned into a paid-attributable unit sale. PAID_UNITS
+                -- here is SUM(CONVERSIONS) from the marketing feed (i.e.
+                -- attributed conversions only — distinct from p.UNITS,
+                -- which is the P&L total).
+                ROUND(COALESCE(m.PAID_UNITS / NULLIF(m.CLICKS, 0) * 100, 0), 2) AS PAID_CR_PCT,
                 -- Latest-snapshot inventory. For USA we add ADW + FBA;
                 -- other geos report only FBA (ADW will be 0).
                 ROUND(COALESCE(i.FBA_INV, 0) + COALESCE(i.ADW_INV, 0), 0) AS TOTAL_INV
@@ -9822,6 +9829,10 @@ def render_new_business():
         ("IMPRESSIONS", "Impressions"),
         ("CTR_PCT",     "CTR%"),
         ("CLICKS",      "Clicks"),
+        # Paid Units + Paid CVR sit next to Clicks because they're the
+        # paid-attributed pair (organic CR% above uses P&L units).
+        ("PAID_UNITS",   "Paid Units"),
+        ("PAID_CR_PCT",  "Paid CVR%"),
         ("AD_SPEND",    "Ad Spend"),
         ("ACOS_PCT",    "ACoS%"),
         ("CM2_ABS",     "CM2 Abs"),
@@ -9848,6 +9859,16 @@ def render_new_business():
         "Impressions": st.column_config.NumberColumn(format="%,d"),
         "CTR%":        st.column_config.NumberColumn(format="%.2f%%"),
         "Clicks":      st.column_config.NumberColumn(format="%,d"),
+        "Paid Units":  st.column_config.NumberColumn(
+            format="%,d",
+            help="Conversions attributed to paid ads (SUM(CONVERSIONS) "
+                 "from the marketing feed). Differs from the overall "
+                 "Units column which is the P&L total across organic + paid."),
+        "Paid CVR%":   st.column_config.NumberColumn(
+            format="%.2f%%",
+            help="Paid Click → Conversion rate = Paid Units ÷ Clicks × 100. "
+                 "Measures ad-creative + landing-page effectiveness for "
+                 "the people who actually clicked an ad."),
         "Ad Spend":    st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
         "ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
         "CM2 Abs":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
