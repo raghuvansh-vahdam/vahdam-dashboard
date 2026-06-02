@@ -9829,11 +9829,16 @@ def render_new_business():
         ("IMPRESSIONS", "Impressions"),
         ("CTR_PCT",     "CTR%"),
         ("CLICKS",      "Clicks"),
+        # CPC sits next to Clicks since it's the direct per-click cost.
+        ("CPC",         "CPC"),
         # Paid Units + Paid CVR sit next to Clicks because they're the
         # paid-attributed pair (organic CR% above uses P&L units).
         ("PAID_UNITS",   "Paid Units"),
         ("PAID_CR_PCT",  "Paid CVR%"),
         ("AD_SPEND",    "Ad Spend"),
+        # Paid Revenue right after Ad Spend so the ad-economics block
+        # reads left-to-right as Spend → Paid Rev → ACoS%.
+        ("PAID_REV",    "Paid Revenue"),
         ("ACOS_PCT",    "ACoS%"),
         ("CM2_ABS",     "CM2 Abs"),
         ("CM2_PCT",     "CM2%"),
@@ -9859,6 +9864,10 @@ def render_new_business():
         "Impressions": st.column_config.NumberColumn(format="%,d"),
         "CTR%":        st.column_config.NumberColumn(format="%.2f%%"),
         "Clicks":      st.column_config.NumberColumn(format="%,d"),
+        "CPC":         st.column_config.NumberColumn(
+            format=f"{currency_sym}%,.2f",
+            help="Cost per click = Ad Spend ÷ Clicks. Blank when zero "
+                 "clicks in the selected period."),
         "Paid Units":  st.column_config.NumberColumn(
             format="%,d",
             help="Conversions attributed to paid ads (SUM(CONVERSIONS) "
@@ -9870,6 +9879,12 @@ def render_new_business():
                  "Measures ad-creative + landing-page effectiveness for "
                  "the people who actually clicked an ad."),
         "Ad Spend":    st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
+        "Paid Revenue": st.column_config.NumberColumn(
+            format=f"{currency_sym}%,.0f",
+            help="Revenue from paid-attributed orders only (SUM(AD_SALES) "
+                 "from the marketing feed). Useful for paid-only ACoS / "
+                 "RoAS calculations vs overall Revenue which includes "
+                 "organic traffic."),
         "ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
         "CM2 Abs":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
         "CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
