@@ -7256,26 +7256,9 @@ def render_price_tracker():
                         f'All {geo} ASINs &mdash; summary table</div>',
                         unsafe_allow_html=True)
             st.caption(
-                "One row per ASIN. **% Dev from 7d avg** compares the latest "
-                "price to the average of the prior 7 days. Use the ⬇ button "
-                "in the toolbar (or the Download CSV button below) to export."
+                "One row per ASIN. Use the ⬇ button in the toolbar (or the "
+                "Download CSV button below) to export."
             )
-
-            def _dev_from_7d(pts):
-                """Return (last_price, deviation_pct) using a 7-day baseline.
-                Returns (None, None) if there isn't enough history."""
-                if not pts or len(pts) < 2:
-                    return (None, None)
-                import datetime as _d
-                last_dt, last_price = pts[-1]
-                window_start = last_dt - _d.timedelta(days=7)
-                prior = [p for d, p in pts[:-1] if d >= window_start]
-                if not prior:
-                    return (last_price, None)
-                baseline = sum(prior) / len(prior)
-                if baseline == 0:
-                    return (last_price, None)
-                return (last_price, (last_price - baseline) / baseline * 100)
 
             tbl_rows = []
             for asin in asins:
@@ -7285,14 +7268,13 @@ def render_price_tracker():
                         "ASIN":         asin,
                         "Product Name": "— not found in Keepa —",
                         "Current Price": None,
-                        "% Dev from 7d avg": None,
                         "Buy Box":      "—",
                         "Rating":       None,
                         "Reviews":      None,
                     })
                     continue
                 price_pts = d["amazon_pts"] or d["new_pts"]
-                last_price, dev_pct = _dev_from_7d(price_pts)
+                last_price = price_pts[-1][1] if price_pts else None
                 if last_price is None:
                     last_price = (d.get("last_amazon") or d.get("last_new")
                                   or d.get("last_buybox"))
@@ -7305,8 +7287,6 @@ def render_price_tracker():
                     "Product Name": (d.get("title") or "")[:90],
                     "Current Price": (float(last_price)
                                        if last_price is not None else None),
-                    "% Dev from 7d avg": (float(dev_pct)
-                                           if dev_pct is not None else None),
                     "Buy Box":      bb_label,
                     "Rating":       (float(d.get("rating"))
                                        if d.get("rating") is not None else None),
@@ -7315,24 +7295,11 @@ def render_price_tracker():
                 })
             tbl_df = pd.DataFrame(tbl_rows)
 
-            # Style: |dev| >= 25% → red background; 15-25% → amber tint;
-            # Buy Box "Missing" → red column highlight.
-            _dev_n = pd.to_numeric(tbl_df["% Dev from 7d avg"], errors="coerce")
+            # Style: Buy Box "Missing" → red column highlight.
             _bb_s  = tbl_df["Buy Box"].astype(str)
             def _style_summary(row):
                 s = [""] * len(row)
                 idx = row.index.tolist()
-                v = _f(_dev_n.iloc[row.name])
-                if v is not None and "% Dev from 7d avg" in idx:
-                    av = abs(v)
-                    if av >= 25:
-                        s[idx.index("% Dev from 7d avg")] = (
-                            "background-color:#fde8e8;color:#8b1a1a;"
-                            "font-weight:800;")
-                    elif av >= 15:
-                        s[idx.index("% Dev from 7d avg")] = (
-                            "background-color:#fef3d6;color:#7a5c00;"
-                            "font-weight:700;")
                 bb_val = _bb_s.iloc[row.name]
                 if bb_val == "✗ Missing" and "Buy Box" in idx:
                     s[idx.index("Buy Box")] = (
@@ -7355,11 +7322,6 @@ def render_price_tracker():
                     "Current Price": st.column_config.NumberColumn(
                         "Current Price",
                         format=f"{currency_sym}%.2f"),
-                    "% Dev from 7d avg": st.column_config.NumberColumn(
-                        "% Dev from 7d avg",
-                        format="%+.1f%%",
-                        help="Latest price vs prior-7-day average. "
-                             "Amber when |dev| ≥ 15%, red when ≥ 25%."),
                     "Buy Box":       st.column_config.TextColumn(
                         "Buy Box",
                         help="Whether the Buy Box was present as of yesterday."),
