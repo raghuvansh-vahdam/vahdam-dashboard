@@ -9433,9 +9433,14 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                        on="ASIN", how="left")
         df["SESSIONS"] = df["SESSIONS"].fillna(0).astype(int)
     # CR% recomputed against the clean session count so it lines up with
-    # Seller Central.
-    df["CR_PCT"] = (df["UNITS"] / df["SESSIONS"].replace(0, pd.NA) * 100
-                    ).round(2)
+    # Seller Central. NOTE: use float('nan'), NOT pd.NA — replacing into
+    # an int/float series with pd.NA promotes the column to object dtype
+    # and Series.round() then raises TypeError. NaN keeps the dtype as
+    # float64, so the division + rounding both work cleanly and zero-
+    # sessions rows render as blank in the table.
+    _units    = pd.to_numeric(df["UNITS"],    errors="coerce").astype("float64")
+    _sessions = pd.to_numeric(df["SESSIONS"], errors="coerce").astype("float64")
+    df["CR_PCT"] = (_units / _sessions.replace(0, float("nan")) * 100).round(2)
     return df
 
 
