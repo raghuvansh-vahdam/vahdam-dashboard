@@ -1475,7 +1475,7 @@ with st.sidebar:
     # Range every morning. (Single source of truth: _eff_today_ist().)
     effective_today = _eff_today_ist()
 
-    PRESET_OPTS = ["MTD", "QTD", "YTD",
+    PRESET_OPTS = ["MTD", "Last Month", "QTD", "YTD",
                    "Last 30 Days", "Last 60 Days", "Last 90 Days",
                    "Custom Range"]
     preset = st.selectbox("Date Preset", PRESET_OPTS, index=0, key="date_preset")
@@ -1486,6 +1486,12 @@ with st.sidebar:
         # so on 1 Jun before-3pm we'd show 1 May → 30 May (last full day
         # of May), not "1 Jun → 30 May" which would be nonsensical.
         d_to   = effective_today
+        d_from = d_to.replace(day=1)
+    elif preset == "Last Month":
+        # Full previous calendar month. Anchored to the month containing
+        # effective_today, so the result is stable even when the 3pm IST
+        # cutoff bumps "today" back a day at month-start.
+        d_to   = effective_today.replace(day=1) - timedelta(days=1)
         d_from = d_to.replace(day=1)
     elif preset == "QTD":
         # Quarter-to-date: first day of the quarter containing d_to
@@ -9558,7 +9564,7 @@ def render_new_business():
         # In-view date preset. Default = follow the sidebar so the
         # existing behaviour is unchanged unless the user actively
         # overrides here.
-        nb_date_opts = ["Use sidebar", "MTD", "QTD", "YTD",
+        nb_date_opts = ["Use sidebar", "MTD", "Last Month", "QTD", "YTD",
                         "Last 7 Days", "Last 30 Days",
                         "Last 60 Days", "Last 90 Days",
                         "Custom Range"]
@@ -9621,6 +9627,10 @@ def render_new_business():
         nb_d_from, nb_d_to = d_from, d_to
     elif nb_preset == "MTD":
         nb_d_to   = eff_today
+        nb_d_from = nb_d_to.replace(day=1)
+    elif nb_preset == "Last Month":
+        # Full previous calendar month — same convention as the sidebar.
+        nb_d_to   = eff_today.replace(day=1) - timedelta(days=1)
         nb_d_from = nb_d_to.replace(day=1)
     elif nb_preset == "QTD":
         q_start_month = ((eff_today.month - 1) // 3) * 3 + 1
