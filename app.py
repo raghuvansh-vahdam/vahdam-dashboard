@@ -1476,11 +1476,13 @@ with st.sidebar:
     effective_today = _eff_today_ist()
 
     PRESET_OPTS = ["MTD", "Last Month", "QTD", "YTD",
-                   "Last 30 Days", "Last 60 Days", "Last 90 Days",
+                   "Last 7 Days", "Last 30 Days",
+                   "Last 60 Days", "Last 90 Days",
                    "Custom Range"]
     preset = st.selectbox("Date Preset", PRESET_OPTS, index=0, key="date_preset")
 
-    _preset_days = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90}
+    _preset_days = {"Last 7 Days": 7, "Last 30 Days": 30,
+                    "Last 60 Days": 60, "Last 90 Days": 90}
     if preset == "MTD":
         # MTD is anchored to the month containing the effective end date —
         # so on 1 Jun before-3pm we'd show 1 May → 30 May (last full day
