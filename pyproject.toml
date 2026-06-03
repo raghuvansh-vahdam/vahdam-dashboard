@@ -1,0 +1,10 @@
+[project]
+name        = "vahdam-dashboard"
+version     = "0.0.0"
+description = "Vahdam Amazon + D2C P&L Dashboard (Streamlit + Snowflake)"
+# Pin runtime: snowflake-connector-python crashes during interpreter
+# tear-down on Python 3.14 (pre-release) — see the Streamlit Cloud
+# logs showing NameError on `StopIteration` / `list` / `Exception`
+# inside _close_at_exit callbacks. 3.13 is the latest stable that
+# has wheels for all our deps.
+requires-python = ">=3.10,<3.14"
