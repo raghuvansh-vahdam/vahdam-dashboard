@@ -1537,19 +1537,8 @@ with st.sidebar:
 
     f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
                                key="flt_brand")
-    # AMZ Category filter — pulls from VAHDAM_AMAZON_PNL_OVERALL_FY27_ONWARDS.
-    # CATEGORY column. Empty-string rows (untagged ASINs ~52% of the table)
-    # are surfaced as "(untagged)" so they're filterable instead of
-    # invisible. Renamed from "Category" → "AMZ Category" to disambiguate
-    # from D2C category / Sub-Category / Brand which all coexist.
-    _amz_cat_raw = sorted({(c if (c and c.strip()) else "(untagged)")
-                            for c in opts["CATEGORY"].fillna("")})
-    f_cat     = st.multiselect("AMZ Category", _amz_cat_raw,
-                               key="flt_cat",
-                               help="Amazon's CATEGORY tag from the FY27 P&L "
-                                    "table — Tea and Botanicals · Supplements · "
-                                    "Coffee · (untagged). Distinct from D2C "
-                                    "Category and from Sub-Category.")
+    f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
+                               key="flt_cat")
     _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
     _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
     _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
@@ -1825,19 +1814,7 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
     d2 = date_to   or d_to
     w  = [f"DAY BETWEEN '{d1}' AND '{d2}'", GEO_EXCL]
     if f_brand:   w.append(f"BRAND IN ({','.join(repr(x) for x in f_brand)})")
-    if f_cat:
-        # The UI surfaces "(untagged)" as a synthetic value for the
-        # empty-string CATEGORY rows. Translate it back to NULL/empty
-        # at the SQL boundary so the IN-clause matches the underlying
-        # table.
-        _real_cats = [c for c in f_cat if c != "(untagged)"]
-        _need_untagged = "(untagged)" in f_cat
-        _parts = []
-        if _real_cats:
-            _parts.append(f"CATEGORY IN ({','.join(repr(x) for x in _real_cats)})")
-        if _need_untagged:
-            _parts.append("(CATEGORY IS NULL OR TRIM(CATEGORY) = '')")
-        w.append("(" + " OR ".join(_parts) + ")")
+    if f_cat:     w.append(f"CATEGORY IN ({','.join(repr(x) for x in f_cat)})")
     if f_channel: w.append(f"CHANNEL IN ({','.join(repr(x) for x in f_channel)})")
     if geo_override:
         w.append(f"GEO = '{geo_override}'")
