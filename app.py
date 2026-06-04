@@ -9229,116 +9229,6 @@ def _nb_geo_sql_filter(geo):
     return f"AND GEO = '{geo}'"
 
 
-# ── Sessions: per-geo ASP raw table mapping ────────────────────────────────
-# Maplemonk's `VAHDAM_AMAZON_SALES_MARKETING.SESSIONS` over-counts when the
-# user's date range overlaps Airbyte's old "5-day rolling window" pulls
-# (rows where DATASTARTTIME != DATAENDTIME). Each such row actually covers
-# 3 consecutive calendar days starting at DATASTART, not a single day, but
-# the downstream Maplemonk table treats it as a single-day row — so naive
-# SUM(SESSIONS) inflates by up to 3x.
-#
-# Fix: pull from the raw SP-API table directly and de-overlap with the
-# recurrence  daily[N] = sessions[N] - daily[N+1] - daily[N+2]
-# walking backwards from the latest single-day reading. Verified against
-# Seller Central UI on B0FLDWW2HL (USA · May 2026 = 648).
-_ASP_TRAFFIC_TABLE = {
-    "USA": "VAHDAM_DB.MAPLEMONK.ASP_USA_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "UK":  "VAHDAM_DB.MAPLEMONK.ASP_UK_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "CA":  "VAHDAM_DB.MAPLEMONK.ASP_CA_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "DE":  "VAHDAM_DB.MAPLEMONK.ASP_DE_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "FR":  "VAHDAM_DB.MAPLEMONK.ASP_FR_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "ES":  "VAHDAM_DB.MAPLEMONK.ASP_ESP_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "IT":  "VAHDAM_DB.MAPLEMONK.ASP_IT_GET_SALES_AND_TRAFFIC_REPORT_DATE",  # may differ; see note
-    "AUS": "VAHDAM_DB.MAPLEMONK.ASP_AUS_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "UAE": "VAHDAM_DB.MAPLEMONK.ASP_UAE_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-    "IN":  "VAHDAM_DB.MAPLEMONK.ASP_IN_GET_SALES_AND_TRAFFIC_REPORT_ASIN",
-}
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _nb_clean_sessions(asin_csv, geo, d_from, d_to):
-    """Return a per-(ASIN, day) DataFrame of de-overlapped session counts
-    that match Amazon Seller Central exactly.
-
-    `geo` may be a specific marketplace (USA / UK / CA / …) or "All".
-    `d_from`, `d_to` are inclusive date bounds.
-
-    Implementation: pulls raw rows from the per-geo ASP traffic table
-    (extended back 5 days from d_from so we have enough multi-day window
-    rows to anchor the recurrence), then walks each ASIN's rows backwards
-    by date applying daily[N] = sessions[N] - daily[N+1] - daily[N+2]
-    for multi-day rows. Single-day rows (DATASTART = DATAEND) are used
-    verbatim. Result is filtered back to [d_from, d_to].
-    """
-    if not asin_csv:
-        return pd.DataFrame(columns=["ASIN_KEY", "DAY", "SESSIONS"])
-
-    # Buffer 5 days of look-back so the recurrence has anchor data when
-    # the user's d_from falls inside a multi-day window's coverage.
-    _d_from_q = (d_from - timedelta(days=5)) if isinstance(d_from, date) else d_from
-
-    # Decide which ASP tables to UNION. geo='All' pulls every geo we
-    # have a table for.
-    geos = ([geo] if geo and geo != "All" else list(_ASP_TRAFFIC_TABLE.keys()))
-    subqs = []
-    for g in geos:
-        tbl = _ASP_TRAFFIC_TABLE.get(g)
-        if not tbl or "REPORT_DATE" in tbl:
-            # IT table currently maps to *REPORT_DATE (no per-ASIN
-            # breakdown). Skip until the per-ASIN one is wired.
-            continue
-        subqs.append(f"""
-            SELECT '{g}'                                      AS GEO,
-                   SPLIT_PART(CHILDASIN,' ',1)                AS ASIN_KEY,
-                   DATASTARTTIME::DATE                        AS DAY_START,
-                   DATAENDTIME::DATE                          AS DAY_END,
-                   TRAFFICBYASIN:sessions::INT                AS SESSIONS
-            FROM {tbl}
-            WHERE DATASTARTTIME::DATE BETWEEN '{_d_from_q}' AND '{d_to}'
-              AND SPLIT_PART(CHILDASIN,' ',1) IN ({asin_csv})
-        """)
-    if not subqs:
-        return pd.DataFrame(columns=["ASIN_KEY", "DAY", "SESSIONS"])
-    raw = run_query(" UNION ALL ".join(subqs))
-    if raw.empty:
-        return pd.DataFrame(columns=["ASIN_KEY", "DAY", "SESSIONS"])
-    raw["DAY_START"] = pd.to_datetime(raw["DAY_START"]).dt.date
-    raw["DAY_END"]   = pd.to_datetime(raw["DAY_END"]).dt.date
-
-    out_rows = []
-    # De-overlap per ASIN (collapsing across geos when geo='All' — a
-    # single ASIN shouldn't appear in two ASP tables, but if it does,
-    # the daily values will sum naturally).
-    for asin_key, grp in raw.groupby("ASIN_KEY"):
-        # Step 1: single-day rows are authoritative — use them as-is.
-        daily = {}
-        single = grp[grp["DAY_START"] == grp["DAY_END"]]
-        for _, r in single.iterrows():
-            daily[r["DAY_START"]] = daily.get(r["DAY_START"], 0) + int(r["SESSIONS"] or 0)
-        # Step 2: multi-day rows. Walk backwards by DAY_START; each row
-        # covers 3 calendar days (DAY_START, +1, +2) — the +3 / +4 days
-        # implied by DAY_END are NOT actually part of the data window
-        # despite what the column name suggests. (Verified empirically
-        # against Seller Central — see _ASP_TRAFFIC_TABLE comment.)
-        multi = (grp[grp["DAY_START"] != grp["DAY_END"]]
-                 .sort_values("DAY_START", ascending=False))
-        for _, r in multi.iterrows():
-            d  = r["DAY_START"]
-            d1 = d + timedelta(days=1)
-            d2 = d + timedelta(days=2)
-            val = int(r["SESSIONS"] or 0) - daily.get(d1, 0) - daily.get(d2, 0)
-            # Negative values would mean overlapping data is inconsistent —
-            # clamp to 0 so a dirty upstream row can't propagate negative
-            # totals into the dashboard.
-            daily[d] = max(val, 0)
-        # Step 3: filter to the user's actual date range and emit.
-        for day, sess in daily.items():
-            if d_from <= day <= d_to:
-                out_rows.append({"ASIN_KEY": asin_key, "DAY": day, "SESSIONS": sess})
-    return (pd.DataFrame(out_rows) if out_rows
-            else pd.DataFrame(columns=["ASIN_KEY", "DAY", "SESSIONS"]))
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
     """Per-ASIN summary for the selected GEO + date range. Joins P&L,
@@ -9360,7 +9250,7 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
     # snapshot across all geos so each marketplace contributes its own
     # FBA + ADW pool exactly once.
     geo_inv   = (f"AND UPPER(GEO) = UPPER('{geo}')" if geo and geo != "All" else "")
-    df = run_query(f"""
+    return run_query(f"""
         WITH pnl AS (
             SELECT SPLIT_PART(ASIN,' ',1)                    AS ASIN_KEY,
                    MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN)) AS PRODUCT_NAME,
@@ -9390,11 +9280,15 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
               AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
-        -- (Sessions intentionally NOT pulled here — VAHDAM_AMAZON_SALES_MARKETING
-        -- inherits an upstream Airbyte over-count from ASP rolling windows.
-        -- Sessions + CR% are merged in via _nb_clean_sessions after this
-        -- query runs, using a de-overlapped per-day series from the raw
-        -- ASP_<geo>_GET_SALES_AND_TRAFFIC_REPORT_ASIN table.)
+        sess AS (
+            SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+                   SUM(SESSIONS)          AS SESSIONS
+            FROM {SALES_MKT}
+            WHERE DAY BETWEEN '{d_from}' AND '{d_to}'
+              {geo_sess}
+              AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
         inv AS (
             -- Pick the LATEST snapshot per (ASIN, GEO) from the inventory
             -- table — the table stores ~14 daily snapshots with DATE as
@@ -9435,6 +9329,8 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                        / NULLIF(p.REVENUE, 0) * 100, 1)               AS ACOS_PCT,
                 ROUND(COALESCE(p.CM2_ABS, 0), 0)                      AS CM2_ABS,
                 ROUND(COALESCE(p.CM2_ABS / NULLIF(p.REVENUE,0) * 100, 0), 1) AS CM2_PCT,
+                ROUND(COALESCE(s.SESSIONS, 0), 0)                     AS SESSIONS,
+                ROUND(COALESCE(p.UNITS / NULLIF(s.SESSIONS, 0) * 100, 0), 2) AS CR_PCT,
                 ROUND(COALESCE(m.IMPRESSIONS, 0), 0)                  AS IMPRESSIONS,
                 ROUND(COALESCE(m.CLICKS, 0), 0)                       AS CLICKS,
                 ROUND(COALESCE(m.CLICKS / NULLIF(m.IMPRESSIONS,0) * 100, 0), 2) AS CTR_PCT,
@@ -9453,32 +9349,10 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                 ROUND(COALESCE(i.FBA_INV, 0) + COALESCE(i.ADW_INV, 0), 0) AS TOTAL_INV
         FROM pnl p
         LEFT JOIN mkt  m  ON p.ASIN_KEY = m.ASIN_KEY
+        LEFT JOIN sess s  ON p.ASIN_KEY = s.ASIN_KEY
         LEFT JOIN inv  i  ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
         ORDER BY REVENUE DESC NULLS LAST
     """)
-
-    # ── Merge in de-overlapped sessions from the raw ASP table ──
-    # See _nb_clean_sessions docstring for the recurrence + why this
-    # bypasses Maplemonk's VAHDAM_AMAZON_SALES_MARKETING.SESSIONS feed.
-    sess_clean = _nb_clean_sessions(asin_csv, geo, d_from, d_to)
-    if sess_clean.empty:
-        df["SESSIONS"] = 0
-    else:
-        sess_per_asin = (sess_clean.groupby("ASIN_KEY", as_index=False)["SESSIONS"]
-                         .sum())
-        df = df.merge(sess_per_asin.rename(columns={"ASIN_KEY": "ASIN"}),
-                       on="ASIN", how="left")
-        df["SESSIONS"] = df["SESSIONS"].fillna(0).astype(int)
-    # CR% recomputed against the clean session count so it lines up with
-    # Seller Central. NOTE: use float('nan'), NOT pd.NA — replacing into
-    # an int/float series with pd.NA promotes the column to object dtype
-    # and Series.round() then raises TypeError. NaN keeps the dtype as
-    # float64, so the division + rounding both work cleanly and zero-
-    # sessions rows render as blank in the table.
-    _units    = pd.to_numeric(df["UNITS"],    errors="coerce").astype("float64")
-    _sessions = pd.to_numeric(df["SESSIONS"], errors="coerce").astype("float64")
-    df["CR_PCT"] = (_units / _sessions.replace(0, float("nan")) * 100).round(2)
-    return df
 
 
 @st.cache_data(ttl=300, show_spinner=False)
