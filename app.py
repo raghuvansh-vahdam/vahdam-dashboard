@@ -1065,7 +1065,22 @@ if "_url_synced" not in st.session_state:
         if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
         if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
         if "asin" in qp:   st.session_state.selected_asin   = qp["asin"]
-        if "preset" in qp and "date_preset" not in st.session_state:
+        # Validate URL preset against the canonical option list before
+        # writing to session_state. Without this, a stale bookmark with
+        # an old preset name (e.g. ?preset=Last%207%20Day or a typo)
+        # writes an invalid value into the selectbox state, and on the
+        # next render Streamlit raises StreamlitAPIException:
+        #   "The default value of date_preset is not in the list of
+        #    options" — which manifests as the generic "Oh no" error
+        # page with shutdown-noise tracebacks (NameError on builtins
+        # in atexit callbacks). Validation here = silent fallback to
+        # the default MTD preset, no crash.
+        _VALID_PRESETS = {"MTD", "Last Month", "QTD", "YTD",
+                           "Last 7 Days", "Last 30 Days",
+                           "Last 60 Days", "Last 90 Days",
+                           "Custom Range"}
+        if ("preset" in qp and "date_preset" not in st.session_state
+                and qp["preset"] in _VALID_PRESETS):
             st.session_state.date_preset = qp["preset"]
         if "sku" in qp and "sku_search" not in st.session_state:
             st.session_state.sku_search = qp["sku"]
@@ -4086,7 +4101,14 @@ def sync_state_from_url():
         st.session_state.view = qp["view"]
     if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
     if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
-    if "preset" in qp and "date_preset" not in st.session_state:
+    # Validate against the canonical preset list — see the earlier
+    # _url_synced block at the top of app.py for the rationale.
+    _VALID_PRESETS = {"MTD", "Last Month", "QTD", "YTD",
+                      "Last 7 Days", "Last 30 Days",
+                      "Last 60 Days", "Last 90 Days",
+                      "Custom Range"}
+    if ("preset" in qp and "date_preset" not in st.session_state
+            and qp["preset"] in _VALID_PRESETS):
         st.session_state.date_preset = qp["preset"]
     if "sku" in qp and "sku_search" not in st.session_state:
         st.session_state.sku_search = qp["sku"]
