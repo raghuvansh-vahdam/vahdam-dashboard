@@ -3982,7 +3982,16 @@ def build_country_perf_chart(view1_df, fm_df=None):
     t["REV_PCT_n"] = pd.to_numeric(t["REV_PCT"], errors="coerce")
     t = t.dropna(subset=["REV_PCT_n"]).copy()
     if t.empty: return None
-    t = t.sort_values("REV_PCT_n", ascending=True).reset_index(drop=True)
+    # Sort by ABSOLUTE revenue (descending) so the biggest market sits at
+    # the top of the chart. The y-axis below uses autorange="reversed",
+    # so row 0 in the dataframe renders at the TOP. We used to sort by
+    # REV_PCT_n (% achieved), which buried the biggest revenue
+    # contributors (USA, UK) at the bottom — readers had to scroll past
+    # the smallest markets to see the most material ones. NaN sales fall
+    # to the bottom via na_position="last".
+    t["SALES_ACT_n"] = pd.to_numeric(t["SALES_ACT"], errors="coerce")
+    t = (t.sort_values("SALES_ACT_n", ascending=False, na_position="last")
+           .reset_index(drop=True))
 
     # Merge FM Budget columns onto the per-GEO totals if available.
     if fm_df is not None and not fm_df.empty and "CHANNEL" in fm_df.columns:
