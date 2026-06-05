@@ -2383,6 +2383,8 @@ def get_view2_amz(where, sfx):
             COALESCE(SUM(QTY_BUDGET),0),
             COALESCE(SUM(QTY_ACTUAL),0)
         FROM {TABLE} WHERE {where}
+        ORDER BY CASE SUB_CATEGORY WHEN 'GRAND TOTAL' THEN 9999 ELSE 1 END,
+                 SALES_BUD DESC NULLS LAST
     """)
 
 
@@ -5333,42 +5335,97 @@ def render_subcategory():
             s = [(x + TOTAL_ROW).lstrip(";") for x in s]
         return s
 
+    # Split into main (drillable sub-cats) + footer (GRAND TOTAL).
+    # Two tables stacked. The footer table is rendered without
+    # on_select so column-header sorting on the main table cannot
+    # move GRAND TOTAL away from the bottom — it always sits there.
+    _is_total_amz = table_df2["AMZ Sub Category"] == "GRAND TOTAL"
+    table_main_amz = table_df2[~_is_total_amz].reset_index(drop=True)
+    table_total_amz = table_df2[_is_total_amz].reset_index(drop=True)
+
+    _col_cfg_amz = {
+        "Lag(R)": st.column_config.NumberColumn(
+            "Lag(R)",
+            help="Budget Revenue − Actual Revenue. "
+                 "Positive = behind plan, negative = ahead of plan. "
+                 "Sortable by clicking the column header.",
+            format=f"{sym}%+,.0f",
+        ),
+        "Lag(U)": st.column_config.NumberColumn(
+            "Lag(U)",
+            help="Budget Units − Actual Units. "
+                 "Positive = behind plan, negative = ahead of plan.",
+            format="%+,.0f",
+        ),
+    }
+
+    # Main body — sortable, drillable. Styler index drops the
+    # GRAND TOTAL row so .iloc lookups inside style_v2 still align
+    # with the main DataFrame.
+    _rev_n2_main   = _rev_n2[~_is_total_amz].reset_index(drop=True)
+    _cm2a_n2_main  = _cm2a_n2[~_is_total_amz].reset_index(drop=True)
+    _var_n2_main   = _var_n2[~_is_total_amz].reset_index(drop=True)
+    _lag_r_n2_main = _lag_r_n2[~_is_total_amz].reset_index(drop=True)
+    _lag_u_n2_main = _lag_u_n2[~_is_total_amz].reset_index(drop=True)
+    _acos_delta_main = _acos_delta_sc[~_is_total_amz].reset_index(drop=True)
+    _cm2pct_delta_main = _cm2pct_delta_sc[~_is_total_amz].reset_index(drop=True)
+
+    def style_v2_main(row):
+        s = [""] * len(row)
+        idx = row.index.tolist()
+        s[idx.index("% Achieved")]  = color_pct(_rev_n2_main.iloc[row.name])
+        s[idx.index("CM2 Abs %")]   = color_pct(_cm2a_n2_main.iloc[row.name])
+        s[idx.index("CM2 Var")]     = color_var(_var_n2_main.iloc[row.name])
+        s[idx.index("Lag(R)")]      = _lag_style(_f(_lag_r_n2_main.iloc[row.name]))
+        s[idx.index("Lag(U)")]      = _lag_style(_f(_lag_u_n2_main.iloc[row.name]))
+        av = _f(_acos_delta_main.iloc[row.name])
+        if av is not None:
+            s[idx.index("Act ACoS%")] = (
+                "color:#8b1a1a;font-weight:600" if av > 0
+                else "color:#004A2B;font-weight:600")
+        cv = _f(_cm2pct_delta_main.iloc[row.name])
+        if cv is not None:
+            s[idx.index("Act CM2%")] = (
+                "color:#004A2B;font-weight:600" if cv > 0
+                else "color:#8b1a1a;font-weight:600")
+        return s
+
     event = st.dataframe(
-        table_df2.style.apply(style_v2, axis=1).hide(axis="index"),
-        use_container_width=True, height=550,
-        column_config={
-            "Lag(R)": st.column_config.NumberColumn(
-                "Lag(R)",
-                help="Budget Revenue − Actual Revenue. "
-                     "Positive = behind plan, negative = ahead of plan. "
-                     "Sortable by clicking the column header.",
-                format=f"{sym}%+,.0f",
-            ),
-            "Lag(U)": st.column_config.NumberColumn(
-                "Lag(U)",
-                help="Budget Units − Actual Units. "
-                     "Positive = behind plan, negative = ahead of plan.",
-                format="%+,.0f",
-            ),
-        },
+        table_main_amz.style.apply(style_v2_main, axis=1).hide(axis="index"),
+        use_container_width=True, height=500,
+        column_config=_col_cfg_amz,
         on_select="rerun", selection_mode="single-row",
         key="subcat_table")
 
+    # Footer — just the GRAND TOTAL row, no selection, no sort UI.
+    # Rendered as a separate dataframe directly below the main body so
+    # it visually reads as the last row of the same table while staying
+    # immune to whatever column the user sorts above.
+    if not table_total_amz.empty:
+        def style_v2_total(row):
+            s = [""] * len(row)
+            return [(x + TOTAL_ROW).lstrip(";") for x in s]
+        st.dataframe(
+            table_total_amz.style.apply(style_v2_total, axis=1).hide(axis="index"),
+            use_container_width=True, height=58,   # one-row + header
+            column_config=_col_cfg_amz,
+            hide_index=True,
+            key="subcat_table_total")
+
     if event.selection.rows:
         idx = event.selection.rows[0]
-        clicked = table_df2.iloc[idx]["AMZ Sub Category"]
-        if clicked and clicked != "GRAND TOTAL":
+        clicked = table_main_amz.iloc[idx]["AMZ Sub Category"]
+        if clicked:
             # AMZ-bucket drill: the row label here is an AMZ_CATEGORY
             # value (canonicalized), so we route it through the AMZ
             # filter — render_asin then builds its WHERE clause off
-            # _amz_cat_norm("AMZ_CATEGORY") = '<bucket>'.
+            # _amz_cat_norm("AMZ_CATEGORY") = '<bucket>'. GRAND TOTAL
+            # is already excluded from table_main_amz so no special
+            # case needed here.
             st.session_state.selected_amz_subcat = clicked
             st.session_state.selected_subcat     = clicked   # seeds breadcrumb back-nav
             st.session_state.view                = "asin"
             st.rerun()
-        elif clicked == "GRAND TOTAL":
-            st.caption("ℹ️ Click a specific AMZ Sub Category row to drill into "
-                       "ASINs. Grand Total isn't drillable.")
 
     # ────────────────────────────────────────────────────────────────────
     # CR TRACKER — flat per-ASIN table for the whole GEO
