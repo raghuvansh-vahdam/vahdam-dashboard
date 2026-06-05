@@ -1080,6 +1080,7 @@ def render_friendly_data_error(err, where="dashboard", sql_snippet=None):
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in [("view","ceo"), ("selected_geo",None), ("selected_subcat",None),
+             ("selected_amz_subcat",None),
              ("selected_asin",None), ("selected_asin_product",None)]:
     if k not in st.session_state: st.session_state[k] = v
 
@@ -1091,6 +1092,11 @@ if "_url_synced" not in st.session_state:
             st.session_state.view = qp["view"]
         if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
         if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
+        # AMZ Sub Category drill — uses the canonicalized AMZ_CATEGORY column
+        # from the P&L feed. Mutually exclusive with `?subcat=`: when both
+        # are present, the ASIN view filters by AMZ_CATEGORY (the more
+        # specific bucket) — see render_asin().
+        if "amz_subcat" in qp: st.session_state.selected_amz_subcat = qp["amz_subcat"]
         if "asin" in qp:   st.session_state.selected_asin   = qp["asin"]
         # Validate URL preset against the canonical option list before
         # writing to session_state. Without this, a stale bookmark with
@@ -2499,17 +2505,32 @@ def get_asin_rolling(asin, geo, sfx):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_asin_totals(geo, sub_cat, d1, d2, sfx):
+def get_asin_totals(geo, sub_cat, d1, d2, sfx, amz_subcat=None):
     """One-row totals for a (geo, sub_cat, date range).
 
     Aggregates P&L (table) and marketing (table) separately to avoid the JOIN
     duplicating P&L rows when one (day, asin) has multiple campaign rows.
+
+    `amz_subcat` (optional): when set, filter by the canonicalized
+    AMZ_CATEGORY value (the finer-grained Amazon taxonomy from the FY27
+    P&L feed) INSTEAD of SUB_CATEGORY — used by the AMZ Sub Category
+    drill-down so clicking a bucket like "Samplers" shows the ASINs
+    tagged with AMZ_CATEGORY = 'Samplers'.
     """
-    esc = sub_cat.replace("'","''")
-    if sub_cat == "(untagged)":
-        pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+    if amz_subcat is not None:
+        esc_amz = amz_subcat.replace("'", "''")
+        amz_norm = _amz_cat_norm("AMZ_CATEGORY")
+        if amz_subcat == "(untagged)":
+            pnl_subcat = (f"COALESCE(NULLIF({amz_norm},''),'(untagged)') "
+                          f"= '(untagged)'")
+        else:
+            pnl_subcat = f"{amz_norm} = '{esc_amz}'"
     else:
-        pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+        esc = sub_cat.replace("'","''")
+        if sub_cat == "(untagged)":
+            pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+        else:
+            pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
 
     pnl = run_query(f"""
         SELECT
@@ -2569,7 +2590,7 @@ def get_asin_totals(geo, sub_cat, d1, d2, sfx):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_asin_data(where, geo, sub_cat, sfx):
+def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
     """ASIN-level table for the ASIN view.
 
     IMPORTANT: P&L and marketing MUST be aggregated separately before any
@@ -2589,11 +2610,23 @@ def get_asin_data(where, geo, sub_cat, sfx):
         is intentionally NOT in the mix — a single-day spike (e.g. a
         coupon drop) should not collapse the cover-days estimate.
     """
-    esc = sub_cat.replace("'","''")
-    if sub_cat == "(untagged)":
-        pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+    if amz_subcat is not None:
+        # AMZ Sub Category drill — filter by canonicalized AMZ_CATEGORY
+        # bucket instead of SUB_CATEGORY. See get_asin_totals for the
+        # full rationale.
+        esc_amz = amz_subcat.replace("'", "''")
+        amz_norm = _amz_cat_norm("AMZ_CATEGORY")
+        if amz_subcat == "(untagged)":
+            pnl_subcat = (f"COALESCE(NULLIF({amz_norm},''),'(untagged)') "
+                          f"= '(untagged)'")
+        else:
+            pnl_subcat = f"{amz_norm} = '{esc_amz}'"
     else:
-        pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+        esc = sub_cat.replace("'","''")
+        if sub_cat == "(untagged)":
+            pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+        else:
+            pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
 
     # Anchor the 7/14/30-day Cover-Days windows to the 3pm-IST effective
     # day so partial-day today never lifts the max-velocity denominator
@@ -3391,6 +3424,11 @@ def render_breadcrumbs(segments):
                     st.session_state.view = view_state
                     if geo is not None:    st.session_state.selected_geo = geo
                     if subcat is not None: st.session_state.selected_subcat = subcat
+                    # Clearing the AMZ key on any crumb hop matches the
+                    # mental model — clicking GEO crumb resets back to
+                    # the sub-cat overview, no stale AMZ filter lingers.
+                    if view_state in ("overview", "subcategory"):
+                        st.session_state.selected_amz_subcat = None
                     st.rerun()
         cidx += 1
         if i < n - 1:
@@ -3859,9 +3897,10 @@ def render_alerts(view1_df, kpi_row, agg_label="GEO", key_prefix="alert"):
                                  key=f"{key_prefix}_{key_kind}_{geo}",
                                  use_container_width=True,
                                  help=f"Open {geo} sub-category breakdown"):
-                        st.session_state.selected_geo    = geo
-                        st.session_state.selected_subcat = None
-                        st.session_state.view            = "subcategory"
+                        st.session_state.selected_geo        = geo
+                        st.session_state.selected_subcat     = None
+                        st.session_state.selected_amz_subcat = None
+                        st.session_state.view                = "subcategory"
                         st.rerun()
             # If more than 6, mention the rest
             if len(rows) > n_cols:
@@ -4260,6 +4299,7 @@ def sync_state_from_url():
         st.session_state.view = qp["view"]
     if "geo" in qp:    st.session_state.selected_geo    = qp["geo"]
     if "subcat" in qp: st.session_state.selected_subcat = qp["subcat"]
+    if "amz_subcat" in qp: st.session_state.selected_amz_subcat = qp["amz_subcat"]
     # Validate against the canonical preset list — see the earlier
     # _url_synced block at the top of app.py for the rationale.
     _VALID_PRESETS = {"MTD", "Last Month", "QTD", "YTD",
@@ -4273,14 +4313,15 @@ def sync_state_from_url():
         st.session_state.sku_search = qp["sku"]
 
 
-def write_state_to_url(view, geo, subcat, preset, sku):
+def write_state_to_url(view, geo, subcat, preset, sku, amz_subcat=None):
     """Mirror current session state to URL query params (so the URL can be shared)."""
     qp = {}
-    if view:                       qp["view"]   = view
-    if geo:                        qp["geo"]    = geo
-    if subcat:                     qp["subcat"] = subcat
-    if preset and preset != "MTD": qp["preset"] = preset
-    if sku and sku.strip():        qp["sku"]    = sku.strip()
+    if view:                       qp["view"]       = view
+    if geo:                        qp["geo"]        = geo
+    if subcat:                     qp["subcat"]     = subcat
+    if amz_subcat:                 qp["amz_subcat"] = amz_subcat
+    if preset and preset != "MTD": qp["preset"]     = preset
+    if sku and sku.strip():        qp["sku"]        = sku.strip()
     st.query_params.update(qp)
 
 
@@ -4608,9 +4649,10 @@ def render_ceo():
             if points:
                 clicked_geo = points[0].get("y") or points[0].get("label")
                 if clicked_geo:
-                    st.session_state.selected_geo    = clicked_geo
-                    st.session_state.selected_subcat = None
-                    st.session_state.view            = "subcategory"
+                    st.session_state.selected_geo        = clicked_geo
+                    st.session_state.selected_subcat     = None
+                    st.session_state.selected_amz_subcat = None
+                    st.session_state.view                = "subcategory"
                     st.rerun()
 
     # ── Daily Sales sparkline ──
@@ -4707,7 +4749,8 @@ def render_ceo():
                        st.session_state.selected_geo,
                        st.session_state.selected_subcat,
                        st.session_state.get("date_preset", "MTD"),
-                       st.session_state.get("sku_search", ""))
+                       st.session_state.get("sku_search", ""),
+                       amz_subcat=st.session_state.get("selected_amz_subcat"))
 
     # ── Drill into full dashboard ──
     # Country-level drill is handled by clicking the bar chart above.
@@ -4973,9 +5016,10 @@ def render_overview():
         idx = event.selection.rows[0]
         row_sel = table_df.iloc[idx]
         if row_sel["CHANNEL"] == "TOTAL":
-            st.session_state.selected_geo    = row_sel["GEO"]
-            st.session_state.selected_subcat = None
-            st.session_state.view            = "subcategory"
+            st.session_state.selected_geo        = row_sel["GEO"]
+            st.session_state.selected_subcat     = None
+            st.session_state.selected_amz_subcat = None
+            st.session_state.view                = "subcategory"
             st.rerun()
         else:
             st.caption(f"ℹ️ Selected {row_sel['GEO']} / {row_sel['CHANNEL']}. "
@@ -5098,8 +5142,11 @@ def render_subcategory():
         if sc_points:
             clicked_sc = sc_points[0].get("y") or sc_points[0].get("label")
             if clicked_sc:
-                st.session_state.selected_subcat = clicked_sc
-                st.session_state.view = "asin"
+                # SUB_CATEGORY drill — clear the AMZ key so the ASIN
+                # view falls back to filtering by SUB_CATEGORY only.
+                st.session_state.selected_subcat     = clicked_sc
+                st.session_state.selected_amz_subcat = None
+                st.session_state.view                = "asin"
                 st.rerun()
         st.caption("Bars: Revenue % vs Budget. 🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
                    "**Click a bar** to open that sub-category's ASIN view.")
@@ -5116,17 +5163,32 @@ def render_subcategory():
     fm_amz_df    = get_view2_amz(where_fm, sfx)
     amz_scfig    = build_subcat_perf_chart(df_amz, fm_df=fm_amz_df)
     if amz_scfig is not None:
-        st.plotly_chart(
+        amz_evt = st.plotly_chart(
             amz_scfig, use_container_width=True,
             config={"displayModeBar": False},
+            on_select="rerun",
+            selection_mode=("points",),
             key=f"amz_subcat_chart_{geo}",
         )
+        try:
+            amz_points = amz_evt.selection.points if amz_evt else []
+        except Exception:
+            amz_points = []
+        if amz_points:
+            clicked_amz = amz_points[0].get("y") or amz_points[0].get("label")
+            if clicked_amz:
+                # AMZ-bucket drill: set the AMZ key and CLEAR the SUB_CATEGORY
+                # key. The two are mutually exclusive — render_asin treats
+                # selected_amz_subcat as the dominant filter when set.
+                st.session_state.selected_amz_subcat = clicked_amz
+                st.session_state.selected_subcat     = clicked_amz   # also seed for breadcrumb back-nav
+                st.session_state.view                = "asin"
+                st.rerun()
         st.caption(
             "Bars: Revenue % vs Budget per AMZ Sub Category bucket. "
             "🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
-            "(Click-to-drill is disabled here because the ASIN view "
-            "currently filters by Sub-Category — open an ASIN list via "
-            "the Sub-Category chart above.)"
+            "**Click a bar** to open the ASIN list filtered by "
+            "AMZ_CATEGORY = that bucket."
         )
 
     st.markdown('<div class="section-hdr" style="margin-top:18px;">'
@@ -5249,14 +5311,13 @@ def render_subcategory():
         idx = event.selection.rows[0]
         clicked = table_df2.iloc[idx]["AMZ Sub Category"]
         if clicked and clicked != "GRAND TOTAL":
-            # The ASIN view currently filters by SUB_CATEGORY only —
-            # clicking a row here won't match if the AMZ_CATEGORY
-            # bucket name differs. Surface a note so users aren't
-            # confused by an empty ASIN list, and still attempt the
-            # drill in case the AMZ name matches a SUB_CATEGORY value
-            # exactly (e.g. "Green Teas" exists in both taxonomies).
-            st.session_state.selected_subcat = clicked
-            st.session_state.view = "asin"
+            # AMZ-bucket drill: the row label here is an AMZ_CATEGORY
+            # value (canonicalized), so we route it through the AMZ
+            # filter — render_asin then builds its WHERE clause off
+            # _amz_cat_norm("AMZ_CATEGORY") = '<bucket>'.
+            st.session_state.selected_amz_subcat = clicked
+            st.session_state.selected_subcat     = clicked   # seeds breadcrumb back-nav
+            st.session_state.view                = "asin"
             st.rerun()
         elif clicked == "GRAND TOTAL":
             st.caption("ℹ️ Click a specific AMZ Sub Category row to drill into "
@@ -5595,22 +5656,34 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
 # VIEW 3 — ASIN Level
 # ═══════════════════════════════════════════════════════════════════════════════
 def render_asin():
-    geo     = st.session_state.selected_geo
-    subcat  = st.session_state.selected_subcat
+    geo         = st.session_state.selected_geo
+    subcat      = st.session_state.selected_subcat
+    amz_subcat  = st.session_state.get("selected_amz_subcat")
+
+    # When the user drilled in via the AMZ Sub Category chart/table, the
+    # bucket label and SQL filter both come from AMZ_CATEGORY, not
+    # SUB_CATEGORY. We surface "AMZ: <bucket>" in the title so it's
+    # obvious which taxonomy is filtering the list, and the breadcrumb's
+    # third crumb shows the same.
+    using_amz   = amz_subcat is not None
+    bucket_lbl  = (f"AMZ: {amz_subcat}" if using_amz else subcat)
 
     c1, c2 = st.columns([1, 9])
     with c1:
         if st.button("← Back"):
+            # Clear BOTH bucket keys on the way back so the subcategory
+            # view doesn't auto-redirect on its next render.
+            st.session_state.selected_amz_subcat = None
             st.session_state.view = "subcategory"
             st.rerun()
     with c2:
         render_breadcrumbs([
-            ("Overview",  "overview",    None, None),
-            (geo,         "subcategory", geo,  None),
-            (subcat,      "asin",        geo,  subcat),
+            ("Overview",   "overview",    None, None),
+            (geo,          "subcategory", geo,  None),
+            (bucket_lbl,   "asin",        geo,  subcat),
         ])
         st.markdown(
-            f'<div class="page-title">ASIN View &mdash; {geo} / {subcat}</div>',
+            f'<div class="page-title">ASIN View &mdash; {geo} / {bucket_lbl}</div>',
             unsafe_allow_html=True)
         st.markdown(
             f'<div class="page-sub">{d_from.strftime("%d %b %Y")} &rarr; {d_to.strftime("%d %b %Y")} '
@@ -5618,7 +5691,7 @@ def render_asin():
             unsafe_allow_html=True)
 
     where = build_where(geo_override=geo)
-    df    = get_asin_data(where, geo, subcat, sfx)
+    df    = get_asin_data(where, geo, subcat, sfx, amz_subcat=amz_subcat)
 
     if df.empty:
         st.warning("📭 No ASIN data found for this selection. Try a different sub-category or date range.")
@@ -5627,7 +5700,7 @@ def render_asin():
     # ── Summary KPIs ──
     # Period totals (current) — query aggregates P&L and marketing separately
     # so the JOIN doesn't multiply P&L budgets by campaign-row count.
-    _totals = get_asin_totals(geo, subcat, d_from, d_to, sfx)
+    _totals = get_asin_totals(geo, subcat, d_from, d_to, sfx, amz_subcat=amz_subcat)
     if not _totals.empty:
         t = _totals.iloc[0]
         act_rev  = _f(t["ACT_REVENUE"])
@@ -5646,8 +5719,8 @@ def render_asin():
         paid_spd = paid_rev = impressions = clicks = conversions = None
 
     # Prior-period totals (LM and LY) — for growth/loss deltas
-    _lm = get_asin_totals(geo, subcat, lm_d_from, lm_d_to, sfx)
-    _ly = get_asin_totals(geo, subcat, ly_d_from, ly_d_to, sfx)
+    _lm = get_asin_totals(geo, subcat, lm_d_from, lm_d_to, sfx, amz_subcat=amz_subcat)
+    _ly = get_asin_totals(geo, subcat, ly_d_from, ly_d_to, sfx, amz_subcat=amz_subcat)
     lm_row = _lm.iloc[0] if not _lm.empty else None
     ly_row = _ly.iloc[0] if not _ly.empty else None
 
@@ -6133,10 +6206,16 @@ def render_asin():
 # ═══════════════════════════════════════════════════════════════════════════════
 def render_asin_detail():
     """Single-ASIN deep dive — daily revenue/units/spend with rich hover."""
-    asin   = st.session_state.selected_asin
-    prod   = st.session_state.selected_asin_product or asin
-    geo    = st.session_state.selected_geo
-    subcat = st.session_state.selected_subcat
+    asin       = st.session_state.selected_asin
+    prod       = st.session_state.selected_asin_product or asin
+    geo        = st.session_state.selected_geo
+    subcat     = st.session_state.selected_subcat
+    amz_subcat = st.session_state.get("selected_amz_subcat")
+
+    # When the user reached this detail page via the AMZ-bucket drill,
+    # surface the AMZ bucket in the breadcrumb so it's obvious which
+    # filter was in play upstream.
+    bucket_lbl = (f"AMZ: {amz_subcat}" if amz_subcat else (subcat or "—"))
 
     # ── Header + breadcrumbs ──
     c1, c2 = st.columns([1, 9])
@@ -6146,10 +6225,10 @@ def render_asin_detail():
             st.rerun()
     with c2:
         render_breadcrumbs([
-            ("Overview",   "overview",    None,    None),
-            (geo or "—",   "subcategory", geo,     None),
-            (subcat or "—","asin",        geo,     subcat),
-            (asin or "—",  "asin_detail", geo,     subcat),
+            ("Overview",     "overview",    None,    None),
+            (geo or "—",     "subcategory", geo,     None),
+            (bucket_lbl,     "asin",        geo,     subcat),
+            (asin or "—",    "asin_detail", geo,     subcat),
         ])
         st.markdown(
             f'<div class="page-title">ASIN Deep Dive &mdash; {asin}</div>',
