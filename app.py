@@ -9336,6 +9336,14 @@ def render_category():
                            family=_VAHDAM_FONT_FAMILY),
             hoverinfo="skip",
         ))
+        # Main "Current" bar — per-bar growth-tier colors (green / amber /
+        # red). Auto-legend is hidden because Plotly otherwise picks the
+        # FIRST entry in `bar_colors` as the legend swatch, which lands on
+        # red whenever the lowest-revenue (data-row-0) sub-category is a
+        # decliner — misleading users into thinking Current = "bad" by
+        # default. The dedicated swatch trace immediately below fixes the
+        # legend colour to a neutral Vahdam green while the bars keep
+        # their per-tier signalling.
         fig.add_trace(go.Bar(
             x=srt["SALES_ACT"], y=srt["SUB_CATEGORY"],
             orientation="h", name="Current",
@@ -9347,6 +9355,17 @@ def render_category():
                            family=_VAHDAM_FONT_FAMILY),
             customdata=hover_text,
             hovertemplate="%{customdata}<extra></extra>",
+            showlegend=False,
+        ))
+        # Legend-only proxy with a fixed Vahdam-green swatch. Empty data
+        # means it never renders an actual bar, but Plotly still draws the
+        # legend item using the marker.color provided here.
+        fig.add_trace(go.Bar(
+            x=[None], y=[None],
+            orientation="h", name="Current",
+            marker=dict(color="#1a7a3e"),
+            hoverinfo="skip",
+            showlegend=True,
         ))
         n = len(srt)
         fig.update_layout(
