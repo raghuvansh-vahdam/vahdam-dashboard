@@ -2913,7 +2913,15 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             END                                                                     AS COVER_DAYS,
             -- ── Current period: Sessions (raw) + CR% (sessions
             --    extrapolated to match unit-day coverage) ──
-            {sess_cur_n_expr}                                                       AS SESSIONS,
+            -- Sessions: extrapolated so the day-coverage matches units.
+            -- Sessions feed sometimes lags the orders feed by 1–2 days
+            -- (mobile-app sessions especially). If we showed the raw
+            -- SUM, the displayed Sessions in a 3-day window where one
+            -- day's sessions hasn't landed yet would only cover 2 days
+            -- — making CR% look inflated. Use sess_cur_extrap (same
+            -- denominator CR% already uses) so the displayed number
+            -- represents a like-for-like 3-day-equivalent session count.
+            ROUND({sess_cur_extrap}, 0)                                             AS SESSIONS,
             ROUND(p.ACT_UNITS_RAW
                     / NULLIF({sess_cur_extrap}, 0) * 100, 2)                        AS CR_PCT,
             -- Period totals (selected date range)
@@ -2944,15 +2952,19 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                     / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)                        AS ACT_ACOS_PCT,
             ROUND(p.CM2_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM2_PCT,
             ROUND(p.CM2_ACT_RAW   / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)          AS ACT_CM2_PCT,
-            -- ── Previous full month (extrapolated sessions in CR%) ──
-            {sess_pm_expr}                                                          AS PM_SESSIONS,
+            -- ── Previous full month (extrapolated sessions) ──
+            -- PM Sessions also uses the extrapolated form (same as the
+            -- denominator of PM CR%) so the displayed Sessions column
+            -- stays consistent with CR% even when session-feed
+            -- day-coverage lagged the units feed during that month.
+            ROUND({sess_pm_extrap}, 0)                                              AS PM_SESSIONS,
             ROUND(COALESCE(pm.UNITS, 0)
                     / NULLIF({sess_pm_extrap}, 0) * 100, 2)                         AS PM_CR_PCT,
             ROUND(COALESCE(pm.UNITS, 0), 0)                                         AS PM_UNITS,
             ROUND(pm.REVENUE / NULLIF(pm.UNITS, 0), 2)                              AS PM_ASP,
             ROUND(pm.SPEND / NULLIF(pm.REVENUE, 0) * 100, 1)                        AS PM_ACOS_PCT,
-            -- ── Previous-1 full month (extrapolated sessions in CR%) ──
-            {sess_pm1_expr}                                                         AS PM1_SESSIONS,
+            -- ── Previous-1 full month (extrapolated sessions) ──
+            ROUND({sess_pm1_extrap}, 0)                                             AS PM1_SESSIONS,
             ROUND(COALESCE(pm1.UNITS, 0)
                     / NULLIF({sess_pm1_extrap}, 0) * 100, 2)                        AS PM1_CR_PCT,
             ROUND(COALESCE(pm1.UNITS, 0), 0)                                        AS PM1_UNITS,
@@ -5319,8 +5331,13 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                          "Red < 20 days; amber 20–40."),
                 "Sessions":        st.column_config.NumberColumn(
                     format="%,d",
-                    help="Sessions for the selected date range (from "
-                         "vahdam_amazon_sales_marketing)."),
+                    help="Sessions for the selected date range, "
+                         "extrapolated when the session feed has fewer "
+                         "data-days than the units feed. Formula: raw "
+                         "sessions × (unit_days ÷ session_days) when "
+                         "session_days < unit_days; raw sum otherwise. "
+                         "Keeps CR% honest by matching the day-coverage "
+                         "of the numerator (Units)."),
                 "CR%":             st.column_config.NumberColumn(
                     format="%.2f%%",
                     help="Conversion rate = Actual Units ÷ Sessions × 100."),
