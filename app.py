@@ -1503,11 +1503,35 @@ with st.sidebar:
         Amazon P&L Dashboard</div>""", unsafe_allow_html=True)
     st.markdown("---")
 
-    # Default to Local currency so users see $ / £ / € / etc. for their
-    # selected GEO out of the box. INR conversion stays one click away.
+    # View-aware currency default:
+    #   * Rollup views (CEO / Overall / Category / Sub-Category / P&L / DBR)
+    #     default to INR — exec-level reads stay denominated in the home
+    #     currency so India-side stakeholders can compare across GEOs.
+    #   * ASIN-level views (ASIN list, ASIN detail, New Business, Price
+    #     Tracker, Customer Insights) default to Local — operators
+    #     working on individual products want to see $ / £ / € prices
+    #     the way they appear on Amazon / Shopify.
+    # User override sticks within a view class (so flipping to Local on
+    # the Overall view stays Local through other Overall reruns), but the
+    # next time the user crosses the rollup ↔ ASIN boundary the new
+    # default is re-applied. That way "drill into ASIN → see Local"
+    # works out of the box every session, and INR rollups are the
+    # default any time the user backs up to a higher-level view.
+    _ASIN_LEVEL_VIEWS = {"asin", "asin_detail", "new_business",
+                          "price", "customer_insights"}
+    _cur_view  = st.session_state.get("view", "ceo")
+    _vclass    = "asin" if _cur_view in _ASIN_LEVEL_VIEWS else "rollup"
+    _default_label = ("Local ($, €, £, …)" if _vclass == "asin"
+                                            else "INR (₹)")
+    # Reset the radio's bound value whenever the user crosses the class
+    # boundary. First render also falls into this branch (no prior class
+    # recorded yet) so the initial paint picks up the right default.
+    if st.session_state.get("_currency_view_class") != _vclass:
+        st.session_state.currency_choice = _default_label
+        st.session_state._currency_view_class = _vclass
     use_inr = st.radio("Currency",
                        ["INR (₹)", "Local ($, €, £, …)"],
-                       index=1) == "INR (₹)"
+                       key="currency_choice") == "INR (₹)"
     sfx = "INR" if use_inr else "LOCAL"
     sym = "₹" if use_inr else ""
 
