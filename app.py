@@ -1545,38 +1545,26 @@ with st.sidebar:
     # ── Filters ──
     @st.cache_data(ttl=600)
     def get_options():
-        return run_query(f"SELECT DISTINCT BRAND,CATEGORY,CHANNEL,GEO,SUB_CATEGORY FROM {TABLE} WHERE {GEO_EXCL}")
+        return run_query(
+            f"SELECT DISTINCT BRAND, CATEGORY, CHANNEL, GEO, "
+            f"SUB_CATEGORY, AMZ_CATEGORY "
+            f"FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
 
     st.markdown("#### Filters")
     if st.button("⟲ Clear all filters", use_container_width=True,
                  key="clear_filters",
-                 help="Reset Brand / Category / Channel / GEO / Sub-Category / SKU search"):
-        for k in ["flt_brand","flt_cat","flt_channel","flt_geo","flt_subcat","sku_search"]:
+                 help="Reset Brand / Category / Channel / GEO / Sub-Category / "
+                      "AMZ Sub Category / SKU search"):
+        for k in ["flt_brand","flt_cat","flt_channel","flt_geo",
+                  "flt_subcat","flt_amz_subcat","sku_search"]:
             st.session_state.pop(k, None)
         st.rerun()
 
     f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
                                key="flt_brand")
-    # AMZ Category — Amazon's CATEGORY tag from the FY27 P&L table.
-    # Renamed from "Category" so the source is explicit (vs D2C
-    # category / Sub-Category / Brand which coexist). Defensive string
-    # handling: drop NA → cast to str → strip → drop empties, then
-    # append a synthetic "(untagged)" option ONLY if there are
-    # genuinely empty/NULL CATEGORY rows so users can filter to them.
-    _amz_cat_strs = (opts["CATEGORY"].dropna().astype(str).str.strip())
-    _amz_cat_real = sorted({c for c in _amz_cat_strs if c})
-    _amz_has_untagged = (
-        opts["CATEGORY"].isna().any()
-        or (opts["CATEGORY"].astype(str).str.strip() == "").any()
-    )
-    _amz_cat_opts = _amz_cat_real + (["(untagged)"] if _amz_has_untagged else [])
-    f_cat     = st.multiselect("AMZ Category", _amz_cat_opts,
-                               key="flt_cat",
-                               help="Amazon's CATEGORY tag from the FY27 P&L "
-                                    "table — Tea and Botanicals · Supplements · "
-                                    "Coffee · (untagged). Distinct from D2C "
-                                    "Category and from Sub-Category.")
+    f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
+                               key="flt_cat")
     _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
     _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
     _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
@@ -1586,9 +1574,24 @@ with st.sidebar:
                                key="flt_geo")
     f_subcat  = st.multiselect("Sub-Category", sorted(opts["SUB_CATEGORY"].dropna().unique()),
                                key="flt_subcat")
+    # AMZ Sub Category — Amazon's finer-grained AMZ_CATEGORY tag from
+    # the P&L table (e.g. Black Teas, Samplers, Green Teas, Herbal Teas,
+    # HP - Teas, HP - Spices, Matcha, Single Spices, Iced Teas …). This
+    # is distinct from the broader CATEGORY column above (which only
+    # has Tea and Botanicals / Supplements / Coffee) and from
+    # SUB_CATEGORY (Vahdam's internal sub-category taxonomy).
+    f_amz_subcat = st.multiselect(
+        "AMZ Sub Category",
+        sorted(opts["AMZ_CATEGORY"].dropna().unique()),
+        key="flt_amz_subcat",
+        help="Amazon's AMZ_CATEGORY tag from the FY27 P&L table "
+             "(Black Teas, Samplers, Green Teas, HP - Teas, etc.). "
+             "Distinct from the broader Category filter above and "
+             "from Sub-Category.")
 
     # Active-filter count badge
-    _active = sum(1 for x in [f_brand, f_cat, f_channel, f_geo, f_subcat] if x)
+    _active = sum(1 for x in [f_brand, f_cat, f_channel, f_geo,
+                              f_subcat, f_amz_subcat] if x)
     if _active:
         st.caption(f"🔵 {_active} filter{'s' if _active != 1 else ''} active")
 
@@ -1852,20 +1855,7 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
     d2 = date_to   or d_to
     w  = [f"DAY BETWEEN '{d1}' AND '{d2}'", GEO_EXCL]
     if f_brand:   w.append(f"BRAND IN ({','.join(repr(x) for x in f_brand)})")
-    if f_cat:
-        # The UI surfaces "(untagged)" as a synthetic value for the
-        # empty-string / NULL CATEGORY rows (~52% of the P&L table).
-        # Translate it back at the SQL boundary so the IN-clause
-        # matches the underlying column.
-        _real_cats = [c for c in f_cat if c != "(untagged)"]
-        _need_untagged = "(untagged)" in f_cat
-        _parts = []
-        if _real_cats:
-            _parts.append(f"CATEGORY IN ({','.join(repr(x) for x in _real_cats)})")
-        if _need_untagged:
-            _parts.append("(CATEGORY IS NULL OR TRIM(CATEGORY) = '')")
-        if _parts:
-            w.append("(" + " OR ".join(_parts) + ")")
+    if f_cat:     w.append(f"CATEGORY IN ({','.join(repr(x) for x in f_cat)})")
     if f_channel: w.append(f"CHANNEL IN ({','.join(repr(x) for x in f_channel)})")
     if geo_override:
         w.append(f"GEO = '{geo_override}'")
@@ -1879,6 +1869,10 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
             w.append(f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))")
     elif f_subcat:
         w.append(f"SUB_CATEGORY IN ({','.join(repr(x) for x in f_subcat)})")
+    # AMZ Sub Category filter — Amazon's finer-grained AMZ_CATEGORY tag.
+    # Independent of CATEGORY / SUB_CATEGORY so the three can stack.
+    if f_amz_subcat:
+        w.append(f"AMZ_CATEGORY IN ({','.join(repr(x) for x in f_amz_subcat)})")
     # SKU / ASIN / product-name filter applies to all main views unless suppressed
     if apply_sku and sku_search and sku_search.strip():
         t = sku_search.strip().replace("'", "''")
