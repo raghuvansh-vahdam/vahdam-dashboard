@@ -929,6 +929,27 @@ GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
 GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
 
+# ── AMZ_CATEGORY canonicalizer ──────────────────────────────────────────────
+# The AMZ_CATEGORY column in the P&L table has dirty duplicates:
+#   * "Gifts" vs "gifts"
+#   * "HP - Teas" vs "HP - teas"
+#   * "Single Estate" vs "single estate"
+#   * "Iced Teas" vs "Iced Tea"   (singular/plural)
+# This SQL CASE expression collapses each duplicate group to a single
+# canonical display form. Used in 3 places: the sidebar dropdown
+# options (get_options), the SQL filter (build_where), and the CR
+# Tracker column (get_cr_tracker_data) — so the same canonical
+# values appear everywhere. To add a new synonym group, append a
+# WHEN clause to the function below.
+def _amz_cat_norm(col_expr):
+    return f"""CASE
+        WHEN LOWER(TRIM({col_expr})) IN ('iced tea','iced teas') THEN 'Iced Teas'
+        WHEN LOWER(TRIM({col_expr})) = 'gifts'                   THEN 'Gifts'
+        WHEN LOWER(TRIM({col_expr})) = 'hp - teas'               THEN 'HP - Teas'
+        WHEN LOWER(TRIM({col_expr})) = 'single estate'           THEN 'Single Estate'
+        ELSE TRIM({col_expr})
+    END"""
+
 # ── Effective-today helper (data-load cutoff, geo-aware) ─────────────────────
 # Maplemonk warehouse refreshes per geo at different IST hours:
 #   * USA, CA, IN (and the default fallback): ~15:00 IST
@@ -1545,9 +1566,12 @@ with st.sidebar:
     # ── Filters ──
     @st.cache_data(ttl=600)
     def get_options():
+        # AMZ_CATEGORY is normalized via _amz_cat_norm so the dropdown
+        # shows one row per canonical bucket (no more "HP - Teas" +
+        # "HP - teas" duplicates from dirty source data).
         return run_query(
             f"SELECT DISTINCT BRAND, CATEGORY, CHANNEL, GEO, "
-            f"SUB_CATEGORY, AMZ_CATEGORY "
+            f"SUB_CATEGORY, {_amz_cat_norm('AMZ_CATEGORY')} AS AMZ_CATEGORY "
             f"FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
 
@@ -1871,8 +1895,12 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
         w.append(f"SUB_CATEGORY IN ({','.join(repr(x) for x in f_subcat)})")
     # AMZ Sub Category filter — Amazon's finer-grained AMZ_CATEGORY tag.
     # Independent of CATEGORY / SUB_CATEGORY so the three can stack.
+    # Match against the *normalized* column so a user-selected
+    # "HP - Teas" picks up both raw "HP - Teas" and "HP - teas" rows
+    # (and similarly for the other duplicate groups).
     if f_amz_subcat:
-        w.append(f"AMZ_CATEGORY IN ({','.join(repr(x) for x in f_amz_subcat)})")
+        w.append(f"{_amz_cat_norm('AMZ_CATEGORY')} IN "
+                 f"({','.join(repr(x) for x in f_amz_subcat)})")
     # SKU / ASIN / product-name filter applies to all main views unless suppressed
     if apply_sku and sku_search and sku_search.strip():
         t = sku_search.strip().replace("'", "''")
@@ -2787,11 +2815,13 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 MAX(CATEGORY)                                            AS CATEGORY,
                 MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)'))      AS SUB_CATEGORY,
                 -- Amazon's finer-grained AMZ_CATEGORY tag (Black Teas,
-                -- Samplers, Green Teas, HP - Teas, etc.). Surfaced as a
-                -- column next to Sub-Category in the CR Tracker. Empty
-                -- values render as "(untagged)" so the column never has
-                -- blanks.
-                MAX(COALESCE(NULLIF(AMZ_CATEGORY,''),'(untagged)'))      AS AMZ_SUB_CATEGORY,
+                -- Samplers, Green Teas, HP - Teas, etc.). Normalized
+                -- via _amz_cat_norm so dirty case-duplicates
+                -- ("HP - Teas" vs "HP - teas") and singular/plural
+                -- ("Iced Tea" vs "Iced Teas") collapse to a single
+                -- canonical display form. Empty values render as
+                -- "(untagged)" so the column never has blanks.
+                MAX(COALESCE(NULLIF({_amz_cat_norm("AMZ_CATEGORY")},''),'(untagged)'))   AS AMZ_SUB_CATEGORY,
                 SUM(QTY_BUDGET)                                          AS BUD_UNITS_RAW,
                 SUM(QTY_ACTUAL)                                          AS ACT_UNITS_RAW,
                 -- Count of distinct days in the period where this ASIN
