@@ -1497,9 +1497,11 @@ with st.sidebar:
         Amazon P&L Dashboard</div>""", unsafe_allow_html=True)
     st.markdown("---")
 
+    # Default to Local currency so users see $ / £ / € / etc. for their
+    # selected GEO out of the box. INR conversion stays one click away.
     use_inr = st.radio("Currency",
                        ["INR (₹)", "Local ($, €, £, …)"],
-                       index=0) == "INR (₹)"
+                       index=1) == "INR (₹)"
     sfx = "INR" if use_inr else "LOCAL"
     sym = "₹" if use_inr else ""
 
