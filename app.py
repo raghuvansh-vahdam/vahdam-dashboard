@@ -1886,7 +1886,30 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
     d1 = date_from or d_from
     d2 = date_to   or d_to
     w  = [f"DAY BETWEEN '{d1}' AND '{d2}'", GEO_EXCL]
-    if f_brand:   w.append(f"BRAND IN ({','.join(repr(x) for x in f_brand)})")
+    if f_brand:
+        # Effective-brand rule: any row whose AMZ_CATEGORY starts with
+        # "HP - " (e.g. "HP - Spices", "HP - Teas") is a Handpick product
+        # regardless of what the raw BRAND column says. Without this
+        # override the sidebar Vahdam filter leaks HP - Spices items
+        # because their underlying BRAND is sometimes still "Vahdam" /
+        # blank in the FY27 P&L feed. To keep the filter intuitive:
+        #   * Vahdam-only selected  → exclude HP-prefixed AMZ rows
+        #   * Handpick-only selected → also pick up HP-prefixed AMZ rows
+        #                              even if BRAND column is something
+        #                              else (defensive against missing
+        #                              brand tags on Handpick SKUs)
+        #   * Both / neither / other → keep raw BRAND filter only
+        _brand_l   = {(b or "").strip().lower() for b in f_brand}
+        _has_vt    = any("vahdam"   in b for b in _brand_l)
+        _has_hp    = any(("handpick" in b) or ("spice train" in b) for b in _brand_l)
+        _base      = f"BRAND IN ({','.join(repr(x) for x in f_brand)})"
+        _hp_amz    = "LOWER(TRIM(COALESCE(AMZ_CATEGORY,''))) LIKE 'hp -%'"
+        if _has_vt and not _has_hp:
+            w.append(f"(({_base}) AND NOT ({_hp_amz}))")
+        elif _has_hp and not _has_vt:
+            w.append(f"(({_base}) OR ({_hp_amz}))")
+        else:
+            w.append(_base)
     if f_cat:     w.append(f"CATEGORY IN ({','.join(repr(x) for x in f_cat)})")
     if f_channel: w.append(f"CHANNEL IN ({','.join(repr(x) for x in f_channel)})")
     if geo_override:
@@ -8316,7 +8339,13 @@ def get_dbr_data(d_from, d_to, sfx):
             GEO,
             COALESCE(NULLIF(UPPER(TRIM(CATEGORY)),''),'(untagged)') AS CATEGORY,
             CASE
-                -- HP patterns checked FIRST so any "Handpick by Vahdam"
+                -- AMZ_CATEGORY check FIRST: any "HP - *" bucket
+                -- (HP - Teas, HP - Spices, ...) is a Handpick product
+                -- regardless of what the BRAND column says. Catches
+                -- rows where the raw BRAND tag is missing / wrong but
+                -- AMZ_CATEGORY is correctly tagged upstream.
+                WHEN LOWER(TRIM(COALESCE(AMZ_CATEGORY,''))) LIKE 'hp -%' THEN 'HP'
+                -- HP patterns checked next so any "Handpick by Vahdam"
                 -- variant doesn't accidentally bucket as VT. Spice
                 -- Train brand was renamed to Handpick in source — we
                 -- keep the LIKE %SPICETRAIN% clause as a no-op safety
