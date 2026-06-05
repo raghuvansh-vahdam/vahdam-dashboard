@@ -2274,6 +2274,81 @@ def get_fm_budget_v2(where_fm, sfx):
         FROM {TABLE} WHERE {where_fm}
     """)
 
+
+# ── AMZ Sub Category twins of get_view2 / get_fm_budget_v2 ───────────────
+# Same shape as the Sub-Category functions above, but group on the
+# canonicalized AMZ_CATEGORY column. The output column is still aliased
+# as SUB_CATEGORY so that the existing build_subcat_perf_chart + table
+# render code work unchanged — they don't care whether the buckets
+# came from SUB_CATEGORY or AMZ_CATEGORY, only that the column is
+# named SUB_CATEGORY.
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_view2_amz(where, sfx):
+    spend_act = _spend_actual_sum_sql(sfx)
+    amz_expr  = _amz_cat_norm("AMZ_CATEGORY")
+    return run_query(f"""
+        SELECT COALESCE(NULLIF({amz_expr},''),'(untagged)') AS SUB_CATEGORY,
+            ROUND(SUM(SALES_BUDGET_{sfx}),0)  AS SALES_BUD,
+            ROUND(SUM(SALES_ACTUAL_{sfx}),0)  AS SALES_ACT,
+            ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS REV_PCT,
+            ROUND(SUM(CM1_BUDGET_{sfx}),0)    AS CM1_BUD,
+            ROUND(SUM(CM1_ACTUAL_{sfx}),0)    AS CM1_ACT,
+            ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS CM1_PCT_ACT,
+            ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS CM1_PCT_BUD,
+            ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS ACOS_PCT_ACT,
+            ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS ACOS_PCT_BUD,
+            ROUND(SUM(CM2_BUDGET_{sfx}),0)    AS CM2_BUD,
+            ROUND(SUM(CM2_ACTUAL_{sfx}),0)    AS CM2_ACT,
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1) AS CM2_PCT_ACT,
+            ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS CM2_PCT_BUD,
+            ROUND(SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}),0) AS CM2_VAR,
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1) AS CM2_ABS_ACHVD_PCT,
+            COALESCE(SUM(QTY_BUDGET),0)       AS UNITS_BUD,
+            COALESCE(SUM(QTY_ACTUAL),0)       AS UNITS_ACT
+        FROM {TABLE} WHERE {where}
+        GROUP BY COALESCE(NULLIF({amz_expr},''),'(untagged)')
+        UNION ALL
+        SELECT 'GRAND TOTAL',
+            ROUND(SUM(SALES_BUDGET_{sfx}),0),
+            ROUND(SUM(SALES_ACTUAL_{sfx}),0),
+            ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
+            ROUND(SUM(CM1_BUDGET_{sfx}),0),
+            ROUND(SUM(CM1_ACTUAL_{sfx}),0),
+            ROUND(SUM(CM1_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND(SUM(CM1_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
+            ROUND({spend_act}/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND(SUM(PM_SPEND_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
+            ROUND(SUM(CM2_BUDGET_{sfx}),0),
+            ROUND(SUM(CM2_ACTUAL_{sfx}),0),
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(SALES_ACTUAL_{sfx}),0)*100,1),
+            ROUND(SUM(CM2_BUDGET_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1),
+            ROUND(SUM(CM2_ACTUAL_{sfx})-SUM(CM2_BUDGET_{sfx}),0),
+            ROUND(SUM(CM2_ACTUAL_{sfx})/NULLIF(SUM(CM2_BUDGET_{sfx}),0)*100,1),
+            COALESCE(SUM(QTY_BUDGET),0),
+            COALESCE(SUM(QTY_ACTUAL),0)
+        FROM {TABLE} WHERE {where}
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_fm_budget_v2_amz(where_fm, sfx):
+    amz_expr = _amz_cat_norm("AMZ_CATEGORY")
+    return run_query(f"""
+        SELECT COALESCE(NULLIF({amz_expr},''),'(untagged)') AS SUB_CATEGORY,
+            ROUND(SUM(SALES_BUDGET_{sfx}),0) AS FM_SALES_BUD,
+            ROUND(SUM(CM2_BUDGET_{sfx}),0)   AS FM_CM2_BUD,
+            COALESCE(SUM(QTY_BUDGET),0)      AS UNITS_BUD
+        FROM {TABLE} WHERE {where_fm}
+        GROUP BY COALESCE(NULLIF({amz_expr},''),'(untagged)')
+        UNION ALL
+        SELECT 'GRAND TOTAL',
+            ROUND(SUM(SALES_BUDGET_{sfx}),0),
+            ROUND(SUM(CM2_BUDGET_{sfx}),0),
+            COALESCE(SUM(QTY_BUDGET),0)
+        FROM {TABLE} WHERE {where_fm}
+    """)
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_asin_daily(asin, geo, d1, d2, sfx):
     """Daily revenue/units/spend for one ASIN. P&L and marketing aggregated
@@ -5027,11 +5102,43 @@ def render_subcategory():
         st.caption("Bars: Revenue % vs Budget. 🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
                    "**Click a bar** to open that sub-category's ASIN view.")
 
-    st.markdown('<div class="section-hdr">Sub-Category P&amp;L Table · '
-                '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
-                'click a row to drill into ASINs</span></div>', unsafe_allow_html=True)
+    # ── AMZ Sub Category Performance — same chart, grouped on AMZ_CATEGORY ──
+    st.markdown(
+        '<div class="section-hdr" style="margin-top:18px;">'
+        'AMZ Sub Category Performance · Revenue vs Budget '
+        '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+        '— same KPIs grouped on Amazon\'s AMZ_CATEGORY tag '
+        '(Black Teas, Samplers, HP - Teas, …)</span>'
+        '</div>', unsafe_allow_html=True)
+    df_amz       = get_view2_amz(where, sfx)
+    fm_amz_df    = get_view2_amz(where_fm, sfx)
+    amz_scfig    = build_subcat_perf_chart(df_amz, fm_df=fm_amz_df)
+    if amz_scfig is not None:
+        st.plotly_chart(
+            amz_scfig, use_container_width=True,
+            config={"displayModeBar": False},
+            key=f"amz_subcat_chart_{geo}",
+        )
+        st.caption(
+            "Bars: Revenue % vs Budget per AMZ Sub Category bucket. "
+            "🟢 ≥100% · 🟡 90–100% · 🔴 <90%. "
+            "(Click-to-drill is disabled here because the ASIN view "
+            "currently filters by Sub-Category — open an ASIN list via "
+            "the Sub-Category chart above.)"
+        )
 
-    disp = df.copy()
+    st.markdown('<div class="section-hdr" style="margin-top:18px;">'
+                'AMZ Sub Category P&amp;L Table · '
+                '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+                'click a row to drill into ASINs</span></div>',
+                unsafe_allow_html=True)
+
+    # P&L table now reads from the AMZ Sub Category grouping (df_amz)
+    # instead of the Vahdam internal SUB_CATEGORY grouping. Same shape /
+    # same columns / same click-to-drill behavior — only the bucket
+    # values change. The column header in the table is renamed to
+    # "AMZ Sub Category" so it's obvious which taxonomy is in use.
+    disp = df_amz.copy()
     # Lag(R) = Budget Rev − Actual Rev (positive when we're behind plan)
     # Lag(U) = Budget Units − Actual Units
     disp["_LAG_REV"]   = pd.to_numeric(disp["SALES_BUD"], errors="coerce") - \
@@ -5071,7 +5178,12 @@ def render_subcategory():
               "Budget CM1","Actual CM1","Act ACoS%","Bud ACoS%",
               "Budget CM2","Actual CM2","Act CM2%","Bud CM2%",
               "CM2 Abs %","CM2 Var"]
-    table_df2 = disp[dcols2].rename(columns={"SUB_CATEGORY":"Sub-Category"}).reset_index(drop=True)
+    # SUB_CATEGORY in df_amz is actually the canonicalized AMZ_CATEGORY
+    # value (the get_view2_amz query aliases it for chart compatibility).
+    # Display the column header as "AMZ Sub Category" so users see the
+    # right taxonomy label.
+    table_df2 = disp[dcols2].rename(
+        columns={"SUB_CATEGORY": "AMZ Sub Category"}).reset_index(drop=True)
 
     def _lag_style(v):
         if v is None or pd.isna(v) or v == 0:
@@ -5100,7 +5212,7 @@ def render_subcategory():
             s[idx.index("Act CM2%")] = (
                 "color:#004A2B;font-weight:600" if cv > 0
                 else "color:#8b1a1a;font-weight:600")
-        if row["Sub-Category"] == "GRAND TOTAL":
+        if row["AMZ Sub Category"] == "GRAND TOTAL":
             s = [(x + TOTAL_ROW).lstrip(";") for x in s]
         return s
 
@@ -5127,14 +5239,20 @@ def render_subcategory():
 
     if event.selection.rows:
         idx = event.selection.rows[0]
-        clicked = table_df2.iloc[idx]["Sub-Category"]
+        clicked = table_df2.iloc[idx]["AMZ Sub Category"]
         if clicked and clicked != "GRAND TOTAL":
+            # The ASIN view currently filters by SUB_CATEGORY only —
+            # clicking a row here won't match if the AMZ_CATEGORY
+            # bucket name differs. Surface a note so users aren't
+            # confused by an empty ASIN list, and still attempt the
+            # drill in case the AMZ name matches a SUB_CATEGORY value
+            # exactly (e.g. "Green Teas" exists in both taxonomies).
             st.session_state.selected_subcat = clicked
             st.session_state.view = "asin"
             st.rerun()
         elif clicked == "GRAND TOTAL":
-            st.caption("ℹ️ Click a specific sub-category row to drill into ASINs. "
-                       "Grand Total isn't drillable.")
+            st.caption("ℹ️ Click a specific AMZ Sub Category row to drill into "
+                       "ASINs. Grand Total isn't drillable.")
 
     # ────────────────────────────────────────────────────────────────────
     # CR TRACKER — flat per-ASIN table for the whole GEO
