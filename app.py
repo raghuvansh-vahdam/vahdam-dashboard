@@ -3800,8 +3800,18 @@ def strip_card(label, value, sub=None, delta=None, delta_suffix="vs LM",
         d = _f(pct)
         if d is None and raw_value is None:
             return ""
-        cls = "delta-up" if (d is not None and d >= 0) else "delta-dn"
-        arrow = "▲" if (d is not None and d >= 0) else "▼"
+        is_up = (d is not None and d >= 0)
+        # Arrow stays factual (▲ = increase, ▼ = decrease). Color reflects
+        # whether the change is GOOD for the metric. For lower-better
+        # metrics (ACoS, CPC, PACoS, TACoS, ad spend …), an increase is
+        # bad → red; a decrease is good → green. We piggy-back on the
+        # existing `vs_b_lower_better` flag the caller already passes for
+        # the vs-Budget pill so a single per-card flag controls both.
+        if vs_b_lower_better:
+            cls = "delta-dn" if is_up else "delta-up"
+        else:
+            cls = "delta-up" if is_up else "delta-dn"
+        arrow = "▲" if is_up else "▼"
         pct_html = f"{arrow} {abs(d):.1f}%" if d is not None else "—"
         suffix_html = (f' <span class="small-muted" '
                        f'style="font-weight:500;">{suffix}</span>'
