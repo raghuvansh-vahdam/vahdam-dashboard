@@ -5086,12 +5086,34 @@ def render_subcategory():
 
     # ────────────────────────────────────────────────────────────────────
     # CR TRACKER — flat per-ASIN table for the whole GEO
+    # Shared body lives in _render_cr_tracker_body so the same table
+    # can be embedded inside DBR (one expander per geo) without
+    # duplicating the 270-line render logic.
     # ────────────────────────────────────────────────────────────────────
-    is_usa_geo = (geo or "").upper() == "USA"
     with st.expander(
         f"🎯 CR Tracker — every ASIN in {geo} "
         f"(velocity · inventory · budget vs actual)",
         expanded=False):
+        _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr)
+
+
+def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
+    """Render the CR Tracker table body for a given GEO.
+
+    Callers are expected to wrap this in their own `st.expander(...)`.
+    The helper renders the caption, brand/sub-category filters, the
+    main styled DataFrame, and the CSV download — but NOT the outer
+    expander. That way both the Sub-Cat view (one geo, one expander)
+    and the DBR view (per-geo loop, one expander each) can reuse this
+    body unchanged.
+
+    Widget keys are namespaced by geo so the DBR's per-geo loop
+    doesn't collide with itself.
+    """
+    is_usa_geo = (geo or "").upper() == "USA"
+    # Indented helper-scoped block below — keeps the original 4-space
+    # indentation from when the code lived inside the Sub-Cat expander.
+    if True:
         # Build a small caption that names the two prev-month windows
         # the user will actually see in the table — anchored to the
         # 3pm-IST effective day so PM/PM-1 align with the rolling
@@ -8684,6 +8706,25 @@ def render_dbr():
         f"row shows pro-rated daily budget (range budget ÷ {range_days} "
         "days); FMB and % Achievement cells are dashed in this strip."
     )
+
+    # ── Per-GEO CR Tracker ──
+    # Same view as the Sub-Cat page's CR Tracker, but with one
+    # collapsible expander per country so DBR readers can drill into
+    # any GEO's ASIN-level conversion / velocity table without leaving
+    # the report. Body is rendered by _render_cr_tracker_body so the
+    # logic stays in one place.
+    if geo_order:
+        st.markdown(
+            '<div class="section-hdr" style="margin-top:26px;">'
+            '🎯 CR Tracker · per GEO'
+            '<span style="font-size:12px;color:#7a6a50;font-weight:500;">'
+            ' &nbsp;— click any country to drill into per-ASIN velocity, '
+            'inventory, CR%, ACoS%, CM2%, plus PM / PM-1 month comparisons.'
+            '</span></div>',
+            unsafe_allow_html=True)
+        for _g in geo_order:
+            with st.expander(f"🎯 CR Tracker — {_g}", expanded=False):
+                _render_cr_tracker_body(_g, d_from, d_to, sfx, use_inr)
 
     # ── Debug: brand-bucket assignment + FMB Net Revenue per brand ──
     if not fmb_data.empty and "BRAND_RAW" in fmb_data.columns:
