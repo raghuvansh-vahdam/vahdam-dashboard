@@ -2786,6 +2786,12 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 MAX(BRAND)                                               AS BRAND,
                 MAX(CATEGORY)                                            AS CATEGORY,
                 MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)'))      AS SUB_CATEGORY,
+                -- Amazon's finer-grained AMZ_CATEGORY tag (Black Teas,
+                -- Samplers, Green Teas, HP - Teas, etc.). Surfaced as a
+                -- column next to Sub-Category in the CR Tracker. Empty
+                -- values render as "(untagged)" so the column never has
+                -- blanks.
+                MAX(COALESCE(NULLIF(AMZ_CATEGORY,''),'(untagged)'))      AS AMZ_SUB_CATEGORY,
                 SUM(QTY_BUDGET)                                          AS BUD_UNITS_RAW,
                 SUM(QTY_ACTUAL)                                          AS ACT_UNITS_RAW,
                 -- Count of distinct days in the period where this ASIN
@@ -2883,6 +2889,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             p.BRAND                                                                 AS BRAND,
             p.CATEGORY                                                              AS CATEGORY,
             p.SUB_CATEGORY                                                          AS SUB_CATEGORY,
+            p.AMZ_SUB_CATEGORY                                                      AS AMZ_SUB_CATEGORY,
             -- Velocity (Yesterday absolute, 7/14/30d as daily averages)
             COALESCE(r.U_1D, 0)                                                     AS UNITS_YESTERDAY,
             ROUND(COALESCE(r.U_7D, 0)  /  7.0, 1)                                   AS UNITS_7D_AVG,
@@ -5201,6 +5208,10 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                 ("PRODUCT_NAME",    "Product"),
                 ("BRAND",           "Brand"),
                 ("SUB_CATEGORY",    "Sub-Category"),
+                # AMZ Sub Category — Amazon's finer-grained AMZ_CATEGORY
+                # tag (Black Teas, Samplers, Green Teas, HP - Teas …).
+                # Sits right next to Sub-Category for direct visual diff.
+                ("AMZ_SUB_CATEGORY", "AMZ Sub Category"),
                 ("UNITS_YESTERDAY", "Yesterday Units"),
                 ("UNITS_7D_AVG",    "7d Avg"),
                 ("UNITS_14D_AVG",   "14d Avg"),
@@ -5244,11 +5255,11 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                 ("PM1_ACOS_PCT",    "PM-1 ACoS%"),
             ]
 
-            # NOTE: SUB_CATEGORY must be listed as a text column here —
-            # if it's left out, it gets pd.to_numeric'd to NaN and shows
-            # as "None" in the rendered table.
+            # NOTE: text columns must be listed here — if any text
+            # column is left out, it gets pd.to_numeric'd to NaN and
+            # shows as "None" in the rendered table.
             _text_cols = {"ASIN", "PRODUCT_NAME", "BRAND",
-                          "CATEGORY", "SUB_CATEGORY"}
+                          "CATEGORY", "SUB_CATEGORY", "AMZ_SUB_CATEGORY"}
             show = pd.DataFrame({
                 disp: pd.to_numeric(cr[raw], errors="coerce")
                        if raw not in _text_cols
@@ -5314,6 +5325,11 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                     "Product", width="medium", pinned=True),
                 "Brand":           st.column_config.TextColumn("Brand", width="small"),
                 "Sub-Category":    st.column_config.TextColumn("Sub-Category", width="small"),
+                "AMZ Sub Category": st.column_config.TextColumn(
+                    "AMZ Sub Category", width="small",
+                    help="Amazon's AMZ_CATEGORY tag from the FY27 P&L "
+                         "table (Black Teas · Samplers · Green Teas · "
+                         "HP - Teas · Matcha …). Distinct from Sub-Category."),
                 "Yesterday Units": st.column_config.NumberColumn(format="%,d"),
                 "7d Avg":          st.column_config.NumberColumn(format="%.1f"),
                 "14d Avg":         st.column_config.NumberColumn(format="%.1f"),
