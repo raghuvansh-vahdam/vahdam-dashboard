@@ -5164,15 +5164,21 @@ def render_subcategory():
     disp["CM2 Var"]      = disp["CM2_VAR"].apply(
         lambda x: fmt_lakhs(x, signed=True))
 
-    _rev_n2   = pd.to_numeric(df["REV_PCT"],          errors="coerce").reset_index(drop=True)
-    _cm2a_n2  = pd.to_numeric(df["CM2_ABS_ACHVD_PCT"], errors="coerce").reset_index(drop=True)
-    _var_n2   = pd.to_numeric(df["CM2_VAR"],           errors="coerce").reset_index(drop=True)
+    # Styler helper Series must come from the SAME DataFrame the table
+    # was built from (df_amz / disp), not the original Sub-Category df.
+    # If df has fewer rows than df_amz (typical — Sub-Category has 13ish
+    # buckets, AMZ Sub Category has 20+), .iloc[row.name] in style_v2
+    # overflows on the extra rows and raises IndexError. Using disp/df_amz
+    # keeps the row counts aligned.
+    _rev_n2   = pd.to_numeric(disp["REV_PCT"],          errors="coerce").reset_index(drop=True)
+    _cm2a_n2  = pd.to_numeric(disp["CM2_ABS_ACHVD_PCT"], errors="coerce").reset_index(drop=True)
+    _var_n2   = pd.to_numeric(disp["CM2_VAR"],           errors="coerce").reset_index(drop=True)
     _lag_r_n2 = disp["_LAG_REV"].reset_index(drop=True)
     _lag_u_n2 = disp["_LAG_UNITS"].reset_index(drop=True)
-    _acos_delta_sc = (pd.to_numeric(df["ACOS_PCT_ACT"], errors="coerce") -
-                      pd.to_numeric(df["ACOS_PCT_BUD"], errors="coerce")).reset_index(drop=True)
-    _cm2pct_delta_sc = (pd.to_numeric(df["CM2_PCT_ACT"], errors="coerce") -
-                        pd.to_numeric(df["CM2_PCT_BUD"], errors="coerce")).reset_index(drop=True)
+    _acos_delta_sc = (pd.to_numeric(disp["ACOS_PCT_ACT"], errors="coerce") -
+                      pd.to_numeric(disp["ACOS_PCT_BUD"], errors="coerce")).reset_index(drop=True)
+    _cm2pct_delta_sc = (pd.to_numeric(disp["CM2_PCT_ACT"], errors="coerce") -
+                        pd.to_numeric(disp["CM2_PCT_BUD"], errors="coerce")).reset_index(drop=True)
 
     dcols2 = ["SUB_CATEGORY","Budget Rev","Actual Rev","Lag(R)","Lag(U)","% Achieved",
               "Budget CM1","Actual CM1","Act ACoS%","Bud ACoS%",
