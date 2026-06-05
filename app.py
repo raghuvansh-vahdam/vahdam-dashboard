@@ -929,23 +929,29 @@ GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
 GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
 
-# ── Effective-today helper (3pm IST data-load cutoff) ────────────────────────
-# Warehouse refresh lands ~15:00 IST. Anywhere we display a "yesterday"
-# value or close a rolling 7d/14d/30d/90d window, we anchor to *this*
-# function's return — NOT `date.today()` — so partial half-loaded data
-# never sneaks into displayed totals.
+# ── Effective-today helper (data-load cutoff, geo-aware) ─────────────────────
+# Maplemonk warehouse refreshes per geo at different IST hours:
+#   * USA, CA, IN (and the default fallback): ~15:00 IST
+#   * UK, DE, FR, IT, ES, AUS, UAE:           ~11:00 IST
+# Anywhere we display a "yesterday" value or close a rolling
+# 7d/14d/30d/90d window, we anchor to *this* function's return — NOT
+# `date.today()` — so partial half-loaded data never sneaks into
+# displayed totals.
 #
-#   * Before 3pm IST → return day-before-yesterday (D-2)
-#   * After  3pm IST → return real yesterday (D-1)
+#   * Before cutoff → return day-before-yesterday (D-2)
+#   * After  cutoff → return real yesterday        (D-1)
 #
-# Usage: `eff = _eff_today_ist()`; then `d_y = eff` for the "Yesterday"
-# column, `d_7 = eff - 6` for the 7d window, etc. The literal calendar
-# today is intentionally never the right answer for any displayed
-# total because the day is still in progress.
+# Usage: `eff = _eff_today_ist(geo)` — pass the marketplace so the
+# right cutoff hour is used. Omitting `geo` keeps the legacy 15:00
+# IST default (USA-style) so all existing callers continue to work.
 _IST_TZ = timezone(timedelta(hours=5, minutes=30))
-def _eff_today_ist():
+_EARLY_REFRESH_GEOS = {"UK", "DE", "FR", "IT", "ES", "AUS", "UAE"}
+
+def _eff_today_ist(geo=None):
     _now_ist = datetime.now(_IST_TZ)
-    if _now_ist.hour >= 15:
+    cutoff_hour = (11 if (geo or "").upper() in _EARLY_REFRESH_GEOS
+                   else 15)
+    if _now_ist.hour >= cutoff_hour:
         return _now_ist.date() - timedelta(days=1)   # real yesterday
     return _now_ist.date() - timedelta(days=2)       # day-before-yesterday
 
@@ -2664,12 +2670,13 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                            anchored to today)
       * Previous-1 month : Sessions, CR%, Units, ACoS%
     """
-    # 3pm IST data-load cutoff via shared helper. Before 3pm the
-    # freshest fully-loaded day is day-before-yesterday; after 3pm it's
-    # yesterday. The "Yesterday Units" column + 7d/14d/30d rolling
-    # windows all anchor to this effective day so partial-day data
-    # never contaminates the averages.
-    eff_today  = _eff_today_ist()
+    # Geo-aware data-load cutoff via shared helper. USA/CA refresh at
+    # ~3pm IST; UK/DE/FR/IT/ES/AUS/UAE refresh at ~11am IST. Before the
+    # cutoff the freshest fully-loaded day is day-before-yesterday;
+    # after the cutoff it's yesterday. The "Yesterday Units" column +
+    # 7d/14d/30d rolling windows all anchor to this effective day so
+    # partial-day data never contaminates the averages.
+    eff_today  = _eff_today_ist(geo)
     d_y  = eff_today                          # "Yesterday Units" column
     d_7  = eff_today - timedelta(days=6)      # 7-day window  ending d_y (incl.)
     d_14 = eff_today - timedelta(days=13)     # 14-day window ending d_y
@@ -2942,12 +2949,14 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             ROUND(COALESCE(pm.UNITS, 0)
                     / NULLIF({sess_pm_extrap}, 0) * 100, 2)                         AS PM_CR_PCT,
             ROUND(COALESCE(pm.UNITS, 0), 0)                                         AS PM_UNITS,
+            ROUND(pm.REVENUE / NULLIF(pm.UNITS, 0), 2)                              AS PM_ASP,
             ROUND(pm.SPEND / NULLIF(pm.REVENUE, 0) * 100, 1)                        AS PM_ACOS_PCT,
             -- ── Previous-1 full month (extrapolated sessions in CR%) ──
             {sess_pm1_expr}                                                         AS PM1_SESSIONS,
             ROUND(COALESCE(pm1.UNITS, 0)
                     / NULLIF({sess_pm1_extrap}, 0) * 100, 2)                        AS PM1_CR_PCT,
             ROUND(COALESCE(pm1.UNITS, 0), 0)                                        AS PM1_UNITS,
+            ROUND(pm1.REVENUE / NULLIF(pm1.UNITS, 0), 2)                            AS PM1_ASP,
             ROUND(pm1.SPEND / NULLIF(pm1.REVENUE, 0) * 100, 1)                      AS PM1_ACOS_PCT
         FROM pnl p
         LEFT JOIN roll r ON p.ASIN_KEY = r.ASIN_KEY
@@ -5111,14 +5120,19 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
     doesn't collide with itself.
     """
     is_usa_geo = (geo or "").upper() == "USA"
+    # Geo-aware cutoff string for the caption: USA/CA refresh ~15:00
+    # IST; UK/DE/FR/IT/ES/AUS/UAE refresh ~11:00 IST.
+    _cutoff_label = ("11am IST"
+                     if (geo or "").upper() in _EARLY_REFRESH_GEOS
+                     else "3pm IST")
     # Indented helper-scoped block below — keeps the original 4-space
     # indentation from when the code lived inside the Sub-Cat expander.
     if True:
         # Build a small caption that names the two prev-month windows
         # the user will actually see in the table — anchored to the
-        # 3pm-IST effective day so PM/PM-1 align with the rolling
+        # geo-specific effective day so PM/PM-1 align with the rolling
         # 7d/14d/30d windows below.
-        _eff_today = _eff_today_ist()
+        _eff_today = _eff_today_ist(geo)
         _pm_end    = _eff_today.replace(day=1) - timedelta(days=1)
         _pm_start  = _pm_end.replace(day=1)
         _pm1_end   = _pm_start - timedelta(days=1)
@@ -5126,9 +5140,9 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
         st.caption(
             "One row per ASIN sold in this GEO (regardless of sub-category). "
             f"**Yesterday Units** = units sold on **{_eff_today.strftime('%d %b')}** "
-            "(the freshest fully-loaded day; anchored to the 3pm IST data cut-off — "
-            "before 3pm IST this is the day-before-yesterday, after 3pm it is "
-            "real yesterday). "
+            f"(the freshest fully-loaded day; anchored to the {_cutoff_label} "
+            f"data cut-off for {geo} — before {_cutoff_label} this is the "
+            "day-before-yesterday, after the cut-off it is real yesterday). "
             "**7d / 14d / 30d** are daily averages over the windows ending on that "
             "same day (sum ÷ days). "
             "**Cover Days** = Total Inv ÷ max daily run-rate across 7d/14d/30d. "
@@ -5140,7 +5154,8 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
             f"**PM** = {_pm_start.strftime('%b %Y')} "
             f"({_pm_start.strftime('%d %b')}–{_pm_end.strftime('%d %b')}). "
             f"**PM-1** = {_pm1_start.strftime('%b %Y')} "
-            f"({_pm1_start.strftime('%d %b')}–{_pm1_end.strftime('%d %b')})."
+            f"({_pm1_start.strftime('%d %b')}–{_pm1_end.strftime('%d %b')}). "
+            "**PM/PM-1 ASP** = Revenue ÷ Units for that month."
         )
         _ph = st.empty()
         _ph.markdown(skel_table(rows=12), unsafe_allow_html=True)
@@ -5209,15 +5224,17 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                 ("ACT_ACOS_7D_PCT", "7d ACoS%"),
                 ("BUD_CM2_PCT",     "Bud CM2%"),
                 ("ACT_CM2_PCT",     "Act CM2%"),
-                # Previous full month
+                # Previous full month — Sessions, CR%, Units, ASP, ACoS%
                 ("PM_SESSIONS",     "PM Sessions"),
                 ("PM_CR_PCT",       "PM CR%"),
                 ("PM_UNITS",        "PM Units"),
+                ("PM_ASP",          "PM ASP"),
                 ("PM_ACOS_PCT",     "PM ACoS%"),
-                # Previous-1 full month
+                # Previous-1 full month — Sessions, CR%, Units, ASP, ACoS%
                 ("PM1_SESSIONS",    "PM-1 Sessions"),
                 ("PM1_CR_PCT",      "PM-1 CR%"),
                 ("PM1_UNITS",       "PM-1 Units"),
+                ("PM1_ASP",         "PM-1 ASP"),
                 ("PM1_ACOS_PCT",    "PM-1 ACoS%"),
             ]
 
@@ -5352,6 +5369,10 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                     help="Sessions for the previous full calendar month."),
                 "PM CR%":          st.column_config.NumberColumn(format="%.2f%%"),
                 "PM Units":        st.column_config.NumberColumn(format="%,d"),
+                "PM ASP":          st.column_config.NumberColumn(
+                    format=f"{currency_sym}%,.2f",
+                    help="Avg Selling Price for the previous full calendar "
+                         "month (PM Revenue ÷ PM Units)."),
                 "PM ACoS%":        st.column_config.NumberColumn(format="%.1f%%"),
                 # Previous-1 month
                 "PM-1 Sessions":   st.column_config.NumberColumn(
@@ -5359,6 +5380,10 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                     help="Sessions for the calendar month before the previous one."),
                 "PM-1 CR%":        st.column_config.NumberColumn(format="%.2f%%"),
                 "PM-1 Units":      st.column_config.NumberColumn(format="%,d"),
+                "PM-1 ASP":        st.column_config.NumberColumn(
+                    format=f"{currency_sym}%,.2f",
+                    help="Avg Selling Price for the month before the previous "
+                         "one (PM-1 Revenue ÷ PM-1 Units)."),
                 "PM-1 ACoS%":      st.column_config.NumberColumn(format="%.1f%%"),
             }
             if is_usa_geo:
