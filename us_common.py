@@ -1066,3 +1066,73 @@ def render_overall_pnl(session):
         _tc_compare = build_compare_values(
             lambda s, e: {k: pnl_metrics(s, e)[_tc_src[k]] for k in _tc_names}, _tc_names)
         render_beige_table(pd.DataFrame(_tc_rows), selected_col_name=SEL, compare_values=_tc_compare)
+
+
+def render_category_revenue(session):
+    """US category net revenue (Coffee/Tea/Supplements), FULL calendar months:
+    last completed month vs prior month (MoM) and same month last year (YoY).
+    Same net-revenue logic as the tabs (IS_REFUND=0 net - REFUND_VALUE),
+    so each category ties exactly to that tab's monthly column."""
+    from datetime import datetime
+    yesterday = (datetime.today() - timedelta(days=1)).date()
+
+    cur_first = yesterday.replace(day=1)
+    m0_end   = cur_first - timedelta(days=1)          # last completed month: end
+    m0_start = m0_end.replace(day=1)                  #   "          "       : start
+    mm_end   = m0_start - timedelta(days=1)           # prior month (MoM)
+    mm_start = mm_end.replace(day=1)
+    ly_start = m0_start - relativedelta(years=1)      # same month last year (YoY)
+    ly_end   = ly_start.replace(day=calendar.monthrange(ly_start.year, ly_start.month)[1])
+
+    df = session.sql("""
+        WITH map AS (
+            SELECT DISTINCT "D2C US" AS SKU, "CATEGORY" AS CAT
+            FROM VAHDAM_DB.MAPLEMONK.VAHDAM_FY27_INPUTS_PRODUCT_MAPPING
+            WHERE "CATEGORY" IN ('Coffee','Tea and Botanicals','Supplements')
+              AND "D2C US" IS NOT NULL AND "D2C US" != ''
+        )
+        SELECT DATE(o.ORDER_TIMESTAMP) AS DATE_START, m.CAT,
+            ROUND(SUM(CASE WHEN o.IS_REFUND = 0 THEN o.NET_SALES_BEFORE_TAX ELSE 0 END)
+                  - SUM(COALESCE(o.REFUND_VALUE, 0)), 2) AS NET_REV
+        FROM VAHDAM_DB.MAPLEMONK.SHOPIFYUSA_ALL_ORDERS_ITEMS o
+        JOIN map m ON m.SKU = o.SKU
+        WHERE o.ORDER_STATUS != 'CANCELLED'
+          AND DATE(o.ORDER_TIMESTAMP) >= '{ly}' AND DATE(o.ORDER_TIMESTAMP) <= '{m0e}'
+        GROUP BY DATE(o.ORDER_TIMESTAMP), m.CAT
+    """.format(ly=ly_start, m0e=m0_end)).to_pandas()
+    df["DATE_START"] = pd.to_datetime(df["DATE_START"]).dt.date
+    df["NET_REV"] = pd.to_numeric(df["NET_REV"], errors="coerce").fillna(0.0)
+
+    def wsum(cat, s, e):
+        m = (df["CAT"] == cat) & (df["DATE_START"] >= s) & (df["DATE_START"] <= e)
+        return round(float(df.loc[m, "NET_REV"].sum()), 2)
+
+    def pct_cell(curr, prev):
+        if not prev:
+            return "â€”"
+        p = (curr - prev) / abs(prev) * 100
+        cls = "delta-up" if p >= 0 else "delta-down"
+        arr = "â–²" if p >= 0 else "â–¼"
+        return f"<span class='{cls}'>{arr} {p:+.1f}%</span>"
+
+    c0  = m0_start.strftime("%b %Y")   # last completed month
+    cmm = mm_start.strftime("%b %Y")   # prior month
+    cly = ly_start.strftime("%b %Y")   # same month last year
+
+    st.subheader("ðŸ“ˆ US â€” Category Revenue Â· MoM & YoY")
+    st.caption(
+        f"Net revenue (refund-adjusted), **full calendar months**. "
+        f"{c0} vs {cmm} (MoM) and {cly} (YoY). Each figure ties to that category tab's {c0} column."
+    )
+
+    disp = {"Coffee": "â˜• Coffee", "Tea and Botanicals": "ðŸµ Tea", "Supplements": "ðŸ’Š Supplements"}
+    rows, t0, tm, tl = [], 0.0, 0.0, 0.0
+    for cat, label in disp.items():
+        v0, vm, vl = wsum(cat, m0_start, m0_end), wsum(cat, mm_start, mm_end), wsum(cat, ly_start, ly_end)
+        t0 += v0; tm += vm; tl += vl
+        rows.append({"Metric": label, c0: f"${v0:,.0f}", cmm: f"${vm:,.0f}",
+                     "MoM %": pct_cell(v0, vm), cly: f"${vl:,.0f}", "YoY %": pct_cell(v0, vl)})
+    rows.append({"Metric": "Total", c0: f"${t0:,.0f}", cmm: f"${tm:,.0f}",
+                 "MoM %": pct_cell(t0, tm), cly: f"${tl:,.0f}", "YoY %": pct_cell(t0, tl)})
+
+    render_beige_table(pd.DataFrame(rows), selected_col_name=c0, compare_values={})
