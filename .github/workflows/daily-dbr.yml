@@ -1,0 +1,62 @@
+# Daily DBR Email — Teas & Botanicals only
+#
+# Runs daily at 10:00 UTC = 15:30 IST, just after the Maplemonk
+# warehouse 3 PM data refresh completes. Builds an HTML summary
+# from Snowflake and emails it via Gmail SMTP.
+#
+# Setup: see DAILY_DBR_SETUP.md for the 8 secrets this job needs.
+name: Daily DBR Email
+
+on:
+  schedule:
+    # 0 10 * * *  →  10:00 UTC every day  →  15:30 IST
+    - cron: "0 10 * * *"
+  # Manual trigger for testing — go to Actions tab → "Daily DBR
+  # Email" → "Run workflow". Use DBR_DRY_RUN=1 (set below in env)
+  # for a no-send rehearsal.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print HTML, don't send)"
+        type: boolean
+        default: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          # No requirements.txt — install the two libs the email
+          # job needs (the full dashboard install set is overkill
+          # for this small script).
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            snowflake-connector-python \
+            python-dateutil
+
+      - name: Send Daily DBR
+        env:
+          # Snowflake — reuse the dashboard's credentials
+          SNOWFLAKE_ACCOUNT:     ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER:        ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD:    ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_WAREHOUSE:   ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE:        ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE:    ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA:      ${{ secrets.SNOWFLAKE_SCHEMA }}
+          # Email — see DAILY_DBR_SETUP.md
+          DBR_GMAIL_USER:        ${{ secrets.DBR_GMAIL_USER }}
+          DBR_GMAIL_APP_PASSWORD: ${{ secrets.DBR_GMAIL_APP_PASSWORD }}
+          DBR_RECIPIENTS:        ${{ secrets.DBR_RECIPIENTS }}
+          # Optional dry-run when triggered manually with checkbox
+          DBR_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: python daily_dbr_email.py
