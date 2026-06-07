@@ -21,8 +21,15 @@ DBR_RECIPIENTS        comma-separated email list
 
 Optional
 --------
-DBR_DRY_RUN=1 → prints the email HTML to stdout instead of sending.
-                Useful for local testing without burning a real send.
+DBR_DRY_RUN=1   → prints the email HTML to stdout instead of sending.
+                  Useful for local testing without burning a real send.
+DBR_FORCE_YEST  → override the "yesterday" date (format YYYY-MM-DD).
+                  Use when the IST 3 PM cutoff lands on a day whose
+                  data is still loading (e.g. early-morning sends, or
+                  a partial-load weekend day). The script will use the
+                  supplied date as yesterday and back-compute MTD /
+                  L7D / LM / LY windows from it. Falls back to the
+                  normal _eff_today_ist() cutoff when unset.
 
 Scope notes
 -----------
@@ -116,8 +123,21 @@ def _eff_today_ist() -> date:
 
 
 def compute_windows() -> Dict[str, Tuple[date, date]]:
-    """Return the 9 date windows we'll query: 3 windows × (cur, LM, LY)."""
-    yest = _eff_today_ist()
+    """Return the 9 date windows we'll query: 3 windows × (cur, LM, LY).
+    DBR_FORCE_YEST env var (YYYY-MM-DD) overrides the IST cutoff —
+    used when upstream data for the cutoff's natural yesterday is
+    still loading and the user wants to lock to an earlier day."""
+    override = os.environ.get("DBR_FORCE_YEST", "").strip()
+    if override:
+        try:
+            yest = datetime.strptime(override, "%Y-%m-%d").date()
+            log.info("DBR_FORCE_YEST override active: yesterday = %s", yest)
+        except ValueError:
+            log.warning("DBR_FORCE_YEST=%r is not YYYY-MM-DD — ignoring.",
+                         override)
+            yest = _eff_today_ist()
+    else:
+        yest = _eff_today_ist()
     mtd_start = yest.replace(day=1)
     mtd_end   = yest
     l7d_start = yest - timedelta(days=6)
