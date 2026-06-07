@@ -993,7 +993,7 @@ def get_conn():
 # Snowflake error codes that mean "auth token is stale, reconnect and retry"
 _SF_RETRY_CODES = {390114, 390112, 390111, 390104, 390195}
 
-@st.cache_data(ttl=300, show_spinner="Loading data…")
+@st.cache_data(ttl=1800, show_spinner="Loading data…")
 def run_query(sql: str) -> pd.DataFrame:
     for attempt in (1, 2):
         try:
@@ -1596,7 +1596,7 @@ with st.sidebar:
                                placeholder="e.g. B09YXMVQTV…", key="sku_search")
 
     # ── Filters ──
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=7200)   # 2h — filter dropdown values rarely change
     def get_options():
         # AMZ_CATEGORY is normalized via _amz_cat_norm so the dropdown
         # shows one row per canonical bucket (no more "HP - Teas" +
@@ -1965,6 +1965,62 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
         w.append(extra_filters)
     return " AND ".join(w)
 
+
+# ── Cache pre-warming ─────────────────────────────────────────────────────────
+# First-visit slowness on the heavy views (Overview / Sub-Cat / ASIN / P&L /
+# DBR) comes from each view firing 6-10 Snowflake queries serially. Even with
+# @st.cache_data the FIRST hit of each fetcher is a cold network round-trip.
+# Snowflake's warehouse can also auto-suspend after ~10 min idle and a cold
+# wake adds 5-15 s on top.
+#
+# Strategy: on the very first script run of a session (after auth + sidebar
+# filters are computed), fire the most-likely-needed queries in PARALLEL via
+# a ThreadPoolExecutor. They populate @st.cache_data; subsequent view clicks
+# hit warm cache and return instantly.
+#
+# The pre-warm uses the CURRENT filter / date state, so if the user has
+# already applied filters before the warmer fires we still cache the right
+# slice. If the user later changes filters, those new queries cache-miss
+# (expected), but at least the initial navigation feels snappy.
+def _warm_critical_caches():
+    """One-time parallel warmer for the heavy view queries. Returns
+    quickly even on a cold warehouse because the queries run concurrently
+    over a thread pool — Snowflake parallelism + I/O-bound waits do the
+    rest."""
+    if st.session_state.get("_caches_warmed_v1"):
+        return
+    try:
+        import concurrent.futures as _cf
+        _where    = build_where()
+        _where_fm = build_where(date_from=month_start, date_to=month_end)
+        # Queries fired on first session load. Picked to cover the
+        # 5 heaviest views the user said feel slow (Overview /
+        # Sub-Cat / ASIN / P&L / DBR). Each is a separate cache key.
+        _tasks = (
+            lambda: get_kpis(_where, sfx),
+            lambda: get_view1(_where, sfx),
+            lambda: get_view1_spark(_where, sfx),
+            lambda: get_fm_budget_v1(_where_fm, sfx),
+            lambda: get_view2(_where, sfx),
+            lambda: get_view2_amz(_where, sfx),
+            lambda: get_fm_budget_v2(_where_fm, sfx),
+            lambda: get_pnl_agg(_where, sfx),
+            lambda: get_pnl_daily(_where, sfx),
+            lambda: get_dbr_data(d_from, d_to, sfx),
+        )
+        # max_workers caps concurrent connection use; 6 is comfortably
+        # below typical Snowflake account session limits.
+        with _cf.ThreadPoolExecutor(max_workers=6) as _ex:
+            list(_ex.map(lambda f: f(), _tasks))
+        st.session_state._caches_warmed_v1 = True
+    except Exception:
+        # Pre-warm is best-effort. If it fails (network blip, warehouse
+        # suspend mid-flight), the dashboard still works — individual
+        # views just pay the normal first-visit cost. Don't fail the
+        # whole page just because pre-warm hiccuped.
+        st.session_state._caches_warmed_v1 = True
+
+
 # ── Formatters ────────────────────────────────────────────────────────────────
 def _f(v):
     try:
@@ -2193,7 +2249,7 @@ def _v1_metrics(sfx):
     """
 
 # ── Queries ───────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_kpis(where, sfx):
     # ACoS Actual = (PM Spend + Google Ads Spend) / Sales — see _spend_actual_sum_sql.
     # ACoS Budget remains PM-only (no Google Ads budget column upstream).
@@ -2225,7 +2281,7 @@ def get_kpis(where, sfx):
         FROM {TABLE} WHERE {where}
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_view1(where, sfx):
     m = _v1_metrics(sfx)
     return run_query(f"""
@@ -2236,7 +2292,7 @@ def get_view1(where, sfx):
                  CASE CHANNEL WHEN 'TOTAL' THEN 99 ELSE 1 END, CHANNEL
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_view1_spark(where, sfx):
     """Daily sales per GEO×CHANNEL for sparkline column.
     Returns both Actual and Budget so the Daily Sales chart can plot the
@@ -2251,7 +2307,7 @@ def get_view1_spark(where, sfx):
         ORDER BY DAY
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_fm_budget_v1(where_fm, sfx):
     return run_query(f"""
         SELECT GEO, CHANNEL,
@@ -2265,7 +2321,7 @@ def get_fm_budget_v1(where_fm, sfx):
         FROM {TABLE} WHERE {where_fm} GROUP BY GEO
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_view2(where, sfx):
     # ACoS Actual now = (PM_SPEND_ACTUAL + GOOGLE_SPEND_ACTUAL) / SALES_ACTUAL.
     # Budget side stays PM-only (no GADS budget column).
@@ -2314,7 +2370,7 @@ def get_view2(where, sfx):
         ORDER BY CASE SUB_CATEGORY WHEN 'GRAND TOTAL' THEN 9999 ELSE 1 END, SALES_BUD DESC NULLS LAST
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_fm_budget_v2(where_fm, sfx):
     return run_query(f"""
         SELECT COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') AS SUB_CATEGORY,
@@ -2338,7 +2394,7 @@ def get_fm_budget_v2(where_fm, sfx):
 # came from SUB_CATEGORY or AMZ_CATEGORY, only that the column is
 # named SUB_CATEGORY.
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_view2_amz(where, sfx):
     spend_act = _spend_actual_sum_sql(sfx)
     amz_expr  = _amz_cat_norm("AMZ_CATEGORY")
@@ -2388,7 +2444,7 @@ def get_view2_amz(where, sfx):
     """)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_fm_budget_v2_amz(where_fm, sfx):
     amz_expr = _amz_cat_norm("AMZ_CATEGORY")
     return run_query(f"""
@@ -2406,7 +2462,7 @@ def get_fm_budget_v2_amz(where_fm, sfx):
         FROM {TABLE} WHERE {where_fm}
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_daily(asin, geo, d1, d2, sfx):
     """Daily revenue/units/spend for one ASIN. P&L and marketing aggregated
     separately to avoid join row-multiplication, then merged in pandas.
@@ -2449,7 +2505,7 @@ def get_asin_daily(asin, geo, d1, d2, sfx):
     return merged
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=14400)   # 4h — column list is essentially static
 def discover_sales_mkt_cols():
     """Return uppercased column names of VAHDAM_AMAZON_SALES_MARKETING.
     Cached for 1 hour; returns empty frozenset if the table is unavailable."""
@@ -2476,7 +2532,7 @@ def _sales_mkt_col(*candidates):
     return None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_rolling(asin, geo, sfx):
     """Fetch the LAST 90 DAYS of (units, revenue, spend, sessions) for one
     ASIN, regardless of the user-selected window. Used to build the
@@ -2553,7 +2609,7 @@ def get_asin_rolling(asin, geo, sfx):
     return merged
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_totals(geo, sub_cat, d1, d2, sfx, amz_subcat=None):
     """One-row totals for a (geo, sub_cat, date range).
 
@@ -2638,7 +2694,7 @@ def get_asin_totals(geo, sub_cat, d1, d2, sfx, amz_subcat=None):
     return combined
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
     """ASIN-level table for the ASIN view.
 
@@ -2837,7 +2893,7 @@ def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
         LIMIT 200
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
     """One row per ASIN in the given GEO with:
       * Identity         : ASIN, Product Name, Brand, Category
@@ -3207,7 +3263,7 @@ _PNL_LINES = [
     ("= CM2",               "total",    "CM2"),
 ]
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=14400)   # 4h — column list is essentially static
 def discover_pnl_cols():
     """Uppercase set of every column in the P&L table. Cached 5 min so
     schema changes (columns dropped or renamed) propagate quickly."""
@@ -3306,7 +3362,7 @@ def _run_pnl_query(sql_template, retry_on_missing_col=True):
             raise
         raise
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_pnl_agg(where, sfx):
     def _build():
         sel = _pnl_metric_sql([p for _, _, p in _PNL_LINES], sfx)
@@ -3323,7 +3379,7 @@ def get_pnl_agg(where, sfx):
         # _run_pnl_query. Rebuild and try once more.
         return run_query(_build())
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_pnl_daily(where, sfx):
     def _build():
         sel = _pnl_metric_sql(["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"], sfx)
@@ -3333,7 +3389,7 @@ def get_pnl_daily(where, sfx):
     except Exception:
         return run_query(_build())
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_pnl_category(where, sfx):
     pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
@@ -3348,7 +3404,7 @@ def get_pnl_category(where, sfx):
                  SALES_ACT DESC NULLS LAST
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_pnl_channel(where, sfx):
     pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
@@ -3364,7 +3420,7 @@ def get_pnl_channel(where, sfx):
                  SALES_ACT DESC NULLS LAST
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_pnl_geo(where, sfx):
     pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
@@ -3380,7 +3436,7 @@ def get_pnl_geo(where, sfx):
                  SALES_ACT DESC NULLS LAST
     """)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_sku_lookup(term, d1, d2, sfx):
     """Search the P&L table by ASIN or product-name fragment.
 
@@ -8370,7 +8426,7 @@ if sku_search and sku_search.strip():
 # ═══════════════════════════════════════════════════════════════════════════════
 # VIEW 5b — DBR (Daily Business Report)
 # ═══════════════════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_dbr_data(d_from, d_to, sfx):
     """One row per (GEO, CATEGORY, BRAND_BUCKET) — Budget and Actual totals
     across the columns the DBR table needs. CATEGORY is kept so the view
@@ -9663,7 +9719,7 @@ def _nb_asin_in_list(asin_list):
     return ", ".join(f"'{a}'" for a in asin_list)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_nb_geos_with_data():
     """Return GEOs that have ANY ASIN in CATEGORY ∈ (Coffee, Supplements).
     USA always promoted first; "All" prepended so the user can roll all
@@ -9682,7 +9738,7 @@ def get_nb_geos_with_data():
     return ordered
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_nb_asin_universe(geo):
     """Return DataFrame[ASIN, PRODUCT_NAME, GEO] for the New Business set.
        USA → hardcoded list (kept order from spec, GEO column filled in).
@@ -9735,7 +9791,7 @@ def _nb_geo_sql_filter(geo):
     return f"AND GEO = '{geo}'"
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
     """Per-ASIN summary for the selected GEO + date range. Joins P&L,
     Marketing, and Sessions sources after aggregating each separately to
@@ -9861,7 +9917,7 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
     """)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_nb_asin_periods(asin, geo, periods_tuple, sfx):
     """Per-period funnel breakdown for ONE ASIN across the 9 periods.
     Returns one row per period. Each metric is aggregated with
@@ -10507,7 +10563,7 @@ _REVIEW_THEMES = [
 ]
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)   # 1h — review data changes slowly
 def get_reviews_all():
     """Pull every review row with normalized columns + parsed date.
 
@@ -11419,6 +11475,13 @@ st.markdown("""
 
 
 view = st.session_state.view
+
+# Pre-warm critical caches on the first session render. Runs ONCE per
+# session (guarded by session_state flag inside _warm_critical_caches).
+# Effect: subsequent tab clicks find the heavy view queries already in
+# cache, so first-visit pop-in is replaced by an instant render.
+_warm_critical_caches()
+
 # Top-level router with a friendly-error safety net. Snowflake /
 # database errors bubble up here and get rendered as a recovery card
 # (with retry buttons + collapsible technical details). Non-data
