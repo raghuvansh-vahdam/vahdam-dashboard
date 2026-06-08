@@ -3247,6 +3247,115 @@ def get_asin_peers(asin: str, geo: str, sfx: str, amz_cat: str):
     return rows
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_asin_top_keywords(asin: str, geo: str, limit: int = 10):
+    """Top N keywords by 30-day ad spend for one ASIN in one GEO.
+
+    Source: VAHDAM_AMAZON_MARKETING — already has KEYWORDTEXT + ASIN +
+    SPEND + AD_SALES + IMPRESSIONS + CLICKS + CONVERSIONS in a single
+    row, so no joins needed at the marketing layer.
+
+    For **USA only**, a LEFT JOIN with the Brand Analytics Search Query
+    Performance Report adds a SEARCHQUERYVOLUME column (Amazon's
+    weekly search volume score for that query). Other marketplaces
+    don't have SQP populated yet so SV is None for them.
+
+    KEYWORDTEXT in the marketing feed includes three flavours:
+      * Real keywords  ('vahdam turmeric')
+      * Auto-targeted search terms  ('asin="B01BMDAVIY"')
+      * Match-type pseudo-keywords  ('close-match' / 'loose-match')
+    We keep all three — the brand manager wants to see where the
+    money is actually going, not just the curated bid list.
+
+    Returns a list of dicts. Empty list when no spend in window.
+    """
+    today_ = _eff_today_ist()
+    d30s   = today_ - timedelta(days=29)
+    a      = asin.replace("'", "''")
+    g      = (geo or "").upper().replace("'", "''")
+
+    # Step 1 — keyword spend rollup from the marketing feed
+    rows = run_query(f"""
+        SELECT
+            LOWER(TRIM(KEYWORDTEXT))             AS KEY_LC,
+            MAX(TRIM(KEYWORDTEXT))               AS KEYWORD,
+            COALESCE(ROUND(SUM(SPEND), 0), 0)    AS SPEND,
+            COALESCE(ROUND(SUM(AD_SALES), 0), 0) AS REV,
+            COALESCE(ROUND(SUM(IMPRESSIONS), 0), 0) AS IMPR,
+            COALESCE(ROUND(SUM(CLICKS), 0), 0)   AS CLICKS,
+            COALESCE(ROUND(SUM(CONVERSIONS), 0), 0) AS CONV
+        FROM {MKTG}
+        WHERE DAY BETWEEN '{d30s}' AND '{today_}'
+          AND GEO = '{g}'
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
+          AND KEYWORDTEXT IS NOT NULL
+          AND TRIM(KEYWORDTEXT) <> ''
+        GROUP BY LOWER(TRIM(KEYWORDTEXT))
+        HAVING SUM(SPEND) > 0
+        ORDER BY SPEND DESC NULLS LAST
+        LIMIT {int(limit)}
+    """)
+    if rows.empty:
+        return []
+
+    # Step 2 — pull Search Volume for USA only. The SQP report is split
+    # into parent + child tables linked by airbyte hashid; we join them
+    # in a CTE, filter to this ASIN, and roll up by search query.
+    sv_by_kw: Dict[str, float] = {}
+    if g == "USA":
+        try:
+            sv_df = run_query(f"""
+                WITH parent AS (
+                    SELECT _AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID AS HID,
+                           UPPER(TRIM(ASIN)) AS ASIN_UP
+                    FROM vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT
+                ),
+                sqd AS (
+                    SELECT _AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID AS HID,
+                           LOWER(TRIM(SEARCHQUERY))  AS KEY_LC,
+                           COALESCE(SEARCHQUERYVOLUME, 0) AS SV
+                    FROM vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_SEARCHQUERYDATA
+                )
+                SELECT s.KEY_LC, MAX(s.SV) AS SV
+                FROM parent p
+                JOIN sqd s ON s.HID = p.HID
+                WHERE p.ASIN_UP = UPPER('{a}')
+                GROUP BY s.KEY_LC
+            """)
+            for _, r in sv_df.iterrows():
+                k = str(r.get("KEY_LC") or "").strip()
+                if k:
+                    sv_by_kw[k] = float(r.get("SV") or 0)
+        except Exception:
+            sv_by_kw = {}   # SQP join is opt-in; keyword block still renders
+
+    # Step 3 — assemble per-keyword dicts with derived ratios
+    out = []
+    for _, r in rows.iterrows():
+        key_lc = str(r["KEY_LC"]).strip()
+        spend  = float(r["SPEND"] or 0)
+        rev    = float(r["REV"] or 0)
+        impr   = float(r["IMPR"] or 0)
+        clicks = float(r["CLICKS"] or 0)
+        conv   = float(r["CONV"] or 0)
+        ctr   = (clicks / impr * 100) if impr else None
+        ad_cvr = (conv / clicks * 100) if clicks else None
+        acos  = (spend / rev * 100) if rev else None
+        out.append({
+            "keyword":     str(r["KEYWORD"]),
+            "spend":       spend,
+            "ad_revenue":  rev,
+            "impressions": impr,
+            "clicks":      clicks,
+            "paid_units":  conv,
+            "ctr_pct":     ctr,
+            "ad_cvr_pct":  ad_cvr,
+            "acos_pct":    acos,
+            "sv":          sv_by_kw.get(key_lc),
+        })
+    return out
+
+
 @st.dialog("📊 ASIN 360°", width="large")
 def render_asin_360_modal(asin: str, geo: str,
                            fallback_product_name: str = ""):
@@ -3639,6 +3748,116 @@ def render_asin_360_modal(asin: str, geo: str,
             f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">30d Trend</th>'
             f'</tr></thead>'
             f'<tbody>' + "".join(peer_rows_html) + '</tbody>'
+            f'</table></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Top keywords block ─────────────────────────────────────────
+    # Keyword-level spend pulled from VAHDAM_AMAZON_MARKETING.
+    # Search Volume column populated only for USA (Brand Analytics
+    # Search Query Performance Report is USA-only so far).
+    try:
+        kw_rows = get_asin_top_keywords(asin, geo, limit=10)
+    except Exception:
+        kw_rows = []
+
+    if kw_rows:
+        sv_note = ("Search Volume from Brand Analytics SQP report."
+                   if (geo or "").upper() == "USA"
+                   else "Search Volume not available for this marketplace "
+                        "(SQP report covers USA only).")
+        st.markdown(
+            f'<div style="font-size:13px;font-weight:700;color:#004A2B;'
+            f'letter-spacing:0.5px;margin:22px 0 4px 0;text-transform:uppercase;">'
+            f'🔍 Top Keywords by Ad Spend &nbsp;'
+            f'<span style="font-size:11px;color:#7a6a50;font-weight:500;'
+            f'text-transform:none;letter-spacing:0;">'
+            f'· last 30 days</span>'
+            f'</div>'
+            f'<div style="font-size:11px;color:#7a6a50;margin-bottom:10px;">'
+            f'{sv_note}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        def _fmt_ccy(v):
+            if v is None: return "—"
+            if sfx == "INR": return fmt_lakhs(v)
+            return f"{sym}{_f(v):,.0f}"
+        def _fmt_int(v):
+            return "—" if v is None else f"{int(_f(v) or 0):,}"
+        def _fmt_p(v, dp=1):
+            return "—" if v is None else f"{_f(v):,.{dp}f}%"
+        def _fmt_sv(v):
+            # Search Volume is a raw integer (or float per Amazon).
+            if v is None: return "—"
+            x = _f(v) or 0
+            if x >= 1e6: return f"{x/1e6:.1f}M"
+            if x >= 1e3: return f"{x/1e3:.1f}K"
+            return f"{int(x):,}"
+
+        # Build the table. ACoS cell color-graded green/amber/red so the
+        # operator can scan for "money pit" keywords immediately.
+        def _acos_color(v):
+            if v is None: return "#7a6a50"
+            if v <= 25:   return "#1a7a3e"
+            if v <= 50:   return "#7a5c00"
+            return "#8b1a1a"
+
+        kw_rows_html = []
+        for kr in kw_rows:
+            acos_col = _acos_color(kr["acos_pct"])
+            kw_rows_html.append(
+                f'<tr>'
+                f'<td style="padding:7px 10px;font-weight:600;color:#3e2f1c;'
+                f'font-size:12px;border-bottom:1px solid #ead9b5;'
+                f'max-width:260px;overflow:hidden;text-overflow:ellipsis;'
+                f'white-space:nowrap;" title="{kr["keyword"]}">'
+                f'{kr["keyword"][:48]}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:700;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{_fmt_ccy(kr["spend"])}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
+                f'color:#1a7a3e;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{_fmt_ccy(kr["ad_revenue"])}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:700;'
+                f'color:{acos_col};font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{_fmt_p(kr["acos_pct"])}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{_fmt_int(kr["impressions"])}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{_fmt_p(kr["ctr_pct"], dp=2)}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{_fmt_p(kr["ad_cvr_pct"])}</td>'
+                f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
+                f'color:#7a6a50;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;background:#f5efe0;">'
+                f'{_fmt_sv(kr["sv"])}</td>'
+                f'</tr>'
+            )
+
+        _th = ('padding:9px 10px;font-size:10px;'
+               'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+               'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;')
+        _th_sv = _th + 'background:linear-gradient(180deg,#AB8743 0%,#7a5c00 100%);'
+        st.markdown(
+            f'<div style="border-radius:10px;overflow:hidden;'
+            f'border:1px solid #d6ccba;box-shadow:0 2px 8px rgba(120,80,30,0.08);">'
+            f'<table style="width:100%;border-collapse:collapse;background:#FFFFFF;">'
+            f'<thead><tr>'
+            f'<th style="{_th}text-align:left;">Keyword</th>'
+            f'<th style="{_th}text-align:right;">Spend</th>'
+            f'<th style="{_th}text-align:right;">Ad Sales</th>'
+            f'<th style="{_th}text-align:right;">ACoS%</th>'
+            f'<th style="{_th}text-align:right;">Impr</th>'
+            f'<th style="{_th}text-align:right;">CTR%</th>'
+            f'<th style="{_th}text-align:right;">Ad CVR%</th>'
+            f'<th style="{_th_sv}text-align:right;">Search Vol</th>'
+            f'</tr></thead>'
+            f'<tbody>' + "".join(kw_rows_html) + '</tbody>'
             f'</table></div>',
             unsafe_allow_html=True,
         )
