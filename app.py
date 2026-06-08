@@ -950,6 +950,24 @@ def _amz_cat_norm(col_expr):
         ELSE TRIM({col_expr})
     END"""
 
+
+# ── CATEGORY normaliser ──────────────────────────────────────────────────────
+# Canada-specific rename: rows tagged CATEGORY = "Supplements" in the
+# Canadian feed are actually Handpick-branded products, so the
+# Vahdam team wants them surfaced as "Handpick Supplements" in the
+# dashboard. Other geos keep the raw "Supplements" label.
+#
+# This wraps CATEGORY at every SELECT / WHERE / GROUP BY site so the
+# filter dropdown, display tables, and underlying joins all stay
+# consistent. Geo is read off the same row (no cross-table coupling).
+def _cat_norm(cat_expr, geo_expr="GEO"):
+    return f"""CASE
+        WHEN UPPER(TRIM({geo_expr})) = 'CA'
+             AND LOWER(TRIM({cat_expr})) LIKE '%supplement%'
+            THEN 'Handpick Supplements'
+        ELSE {cat_expr}
+    END"""
+
 # ── Effective-today helper (data-load cutoff, geo-aware) ─────────────────────
 # Maplemonk warehouse refreshes per geo at different IST hours:
 #   * USA, CA, IN (and the default fallback): ~15:00 IST
@@ -1598,12 +1616,16 @@ with st.sidebar:
     # ── Filters ──
     @st.cache_data(ttl=7200)   # 2h — filter dropdown values rarely change
     def get_options():
+        # CATEGORY    is normalized via _cat_norm so Canadian Supplements
+        # appear in the dropdown as "Handpick Supplements" (separate
+        # option from non-CA Supplements).
         # AMZ_CATEGORY is normalized via _amz_cat_norm so the dropdown
         # shows one row per canonical bucket (no more "HP - Teas" +
         # "HP - teas" duplicates from dirty source data).
         return run_query(
-            f"SELECT DISTINCT BRAND, CATEGORY, CHANNEL, GEO, "
-            f"SUB_CATEGORY, {_amz_cat_norm('AMZ_CATEGORY')} AS AMZ_CATEGORY "
+            f"SELECT DISTINCT BRAND, {_cat_norm('CATEGORY')} AS CATEGORY, "
+            f"CHANNEL, GEO, SUB_CATEGORY, "
+            f"{_amz_cat_norm('AMZ_CATEGORY')} AS AMZ_CATEGORY "
             f"FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
 
@@ -1934,7 +1956,15 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
             w.append(f"(({_base}) OR ({_hp_amz}))")
         else:
             w.append(_base)
-    if f_cat:     w.append(f"CATEGORY IN ({','.join(repr(x) for x in f_cat)})")
+    if f_cat:
+        # Match against the normalized CATEGORY value so the dropdown's
+        # 'Handpick Supplements' selection maps back to (GEO='CA' AND
+        # raw CATEGORY ILIKE '%supplement%') under the hood. The same
+        # CASE expression is applied to the column on both sides — pick
+        # 'Supplements' and CA rows naturally drop out; pick 'Handpick
+        # Supplements' and only CA rows come through.
+        w.append(f"{_cat_norm('CATEGORY')} IN "
+                 f"({','.join(repr(x) for x in f_cat)})")
     if f_channel: w.append(f"CHANNEL IN ({','.join(repr(x) for x in f_channel)})")
     if geo_override:
         w.append(f"GEO = '{geo_override}'")
@@ -4749,10 +4779,15 @@ def get_pnl_category(where, sfx):
     pfxs  = ["SALES", "CM1", "CM2", "PM_SPEND", "GOOGLE_SPEND", "TOOL_COST"]
     sel   = _pnl_metric_sql(pfxs, sfx)
     no_al = _pnl_metric_sql(pfxs, sfx, with_alias=False)
+    # CATEGORY is normalized via _cat_norm so the CA-Supplements rows
+    # appear as a separate "Handpick Supplements" bucket in the P&L
+    # by-Category table. Non-CA Supplements keep the plain label.
+    cat_expr = (f"COALESCE(NULLIF({_cat_norm('CATEGORY')},''),"
+                f"'(untagged)')")
     return run_query(f"""
-        SELECT COALESCE(NULLIF(CATEGORY,''),'(untagged)') AS CATEGORY, {sel}
+        SELECT {cat_expr} AS CATEGORY, {sel}
         FROM {TABLE} WHERE {where}
-        GROUP BY COALESCE(NULLIF(CATEGORY,''),'(untagged)')
+        GROUP BY {cat_expr}
         UNION ALL
         SELECT 'GRAND TOTAL', {no_al} FROM {TABLE} WHERE {where}
         ORDER BY CASE CATEGORY WHEN 'GRAND TOTAL' THEN 9999 ELSE 1 END,
