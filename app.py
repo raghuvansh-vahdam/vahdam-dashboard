@@ -3298,29 +3298,50 @@ def get_asin_top_keywords(asin: str, geo: str, limit: int = 10):
     if rows.empty:
         return []
 
-    # Step 2 — pull Search Volume for USA only. The SQP report is split
-    # into parent + child tables linked by airbyte hashid; we join them
-    # in a CTE, filter to this ASIN, and roll up by search query.
+    # Step 2 — pull Search Volume for USA only, from BOTH SQP sources:
+    #   1. Maplemonk Airbyte sync of Brand Analytics SQP (currently
+    #      sparse — only ~1 ASIN syncing, but auto-refreshes weekly
+    #      when it works).
+    #   2. RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR — the Hector-MCP-sourced
+    #      backfill (one-time seed of top USA ASINs, see DAILY_DBR
+    #      docs for re-run instructions). Cross-database query in
+    #      Snowflake is just a fully-qualified table name; permission
+    #      already granted to CLAUDE_ROLE.
+    # UNION ALL the two then take MAX(SV) per keyword. Hector data
+    # takes precedence when both report a value because it's pulled
+    # at our cadence; Airbyte numbers fill in gaps when Hector has
+    # fewer search terms for that ASIN.
     sv_by_kw: Dict[str, float] = {}
     if g == "USA":
         try:
             sv_df = run_query(f"""
-                WITH parent AS (
-                    SELECT _AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID AS HID,
-                           UPPER(TRIM(ASIN)) AS ASIN_UP
-                    FROM vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT
+                WITH airbyte_sv AS (
+                    SELECT
+                        LOWER(TRIM(s.SEARCHQUERY))  AS KEY_LC,
+                        COALESCE(s.SEARCHQUERYVOLUME, 0) AS SV
+                    FROM vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT p
+                    JOIN vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_SEARCHQUERYDATA s
+                      ON s._AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID
+                       = p._AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID
+                    WHERE UPPER(TRIM(p.ASIN)) = UPPER('{a}')
                 ),
-                sqd AS (
-                    SELECT _AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID AS HID,
-                           LOWER(TRIM(SEARCHQUERY))  AS KEY_LC,
-                           COALESCE(SEARCHQUERYVOLUME, 0) AS SV
-                    FROM vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_SEARCHQUERYDATA
+                hector_sv AS (
+                    SELECT
+                        LOWER(TRIM(SEARCH_TERM))  AS KEY_LC,
+                        COALESCE(T_QUERY, 0)      AS SV
+                    FROM RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR
+                    WHERE UPPER(ASIN) = UPPER('{a}')
+                      AND UPPER(GEO) = 'USA'
+                ),
+                combined AS (
+                    SELECT KEY_LC, SV FROM airbyte_sv
+                    UNION ALL
+                    SELECT KEY_LC, SV FROM hector_sv
                 )
-                SELECT s.KEY_LC, MAX(s.SV) AS SV
-                FROM parent p
-                JOIN sqd s ON s.HID = p.HID
-                WHERE p.ASIN_UP = UPPER('{a}')
-                GROUP BY s.KEY_LC
+                SELECT KEY_LC, MAX(SV) AS SV
+                FROM combined
+                WHERE KEY_LC IS NOT NULL AND KEY_LC <> ''
+                GROUP BY KEY_LC
             """)
             for _, r in sv_df.iterrows():
                 k = str(r.get("KEY_LC") or "").strip()
