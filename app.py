@@ -2664,58 +2664,84 @@ def get_asin_360_metrics(asin: str, geo: str, sfx: str):
     d7s    = today_ - timedelta(days=6)                 # 7-day window start
     d14s   = today_ - timedelta(days=13)
     d30s   = today_ - timedelta(days=29)
-    mtd_s  = today_.replace(day=1)                      # MTD budget anchor
+    mtd_s  = today_.replace(day=1)                      # MTD anchor (current month)
+    # Same-month-last-year MTD window — shifts both endpoints back one
+    # calendar year via _shift_year (handles 29 Feb -> 28 Feb).
+    ly_mtd_s = _shift_year(mtd_s, -1)
+    ly_mtd_e = _shift_year(yest,  -1)
+    # Pull a single 30-day window plus the LY-MTD window. The WHERE
+    # broadens to cover both ranges; conditional sums slice the right
+    # rows into each output column.
     a      = asin.replace("'", "''")
 
-    # 1) P&L feed — revenue, units, MTD budget, product name + AMZ cat
+    # 1) P&L feed — revenue, units, budgets, MTD actual + MTD-LY actual,
+    # product name + AMZ cat. Conditional sums slice the 30-day +
+    # LY-MTD windows into separate output columns.
     amz_norm = _amz_cat_norm("AMZ_CATEGORY")
     pnl_sql = f"""
         SELECT
             MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))                  AS PRODUCT_NAME,
             MAX({amz_norm})                                                         AS AMZ_CAT,
-            SUM(CASE WHEN DAY = '{yest}'                          THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_30D,
-            SUM(CASE WHEN DAY = '{yest}'                          THEN QTY_ACTUAL         ELSE 0 END) AS UN_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'       THEN QTY_ACTUAL         ELSE 0 END) AS UN_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'       THEN QTY_ACTUAL         ELSE 0 END) AS UN_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'       THEN QTY_ACTUAL         ELSE 0 END) AS UN_30D,
-            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'      THEN SALES_BUDGET_{sfx} ELSE 0 END) AS REV_BUD,
-            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'      THEN QTY_BUDGET         ELSE 0 END) AS UN_BUD,
-            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'      THEN PM_SPEND_BUDGET_{sfx} ELSE 0 END) AS SPEND_BUD
+            SUM(CASE WHEN DAY = '{yest}'                              THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_MTD_LY,
+            SUM(CASE WHEN DAY = '{yest}'                              THEN QTY_ACTUAL         ELSE 0 END) AS UN_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN QTY_ACTUAL         ELSE 0 END) AS UN_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN QTY_ACTUAL         ELSE 0 END) AS UN_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN QTY_ACTUAL         ELSE 0 END) AS UN_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN QTY_ACTUAL         ELSE 0 END) AS UN_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN QTY_ACTUAL         ELSE 0 END) AS UN_MTD_LY,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN SALES_BUDGET_{sfx} ELSE 0 END) AS REV_BUD,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN QTY_BUDGET         ELSE 0 END) AS UN_BUD,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN PM_SPEND_BUDGET_{sfx} ELSE 0 END) AS SPEND_BUD
         FROM {TABLE}
-        WHERE DAY BETWEEN '{d30s}' AND '{yest}'
+        WHERE (DAY BETWEEN '{d30s}'    AND '{yest}'
+               OR DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}')
           AND GEO = '{geo}' AND {GEO_EXCL}
           AND SPLIT_PART(ASIN,' ',1) = '{a}'
     """
     pnl_df = run_query(pnl_sql)
 
     # 2) Marketing feed — spend, impressions, clicks, paid units, ad rev
+    # Same MTD + MTD-LY conditional-sum pattern as the P&L query above.
     mkt_sql = f"""
         SELECT
-            SUM(CASE WHEN DAY = '{yest}'                    THEN SPEND       ELSE 0 END) AS SP_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN SPEND       ELSE 0 END) AS SP_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN SPEND       ELSE 0 END) AS SP_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN SPEND       ELSE 0 END) AS SP_30D,
-            SUM(CASE WHEN DAY = '{yest}'                    THEN IMPRESSIONS ELSE 0 END) AS IM_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN IMPRESSIONS ELSE 0 END) AS IM_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN IMPRESSIONS ELSE 0 END) AS IM_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN IMPRESSIONS ELSE 0 END) AS IM_30D,
-            SUM(CASE WHEN DAY = '{yest}'                    THEN CLICKS      ELSE 0 END) AS CL_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN CLICKS      ELSE 0 END) AS CL_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN CLICKS      ELSE 0 END) AS CL_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN CLICKS      ELSE 0 END) AS CL_30D,
-            SUM(CASE WHEN DAY = '{yest}'                    THEN CONVERSIONS ELSE 0 END) AS CV_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN CONVERSIONS ELSE 0 END) AS CV_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN CONVERSIONS ELSE 0 END) AS CV_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN CONVERSIONS ELSE 0 END) AS CV_30D,
-            SUM(CASE WHEN DAY = '{yest}'                    THEN AD_SALES    ELSE 0 END) AS AR_YEST,
-            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN AD_SALES    ELSE 0 END) AS AR_7D,
-            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN AD_SALES    ELSE 0 END) AS AR_14D,
-            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN AD_SALES    ELSE 0 END) AS AR_30D
+            SUM(CASE WHEN DAY = '{yest}'                              THEN SPEND       ELSE 0 END) AS SP_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN SPEND       ELSE 0 END) AS SP_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN SPEND       ELSE 0 END) AS SP_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN SPEND       ELSE 0 END) AS SP_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN SPEND       ELSE 0 END) AS SP_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN SPEND       ELSE 0 END) AS SP_MTD_LY,
+            SUM(CASE WHEN DAY = '{yest}'                              THEN IMPRESSIONS ELSE 0 END) AS IM_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN IMPRESSIONS ELSE 0 END) AS IM_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN IMPRESSIONS ELSE 0 END) AS IM_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN IMPRESSIONS ELSE 0 END) AS IM_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN IMPRESSIONS ELSE 0 END) AS IM_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN IMPRESSIONS ELSE 0 END) AS IM_MTD_LY,
+            SUM(CASE WHEN DAY = '{yest}'                              THEN CLICKS      ELSE 0 END) AS CL_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN CLICKS      ELSE 0 END) AS CL_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN CLICKS      ELSE 0 END) AS CL_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN CLICKS      ELSE 0 END) AS CL_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN CLICKS      ELSE 0 END) AS CL_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN CLICKS      ELSE 0 END) AS CL_MTD_LY,
+            SUM(CASE WHEN DAY = '{yest}'                              THEN CONVERSIONS ELSE 0 END) AS CV_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN CONVERSIONS ELSE 0 END) AS CV_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN CONVERSIONS ELSE 0 END) AS CV_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN CONVERSIONS ELSE 0 END) AS CV_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN CONVERSIONS ELSE 0 END) AS CV_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN CONVERSIONS ELSE 0 END) AS CV_MTD_LY,
+            SUM(CASE WHEN DAY = '{yest}'                              THEN AD_SALES    ELSE 0 END) AS AR_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN AD_SALES    ELSE 0 END) AS AR_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN AD_SALES    ELSE 0 END) AS AR_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN AD_SALES    ELSE 0 END) AS AR_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN AD_SALES    ELSE 0 END) AS AR_MTD,
+            SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN AD_SALES    ELSE 0 END) AS AR_MTD_LY
         FROM {MKTG}
-        WHERE DAY BETWEEN '{d30s}' AND '{yest}'
+        WHERE (DAY BETWEEN '{d30s}'    AND '{yest}'
+               OR DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}')
           AND GEO = '{geo}'
           AND SPLIT_PART(ASIN,' ',1) = '{a}'
     """
@@ -2731,12 +2757,15 @@ def get_asin_360_metrics(asin: str, geo: str, sfx: str):
         try:
             sm_df = run_query(f"""
                 SELECT
-                    SUM(CASE WHEN DAY = '{yest}'                    THEN {sess_col} ELSE 0 END) AS SE_YEST,
-                    SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN {sess_col} ELSE 0 END) AS SE_7D,
-                    SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN {sess_col} ELSE 0 END) AS SE_14D,
-                    SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN {sess_col} ELSE 0 END) AS SE_30D
+                    SUM(CASE WHEN DAY = '{yest}'                              THEN {sess_col} ELSE 0 END) AS SE_YEST,
+                    SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'           THEN {sess_col} ELSE 0 END) AS SE_7D,
+                    SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'           THEN {sess_col} ELSE 0 END) AS SE_14D,
+                    SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'           THEN {sess_col} ELSE 0 END) AS SE_30D,
+                    SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'          THEN {sess_col} ELSE 0 END) AS SE_MTD,
+                    SUM(CASE WHEN DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}'   THEN {sess_col} ELSE 0 END) AS SE_MTD_LY
                 FROM {SALES_MKT}
-                WHERE DAY BETWEEN '{d30s}' AND '{yest}'
+                WHERE (DAY BETWEEN '{d30s}'    AND '{yest}'
+                       OR DAY BETWEEN '{ly_mtd_s}' AND '{ly_mtd_e}')
                   AND GEO = '{geo}'
                   AND SPLIT_PART(ASIN,' ',1) = '{a}'
             """)
@@ -2765,6 +2794,8 @@ def get_asin_360_metrics(asin: str, geo: str, sfx: str):
         "7d":     _per("7D"),
         "14d":    _per("14D"),
         "30d":    _per("30D"),
+        "mtd":    _per("MTD"),       # this month, 1st → yesterday
+        "mtd_ly": _per("MTD_LY"),    # same window shifted back one year
         "budget": {
             "revenue": _r(pnl_df, "REV_BUD"),
             "units":   _r(pnl_df, "UN_BUD"),
@@ -2777,6 +2808,9 @@ def get_asin_360_metrics(asin: str, geo: str, sfx: str):
                     if not pnl_df.empty
                     and pnl_df.iloc[0].get("AMZ_CAT") else ""),
         "yesterday_date": yest,
+        "mtd_start_date": mtd_s,
+        "ly_mtd_start_date": ly_mtd_s,
+        "ly_mtd_end_date":   ly_mtd_e,
     }
 
 
@@ -2799,14 +2833,40 @@ def _safe_div(num, den):
 def get_asin_ratings_summary(asin: str, geo: str):
     """Return {avg_rating, review_count, last_review_date} for one ASIN.
 
-    Queries the Amazon review feed (REVIEWS table). The dashboard
-    already has this data via the Customer Insights view — here we
-    surface just the per-ASIN aggregates for the 360° modal header.
+    Two-tier source:
+      1) **Keepa** (authoritative — pulls the live Amazon star rating
+         + total review count off the product page). Cached 24h via
+         _fetch_keepa_chunk so the same ASIN within 24h is free.
+      2) **Maplemonk REVIEWS feed** (fallback). The feed is a curated
+         scrape — its average can drift from Amazon's displayed value
+         because Amazon uses a Bayesian average, not a simple mean,
+         and the feed may not cover every review. Better than nothing
+         when Keepa is unavailable.
 
-    Falls back to (None, 0, None) when no reviews exist for this ASIN /
-    geo combination, so the modal can show '— stars · no reviews yet'
-    cleanly instead of crashing on empty data.
+    Falls back to (None, 0, None) when both sources are empty.
     """
+    # ── Tier 1: Keepa ────────────────────────────────────────────
+    domain_code = KEEPA_DOMAIN.get((geo or "").upper())
+    if domain_code and keepa_available():
+        try:
+            window = _keepa_refresh_window(domain_code)
+            kresult = _fetch_keepa_chunk((asin,), domain_code, window)
+            if isinstance(kresult, dict) and "_error" not in kresult:
+                k = kresult.get(asin) or {}
+                rating = k.get("rating")
+                reviews = k.get("reviews_count")
+                # Keepa returns these as floats / ints. Accept rating > 0.
+                if rating is not None and float(rating) > 0:
+                    return {
+                        "avg_rating":   float(rating),
+                        "review_count": int(reviews) if reviews else 0,
+                        "last_review_date": None,
+                        "source": "keepa",
+                    }
+        except Exception:
+            pass   # fall through to Maplemonk feed
+
+    # ── Tier 2: Maplemonk REVIEWS feed fallback ─────────────────
     a = asin.replace("'", "''")
     g = (geo or "").replace("'", "''").upper()
     try:
@@ -2827,9 +2887,11 @@ def get_asin_ratings_summary(asin: str, geo: str):
               AND TRY_TO_NUMBER(RATING) IS NOT NULL
         """)
     except Exception:
-        return {"avg_rating": None, "review_count": 0, "last_review_date": None}
+        return {"avg_rating": None, "review_count": 0,
+                "last_review_date": None, "source": None}
     if df.empty:
-        return {"avg_rating": None, "review_count": 0, "last_review_date": None}
+        return {"avg_rating": None, "review_count": 0,
+                "last_review_date": None, "source": None}
     r = df.iloc[0]
     avg = r.get("AVG_RATING")
     cnt = r.get("REVIEW_COUNT")
@@ -2838,6 +2900,7 @@ def get_asin_ratings_summary(asin: str, geo: str):
         "avg_rating": float(avg) if avg is not None and not pd.isna(avg) else None,
         "review_count": int(cnt) if cnt is not None and not pd.isna(cnt) else 0,
         "last_review_date": last,
+        "source": "reviews_feed",
     }
 
 
@@ -3002,6 +3065,41 @@ def _asin_360_suggestions(data: dict) -> list:
     return out
 
 
+def _svg_sparkline(values, color="#004A2B", width=120, height=28):
+    """Generate an inline SVG sparkline from a list of numeric values.
+
+    Returns an HTML snippet that renders a smooth polyline + faint area
+    fill. Empty / single-point series fall back to an empty string.
+    Used by the peer-comparison table — cleaner and more readable than
+    the Unicode block-character sparkline (▁▂▃▄▅▆▇█) it replaced.
+    """
+    if not values or len(values) < 2:
+        return ""
+    pad = 2
+    n = len(values)
+    lo = min(values)
+    hi = max(values)
+    rng = (hi - lo) or 1.0
+    pts = []
+    for i, v in enumerate(values):
+        x = pad + (i / (n - 1)) * (width - 2 * pad)
+        y = (height - pad) - ((v - lo) / rng) * (height - 2 * pad)
+        pts.append(f"{x:.1f},{y:.1f}")
+    polyline_str = " ".join(pts)
+    # Area fill = polyline closed to the bottom-left + bottom-right
+    area_pts = (f"{pad},{height-pad} " + polyline_str
+                + f" {width-pad},{height-pad}")
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'style="display:inline-block;vertical-align:middle;">'
+        f'<polygon points="{area_pts}" fill="{color}" fill-opacity="0.12" '
+        f'stroke="none"/>'
+        f'<polyline points="{polyline_str}" fill="none" stroke="{color}" '
+        f'stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'</svg>'
+    )
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_peers(asin: str, geo: str, sfx: str, amz_cat: str):
     """Top 5 ASINs in the same AMZ Sub Category for the given geo,
@@ -3010,9 +3108,11 @@ def get_asin_peers(asin: str, geo: str, sfx: str, amz_cat: str):
     ASIN or against it.
 
     Returns a list of dicts shaped:
-      [{ASIN, PRODUCT_NAME, REV_30D, BUD_MTD, REV_DELTA_PCT, SPARK}, …]
-    SPARK is a Unicode sparkline string from daily revenue over 30d
-    (▁▂▃▄▅▆▇█). Empty list when the category is unknown / no peers.
+      [{ASIN, PRODUCT_NAME, REV_30D, BUD_MTD, ACH_PCT,
+        SESSIONS_30D, UNITS_30D, CVR_PCT, DAILY_REV}, …]
+    DAILY_REV is the raw list of daily revenue values (last 30 days)
+    so the renderer can hand them to _svg_sparkline. Empty list when
+    the category is unknown / no peers.
     """
     if not amz_cat:
         return []
@@ -3066,14 +3166,16 @@ def get_asin_peers(asin: str, geo: str, sfx: str, amz_cat: str):
             top_df = pd.concat([top_df, self_df], ignore_index=True)
             asin_keys.append(asin)
 
-    # Step 2 — daily revenue per ASIN (last 30 days) for the sparkline.
+    # Step 2 — daily revenue per ASIN (last 30 days) for the sparkline +
+    # 30d unit totals so we can divide by sessions for per-peer CVR.
     asin_list_sql = ", ".join("'{}'".format(a.replace("'", "''"))
                               for a in asin_keys)
     daily_sql = f"""
         SELECT
-            SPLIT_PART(ASIN, ' ', 1) AS ASIN_KEY,
+            SPLIT_PART(ASIN, ' ', 1)             AS ASIN_KEY,
             DAY,
-            ROUND(SUM(SALES_ACTUAL_{sfx}), 0) AS REV
+            ROUND(SUM(SALES_ACTUAL_{sfx}), 0)    AS REV,
+            COALESCE(SUM(QTY_ACTUAL), 0)         AS UNITS
         FROM {TABLE}
         WHERE DAY BETWEEN '{d30s}' AND '{today_}'
           AND GEO = '{geo}' AND {GEO_EXCL}
@@ -3083,40 +3185,62 @@ def get_asin_peers(asin: str, geo: str, sfx: str, amz_cat: str):
     """
     daily_df = run_query(daily_sql)
 
-    # Build sparkline strings (Unicode block characters scaled to range)
-    spark_chars = "▁▂▃▄▅▆▇█"
-    def _spark(values):
-        if not values:
-            return ""
-        lo, hi = min(values), max(values)
-        rng = (hi - lo) or 1.0
-        out_chars = []
-        for v in values:
-            idx = int((v - lo) / rng * (len(spark_chars) - 1))
-            out_chars.append(spark_chars[idx])
-        return "".join(out_chars)
+    # Step 3 — 30-day SESSIONS per ASIN. Single aggregated query (no
+    # daily grain) since we only need the total for the Sessions /
+    # CVR% columns. Falls back to {} if the sessions column isn't
+    # discoverable on this account.
+    sess_totals = {}
+    sess_col = _sales_mkt_col(
+        "SESSIONS", "SESSIONS_TOTAL", "BROWSER_SESSIONS",
+        "TOTAL_SESSIONS", "SESSIONS_B2C", "ORDERED_SESSIONS",
+    )
+    if sess_col:
+        try:
+            sess_df = run_query(f"""
+                SELECT
+                    SPLIT_PART(ASIN,' ',1)         AS ASIN_KEY,
+                    COALESCE(SUM({sess_col}), 0)   AS SESSIONS_30D
+                FROM {SALES_MKT}
+                WHERE DAY BETWEEN '{d30s}' AND '{today_}'
+                  AND GEO = '{geo}'
+                  AND SPLIT_PART(ASIN,' ',1) IN ({asin_list_sql})
+                GROUP BY 1
+            """)
+            for _, sr in sess_df.iterrows():
+                sess_totals[str(sr["ASIN_KEY"])] = float(sr.get("SESSIONS_30D") or 0)
+        except Exception:
+            sess_totals = {}
 
-    sparks = {}
+    # Build per-ASIN daily revenue lists + unit totals.
+    daily_rev_by_asin = {}
+    units_by_asin     = {}
     if not daily_df.empty:
         daily_df["DAY"] = pd.to_datetime(daily_df["DAY"]).dt.date
         for k, grp in daily_df.groupby("ASIN_KEY"):
-            sparks[str(k)] = _spark([float(v or 0) for v in grp["REV"].tolist()])
+            daily_rev_by_asin[str(k)] = [
+                float(v or 0) for v in grp["REV"].tolist()
+            ]
+            units_by_asin[str(k)] = float(grp["UNITS"].sum() or 0)
 
     rows = []
     for _, r in top_df.iterrows():
         akey = str(r["ASIN_KEY"])
         rev = float(r.get("REV_30D") or 0)
         bud = float(r.get("BUD_MTD") or 0)
-        # vs Bud: 30d revenue vs MTD budget — informational, not strict
-        # achievement (windows differ). Better than nothing.
         ach = (rev / bud * 100) if bud > 0 else None
+        units = units_by_asin.get(akey, 0)
+        sess  = sess_totals.get(akey, 0)
+        cvr_pct = (units / sess * 100) if sess else None
         rows.append({
             "ASIN":         akey,
             "PRODUCT_NAME": str(r.get("PRODUCT_NAME") or akey),
             "REV_30D":      rev,
             "BUD_MTD":      bud,
             "ACH_PCT":      ach,
-            "SPARK":        sparks.get(akey, ""),
+            "SESSIONS_30D": sess,
+            "UNITS_30D":    units,
+            "CVR_PCT":      cvr_pct,
+            "DAILY_REV":    daily_rev_by_asin.get(akey, []),
         })
     # Sort descending by revenue, keep self even if appended.
     rows.sort(key=lambda x: x["REV_30D"], reverse=True)
@@ -3219,26 +3343,30 @@ def render_asin_360_modal(asin: str, geo: str,
         cpc      = _safe_div(d["spend"], d["clicks"])
         ad_cvr   = _ratio_pct(d["paid_units"], d["clicks"])
         return {
-            "Sessions":  d["sessions"],
-            "Units":     d["units"],
-            "CVR%":      sess_cvr,
-            "Revenue":   d["revenue"],
-            "ASP":       asp,
-            "Spend":     d["spend"],
-            "ACoS%":     acos,
-            "PACoS%":    pacos,
-            "Impr":      d["impressions"],
-            "Clicks":    d["clicks"],
-            "CTR%":      ctr,
-            "CPC":       cpc,
-            "Ad CVR%":   ad_cvr,
+            "Sessions":     d["sessions"],
+            "Units":        d["units"],
+            "CVR%":         sess_cvr,
+            "Revenue":      d["revenue"],
+            "ASP":          asp,
+            "Spend":        d["spend"],
+            "Paid Rev":     d["ad_revenue"],
+            "Paid Units":   d["paid_units"],
+            "ACoS%":        acos,
+            "PACoS%":       pacos,
+            "Impr":         d["impressions"],
+            "Clicks":       d["clicks"],
+            "CTR%":         ctr,
+            "CPC":          cpc,
+            "Ad CVR%":      ad_cvr,
         }
 
     rows = {
-        "Yesterday":   _row("yest"),
-        "Past 7 Days": _row("7d"),
-        "Past 14 Days":_row("14d"),
-        "Past 30 Days":_row("30d"),
+        "Yesterday":     _row("yest"),
+        "Past 7 Days":   _row("7d"),
+        "Past 14 Days":  _row("14d"),
+        "Past 30 Days":  _row("30d"),
+        "MTD":           _row("mtd"),
+        "MTD LY":        _row("mtd_ly"),
     }
 
     # Budget column — MTD context. ACoS budget = Spend Bud / Rev Bud × 100.
@@ -3248,18 +3376,22 @@ def render_asin_360_modal(asin: str, geo: str,
     bud_row = {
         "Sessions": None, "Units": b["units"], "CVR%": None,
         "Revenue":  b["revenue"], "ASP": bud_asp,
-        "Spend":    b["spend"],  "ACoS%": bud_acos,
-        # PACoS% needs paid-revenue budget which we don't carry. CPC,
-        # Impr, Clicks, CTR, Ad CVR similarly have no budget plan.
-        "PACoS%":   None, "Impr": None, "Clicks": None,
-        "CTR%":     None, "CPC": None,  "Ad CVR%": None,
+        "Spend":    b["spend"],
+        # No Paid Rev / Paid Units / PACoS% / CPC / Impr / Clicks / CTR /
+        # Ad CVR budget plans — leave as em-dash.
+        "Paid Rev": None, "Paid Units": None,
+        "ACoS%":    bud_acos, "PACoS%": None,
+        "Impr": None, "Clicks": None,
+        "CTR%": None, "CPC": None, "Ad CVR%": None,
     }
 
-    # Metric order: revenue first (most important), then ad efficiency,
-    # then funnel. CPC sits BELOW CTR% so the click → cost chain reads
-    # top-down. PACoS% sits below ACoS% — they're paired metrics.
-    metric_order = ["Sessions","Units","CVR%","Revenue","ASP","Spend",
-                    "ACoS%","PACoS%","Impr","Clicks","CTR%","CPC","Ad CVR%"]
+    # Metric order: traffic → revenue → ad block (spend / paid metrics /
+    # ACoS / PACoS) → funnel (impressions / clicks / CTR / CPC / Ad CVR).
+    # CPC sits BELOW CTR% so the click → cost chain reads top-down.
+    metric_order = ["Sessions","Units","CVR%","Revenue","ASP",
+                    "Spend","Paid Rev","Paid Units",
+                    "ACoS%","PACoS%",
+                    "Impr","Clicks","CTR%","CPC","Ad CVR%"]
 
     def _fmt(metric, v):
         if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -3271,30 +3403,32 @@ def render_asin_360_modal(asin: str, geo: str,
                 # scale — show raw rupees with 2 dp.
                 return f"₹{_f(v):,.2f}"
             return f"{sym}{_f(v):,.2f}"
-        if metric in ("Revenue","Spend"):
+        if metric in ("Revenue", "Spend", "Paid Rev"):
             return fmt_lakhs(v) if sfx == "INR" else f"{sym}{_f(v):,.0f}"
         if metric in ("CVR%","ACoS%","PACoS%","CTR%","Ad CVR%"):
             return f"{_f(v):,.1f}%"
-        # counts: Sessions / Units / Impr / Clicks
+        # counts: Sessions / Units / Paid Units / Impr / Clicks
         return f"{int(_f(v) or 0):,}"
 
     # Build HTML table — inline-styled so it stays visually distinct
     # from the rest of the dashboard's beige-on-cream theme. Uses a
     # darker green-on-cream "data cockpit" feel.
     metric_labels = {
-        "Sessions": "🌐 Sessions",
-        "Units":    "📦 Units",
-        "CVR%":     "🎯 Session CVR%",
-        "Revenue":  "💰 Revenue",
-        "ASP":      "🏷️ ASP",
-        "Spend":    "📣 Ad Spend",
-        "ACoS%":    "📊 ACoS%",
-        "PACoS%":   "🎯 PACoS%",
-        "Impr":     "👁️ Impressions",
-        "Clicks":   "👆 Clicks",
-        "CTR%":     "📈 CTR%",
-        "CPC":      "💸 CPC",
-        "Ad CVR%":  "🎯 Ad CVR%",
+        "Sessions":    "🌐 Sessions",
+        "Units":       "📦 Units",
+        "CVR%":        "🎯 Session CVR%",
+        "Revenue":     "💰 Revenue",
+        "ASP":         "🏷️ ASP",
+        "Spend":       "📣 Ad Spend",
+        "Paid Rev":    "💵 Paid Revenue",
+        "Paid Units":  "🛒 Paid Units",
+        "ACoS%":       "📊 ACoS%",
+        "PACoS%":      "🎯 PACoS%",
+        "Impr":        "👁️ Impressions",
+        "Clicks":      "👆 Clicks",
+        "CTR%":        "📈 CTR%",
+        "CPC":         "💸 CPC",
+        "Ad CVR%":     "🎯 Ad CVR%",
     }
 
     period_labels = list(rows.keys()) + ["Bud (MTD)"]
@@ -3428,18 +3562,27 @@ def render_asin_360_modal(asin: str, geo: str,
                         f'font-weight:700;font-size:11px;padding:2px 7px;'
                         f'border-radius:6px;">{ach:.1f}%</span>'
                         if ach is not None else "—")
-            # Sparkline characters — colored green/grey/red by net trend
-            spark = p_row.get("SPARK", "")
+
+            # Sessions + CVR% — sessions from SALES_MKT, CVR = Units / Sessions.
+            sess  = p_row.get("SESSIONS_30D") or 0
+            cvr_p = p_row.get("CVR_PCT")
+            sess_html = f"{int(sess):,}" if sess else "—"
+            cvr_html  = f"{cvr_p:.1f}%" if cvr_p is not None else "—"
+
+            # SVG sparkline — color picks trend direction. Compare the
+            # average of the second-half vs first-half of the window.
+            daily = p_row.get("DAILY_REV") or []
             spark_color = "#7a6a50"
-            if spark and len(spark) >= 6:
-                first_half = spark[:len(spark)//2]
-                second_half = spark[len(spark)//2:]
-                # Average char rank to gauge trend
-                rank = lambda s: sum("▁▂▃▄▅▆▇█".index(c) for c in s) / max(len(s),1)
-                if rank(second_half) > rank(first_half) + 0.5:
-                    spark_color = "#1a7a3e"
-                elif rank(second_half) < rank(first_half) - 0.5:
-                    spark_color = "#8b1a1a"
+            if len(daily) >= 6:
+                half = len(daily) // 2
+                first_avg  = sum(daily[:half])  / max(half, 1)
+                second_avg = sum(daily[half:]) / max(len(daily) - half, 1)
+                rel = (second_avg - first_avg) / (first_avg or 1)
+                if   rel >  0.10: spark_color = "#1a7a3e"
+                elif rel < -0.10: spark_color = "#8b1a1a"
+            spark_svg = _svg_sparkline(daily, color=spark_color,
+                                       width=110, height=26)
+
             peer_rows_html.append(
                 f'<tr style="{self_bg}">'
                 f'<td style="padding:8px 10px;font-weight:600;color:#004A2B;'
@@ -3447,19 +3590,23 @@ def render_asin_360_modal(asin: str, geo: str,
                 f'border-bottom:1px solid #ead9b5;">'
                 f'{self_marker}{p_row["ASIN"]}</td>'
                 f'<td style="padding:8px 10px;color:#5a4d35;font-size:12px;'
-                f'border-bottom:1px solid #ead9b5;max-width:260px;'
+                f'border-bottom:1px solid #ead9b5;max-width:220px;'
                 f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
-                f'{p_row["PRODUCT_NAME"][:60]}</td>'
+                f'{p_row["PRODUCT_NAME"][:48]}</td>'
                 f'<td style="padding:8px 10px;text-align:right;font-weight:700;'
                 f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
                 f'border-bottom:1px solid #ead9b5;">'
                 f'{_fmt_rev(p_row["REV_30D"])}</td>'
                 f'<td style="padding:8px 10px;text-align:right;font-size:12px;'
                 f'border-bottom:1px solid #ead9b5;">{ach_html}</td>'
-                f'<td style="padding:8px 10px;text-align:left;font-size:18px;'
-                f'color:{spark_color};letter-spacing:-2px;line-height:1;'
-                f'border-bottom:1px solid #ead9b5;font-family:monospace;">'
-                f'{spark}</td>'
+                f'<td style="padding:8px 10px;text-align:right;font-weight:600;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{sess_html}</td>'
+                f'<td style="padding:8px 10px;text-align:right;font-weight:600;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{cvr_html}</td>'
+                f'<td style="padding:6px 10px;text-align:left;'
+                f'border-bottom:1px solid #ead9b5;">{spark_svg}</td>'
                 f'</tr>'
             )
 
@@ -3481,6 +3628,12 @@ def render_asin_360_modal(asin: str, geo: str,
             f'<th style="padding:9px 10px;text-align:right;font-size:10px;'
             f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
             f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">vs Bud</th>'
+            f'<th style="padding:9px 10px;text-align:right;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">Sessions</th>'
+            f'<th style="padding:9px 10px;text-align:right;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">CVR%</th>'
             f'<th style="padding:9px 10px;text-align:left;font-size:10px;'
             f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
             f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">30d Trend</th>'
