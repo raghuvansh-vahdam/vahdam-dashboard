@@ -2667,10 +2667,12 @@ def get_asin_360_metrics(asin: str, geo: str, sfx: str):
     mtd_s  = today_.replace(day=1)                      # MTD budget anchor
     a      = asin.replace("'", "''")
 
-    # 1) P&L feed — revenue, units, MTD budget, product name
+    # 1) P&L feed — revenue, units, MTD budget, product name + AMZ cat
+    amz_norm = _amz_cat_norm("AMZ_CATEGORY")
     pnl_sql = f"""
         SELECT
             MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))                  AS PRODUCT_NAME,
+            MAX({amz_norm})                                                         AS AMZ_CAT,
             SUM(CASE WHEN DAY = '{yest}'                          THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_YEST,
             SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_7D,
             SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_14D,
@@ -2771,6 +2773,9 @@ def get_asin_360_metrics(asin: str, geo: str, sfx: str):
         "product_name": (str(pnl_df.iloc[0]["PRODUCT_NAME"])
                          if not pnl_df.empty
                          and pnl_df.iloc[0].get("PRODUCT_NAME") else asin),
+        "amz_cat": (str(pnl_df.iloc[0]["AMZ_CAT"]).strip()
+                    if not pnl_df.empty
+                    and pnl_df.iloc[0].get("AMZ_CAT") else ""),
         "yesterday_date": yest,
     }
 
@@ -2788,6 +2793,288 @@ def _safe_div(num, den):
     n = _f(num); d = _f(den)
     if d is None or d == 0 or n is None: return None
     return n / d
+
+
+# ── Phase 2: action-suggestion rule engine ─────────────────────────────
+def _asin_360_suggestions(data: dict) -> list:
+    """Rule-based action recommendations from the 360° metrics dict.
+
+    Returns a list of dicts (icon, severity, title, body) — each one a
+    bite-sized "next step" the brand manager can act on. Rules ordered
+    by severity so red flags surface first. Each rule is an independent
+    check; an ASIN can light up multiple suggestions.
+
+    Severity → colour: red = urgent / money-losing, amber = warning /
+    investigate, green = opportunity / push harder, blue = neutral info.
+    """
+    out = []
+    d30 = data["30d"]
+    d7  = data["7d"]
+    dy  = data["yest"]
+
+    def _safe_div(a, b):
+        a, b = float(a or 0), float(b or 0)
+        return (a / b) if b else None
+
+    # 30-day aggregates
+    rev30   = float(d30["revenue"] or 0)
+    spend30 = float(d30["spend"] or 0)
+    rev7    = float(d7["revenue"] or 0)
+    spend7  = float(d7["spend"] or 0)
+    imp30   = float(d30["impressions"] or 0)
+    cl30    = float(d30["clicks"] or 0)
+    cl7     = float(d7["clicks"] or 0)
+    units30 = float(d30["units"] or 0)
+    pu30    = float(d30["paid_units"] or 0)
+    pu7     = float(d7["paid_units"] or 0)
+    sess30  = float(d30["sessions"] or 0)
+    sess7   = float(d7["sessions"] or 0)
+    impY    = float(dy["impressions"] or 0)
+    sessY   = float(dy["sessions"] or 0)
+
+    roas30 = _safe_div(rev30, spend30)
+    roas7  = _safe_div(rev7,  spend7)
+    acos30 = _safe_div(spend30, rev30)
+    acos7  = _safe_div(spend7,  rev7)
+    ctr30  = _safe_div(cl30, imp30)
+    cvr30  = _safe_div(units30, sess30)
+    cvr7   = _safe_div(d7["units"], sess7)
+    adcvr30 = _safe_div(pu30, cl30)
+
+    # Daily averages for trend comparison
+    daily_rev_30 = rev30 / 30
+    daily_rev_7  = rev7  / 7
+
+    # ── Rules ───────────────────────────────────────────────────────
+    # R1: ROAS opportunity — push spend. 30d ROAS strong AND 7d holding.
+    if roas30 and roas30 >= 5 and (roas7 is None or roas7 >= 4):
+        out.append({
+            "severity": "green", "icon": "🟢",
+            "title": f"Strong ROAS ({roas30:.1f}×) — consider raising ad budget",
+            "body": (f"Every ad-rupee returns ₹{roas30:.2f} of revenue over "
+                     f"the last 30 days. Ads are highly efficient — explore "
+                     f"a 20–30% spend lift before efficiency saturates.")
+        })
+
+    # R2: ROAS bleed — losing money on paid traffic. Threshold: ROAS < 1.5x
+    # and meaningful spend.
+    if roas30 is not None and roas30 < 1.5 and spend30 > 5000:
+        out.append({
+            "severity": "red", "icon": "🔴",
+            "title": f"Ads losing money (ROAS {roas30:.1f}×)",
+            "body": (f"Spent ₹{spend30:,.0f} / earned ₹{rev30:,.0f} from paid "
+                     f"traffic in 30 days. ROAS is below break-even on "
+                     f"margin — reduce bids, pause low performers, or "
+                     f"renegotiate ASIN match.")
+        })
+
+    # R3: Session CVR crash — listing health
+    if cvr30 and cvr7 and cvr30 > 0.005:
+        drop = (cvr30 - cvr7) / cvr30 * 100
+        if drop >= 25:
+            out.append({
+                "severity": "red", "icon": "🔴",
+                "title": f"Session CVR dropped {drop:.0f}% vs 30d avg",
+                "body": (f"Conversion fell from {cvr30*100:.1f}% (30d) to "
+                         f"{cvr7*100:.1f}% (7d). Investigate: recent image / "
+                         f"title / pricing change, Buy Box loss, listing "
+                         f"suppression, or a negative-review surge.")
+            })
+
+    # R4: ACoS spike — recent ad-efficiency degradation
+    if acos30 and acos7 and acos30 > 0:
+        if acos7 > acos30 * 1.5 and acos7 > 0.25:
+            out.append({
+                "severity": "amber", "icon": "🟠",
+                "title": f"ACoS spiked: {acos30*100:.1f}% → {acos7*100:.1f}%",
+                "body": (f"Last 7 days are pacing ad-inefficient vs the 30-day "
+                         f"baseline. Add negative keywords for low-converting "
+                         f"search terms, tighten match types, or lower bids "
+                         f"on the worst performers.")
+            })
+
+    # R5: Low CTR (audience / creative miss)
+    if ctr30 is not None and imp30 > 10000 and ctr30 < 0.003:
+        out.append({
+            "severity": "amber", "icon": "🟠",
+            "title": f"CTR only {ctr30*100:.2f}% — creative needs help",
+            "body": (f"Over {int(imp30):,} impressions but very few clicks "
+                     f"(<0.3% CTR). Typical strong CTR is 0.5–1%+. Refresh "
+                     f"main image, sharpen the title, or refine keywords to "
+                     f"match higher-intent searches.")
+        })
+
+    # R6: Spend without conversion — zero-result spend last 7d
+    if spend7 > 1000 and pu7 == 0:
+        out.append({
+            "severity": "red", "icon": "🔴",
+            "title": f"Spent ₹{spend7:,.0f} in 7 days with zero paid orders",
+            "body": ("Ad spend running but no conversions. Check listing "
+                     "availability (Buy Box, in-stock), keyword match (are "
+                     "you bidding on irrelevant searches?), and price "
+                     "competitiveness.")
+        })
+
+    # R7: Revenue trending down (7d daily-avg < 70% of 30d daily-avg)
+    if daily_rev_30 > 0 and daily_rev_7 < daily_rev_30 * 0.7:
+        gap = (1 - daily_rev_7 / daily_rev_30) * 100
+        out.append({
+            "severity": "amber", "icon": "🟠",
+            "title": f"Revenue trending down — 7d avg {gap:.0f}% below 30d",
+            "body": (f"Daily revenue averaged ₹{daily_rev_7:,.0f} in last 7 "
+                     f"days vs ₹{daily_rev_30:,.0f} across 30 days. Could be "
+                     f"OOS, ranking slip, pricing change or seasonality — "
+                     f"check Buy Box + inventory first.")
+        })
+
+    # R8: No traffic at all yesterday — listing dark
+    if impY == 0 and sessY == 0 and (imp30 > 0 or sess30 > 0):
+        out.append({
+            "severity": "red", "icon": "🔴",
+            "title": "No impressions or sessions yesterday",
+            "body": ("Listing went dark on yesterday's data. Common causes: "
+                     "ad campaigns paused, listing suppressed, or feed-load "
+                     "issue. Open the live Amazon listing to verify.")
+        })
+
+    # R9: Healthy / no flags fallback
+    if not out:
+        if rev30 > 0:
+            out.append({
+                "severity": "blue", "icon": "🔵",
+                "title": "No red flags — ASIN in normal range",
+                "body": (f"Revenue ₹{rev30:,.0f} / spend ₹{spend30:,.0f} over "
+                         f"30 days, no abnormal CVR / ACoS movement. "
+                         f"Maintain current strategy.")
+            })
+        else:
+            out.append({
+                "severity": "blue", "icon": "🔵",
+                "title": "No data in last 30 days",
+                "body": "This ASIN has no activity. May be delisted, suppressed, or newly created.",
+            })
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_asin_peers(asin: str, geo: str, sfx: str, amz_cat: str):
+    """Top 5 ASINs in the same AMZ Sub Category for the given geo,
+    ranked by 30d Revenue. Used by the modal's peer-comparison block
+    so the user can see whether the entire bucket is moving with this
+    ASIN or against it.
+
+    Returns a list of dicts shaped:
+      [{ASIN, PRODUCT_NAME, REV_30D, BUD_MTD, REV_DELTA_PCT, SPARK}, …]
+    SPARK is a Unicode sparkline string from daily revenue over 30d
+    (▁▂▃▄▅▆▇█). Empty list when the category is unknown / no peers.
+    """
+    if not amz_cat:
+        return []
+    today_ = _eff_today_ist()
+    d30s = today_ - timedelta(days=29)
+    mtd_s = today_.replace(day=1)
+    amz_norm = _amz_cat_norm("AMZ_CATEGORY")
+    esc_cat = amz_cat.replace("'", "''")
+    # Step 1 — find top 5 ASINs in the category by 30d revenue. Include
+    # this ASIN so it can be highlighted in the table even when not
+    # naturally in the top 5.
+    top_sql = f"""
+        SELECT
+            SPLIT_PART(ASIN, ' ', 1)                                AS ASIN_KEY,
+            MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))  AS PRODUCT_NAME,
+            ROUND(SUM(SALES_ACTUAL_{sfx}), 0)                       AS REV_30D,
+            ROUND(SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{today_}'
+                           THEN SALES_BUDGET_{sfx} ELSE 0 END), 0)  AS BUD_MTD
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d30s}' AND '{today_}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND {amz_norm} = '{esc_cat}'
+          AND ASIN IS NOT NULL AND ASIN != ''
+        GROUP BY 1
+        HAVING SUM(SALES_ACTUAL_{sfx}) > 0
+        ORDER BY REV_30D DESC NULLS LAST
+        LIMIT 5
+    """
+    top_df = run_query(top_sql)
+    if top_df.empty:
+        return []
+
+    # Make sure the current ASIN is in the list — append if missing.
+    asin_keys = [str(x) for x in top_df["ASIN_KEY"].tolist()]
+    if asin not in asin_keys:
+        self_sql = f"""
+            SELECT
+                SPLIT_PART(ASIN, ' ', 1)                                AS ASIN_KEY,
+                MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))  AS PRODUCT_NAME,
+                ROUND(SUM(SALES_ACTUAL_{sfx}), 0)                       AS REV_30D,
+                ROUND(SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{today_}'
+                               THEN SALES_BUDGET_{sfx} ELSE 0 END), 0)  AS BUD_MTD
+            FROM {TABLE}
+            WHERE DAY BETWEEN '{d30s}' AND '{today_}'
+              AND GEO = '{geo}' AND {GEO_EXCL}
+              AND SPLIT_PART(ASIN, ' ', 1) = '{asin.replace("'", "''")}'
+            GROUP BY 1
+        """
+        self_df = run_query(self_sql)
+        if not self_df.empty:
+            top_df = pd.concat([top_df, self_df], ignore_index=True)
+            asin_keys.append(asin)
+
+    # Step 2 — daily revenue per ASIN (last 30 days) for the sparkline.
+    asin_list_sql = ", ".join("'{}'".format(a.replace("'", "''"))
+                              for a in asin_keys)
+    daily_sql = f"""
+        SELECT
+            SPLIT_PART(ASIN, ' ', 1) AS ASIN_KEY,
+            DAY,
+            ROUND(SUM(SALES_ACTUAL_{sfx}), 0) AS REV
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d30s}' AND '{today_}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND SPLIT_PART(ASIN, ' ', 1) IN ({asin_list_sql})
+        GROUP BY 1, 2
+        ORDER BY 1, 2
+    """
+    daily_df = run_query(daily_sql)
+
+    # Build sparkline strings (Unicode block characters scaled to range)
+    spark_chars = "▁▂▃▄▅▆▇█"
+    def _spark(values):
+        if not values:
+            return ""
+        lo, hi = min(values), max(values)
+        rng = (hi - lo) or 1.0
+        out_chars = []
+        for v in values:
+            idx = int((v - lo) / rng * (len(spark_chars) - 1))
+            out_chars.append(spark_chars[idx])
+        return "".join(out_chars)
+
+    sparks = {}
+    if not daily_df.empty:
+        daily_df["DAY"] = pd.to_datetime(daily_df["DAY"]).dt.date
+        for k, grp in daily_df.groupby("ASIN_KEY"):
+            sparks[str(k)] = _spark([float(v or 0) for v in grp["REV"].tolist()])
+
+    rows = []
+    for _, r in top_df.iterrows():
+        akey = str(r["ASIN_KEY"])
+        rev = float(r.get("REV_30D") or 0)
+        bud = float(r.get("BUD_MTD") or 0)
+        # vs Bud: 30d revenue vs MTD budget — informational, not strict
+        # achievement (windows differ). Better than nothing.
+        ach = (rev / bud * 100) if bud > 0 else None
+        rows.append({
+            "ASIN":         akey,
+            "PRODUCT_NAME": str(r.get("PRODUCT_NAME") or akey),
+            "REV_30D":      rev,
+            "BUD_MTD":      bud,
+            "ACH_PCT":      ach,
+            "SPARK":        sparks.get(akey, ""),
+        })
+    # Sort descending by revenue, keep self even if appended.
+    rows.sort(key=lambda x: x["REV_30D"], reverse=True)
+    return rows
 
 
 @st.dialog("📊 ASIN 360°", width="large")
@@ -2844,7 +3131,12 @@ def render_asin_360_modal(asin: str, geo: str,
         sess_cvr = _ratio_pct(d["units"], d["sessions"])
         asp      = _safe_div(d["revenue"], d["units"])
         acos     = _ratio_pct(d["spend"], d["revenue"])
+        # PACoS% = ad spend / PAID revenue * 100. Differs from ACoS%
+        # (which uses TOTAL revenue): PACoS isolates the efficiency of
+        # the paid-traffic funnel only.
+        pacos    = _ratio_pct(d["spend"], d["ad_revenue"])
         ctr      = _ratio_pct(d["clicks"], d["impressions"])
+        cpc      = _safe_div(d["spend"], d["clicks"])
         ad_cvr   = _ratio_pct(d["paid_units"], d["clicks"])
         return {
             "Sessions":  d["sessions"],
@@ -2854,9 +3146,11 @@ def render_asin_360_modal(asin: str, geo: str,
             "ASP":       asp,
             "Spend":     d["spend"],
             "ACoS%":     acos,
+            "PACoS%":    pacos,
             "Impr":      d["impressions"],
             "Clicks":    d["clicks"],
             "CTR%":      ctr,
+            "CPC":       cpc,
             "Ad CVR%":   ad_cvr,
         }
 
@@ -2875,18 +3169,31 @@ def render_asin_360_modal(asin: str, geo: str,
         "Sessions": None, "Units": b["units"], "CVR%": None,
         "Revenue":  b["revenue"], "ASP": bud_asp,
         "Spend":    b["spend"],  "ACoS%": bud_acos,
-        "Impr": None, "Clicks": None, "CTR%": None, "Ad CVR%": None,
+        # PACoS% needs paid-revenue budget which we don't carry. CPC,
+        # Impr, Clicks, CTR, Ad CVR similarly have no budget plan.
+        "PACoS%":   None, "Impr": None, "Clicks": None,
+        "CTR%":     None, "CPC": None,  "Ad CVR%": None,
     }
 
+    # Metric order: revenue first (most important), then ad efficiency,
+    # then funnel. CPC sits BELOW CTR% so the click → cost chain reads
+    # top-down. PACoS% sits below ACoS% — they're paired metrics.
     metric_order = ["Sessions","Units","CVR%","Revenue","ASP","Spend",
-                    "ACoS%","Impr","Clicks","CTR%","Ad CVR%"]
+                    "ACoS%","PACoS%","Impr","Clicks","CTR%","CPC","Ad CVR%"]
 
     def _fmt(metric, v):
         if v is None or (isinstance(v, float) and pd.isna(v)):
             return "—"
-        if metric in ("Revenue","Spend","ASP"):
+        # ASP + CPC: 2 decimals (both are small per-unit currency values).
+        if metric in ("ASP", "CPC"):
+            if sfx == "INR":
+                # Indian lakh formatting doesn't help at the ASP / CPC
+                # scale — show raw rupees with 2 dp.
+                return f"₹{_f(v):,.2f}"
+            return f"{sym}{_f(v):,.2f}"
+        if metric in ("Revenue","Spend"):
             return fmt_lakhs(v) if sfx == "INR" else f"{sym}{_f(v):,.0f}"
-        if metric in ("CVR%","ACoS%","CTR%","Ad CVR%"):
+        if metric in ("CVR%","ACoS%","PACoS%","CTR%","Ad CVR%"):
             return f"{_f(v):,.1f}%"
         # counts: Sessions / Units / Impr / Clicks
         return f"{int(_f(v) or 0):,}"
@@ -2902,9 +3209,11 @@ def render_asin_360_modal(asin: str, geo: str,
         "ASP":      "🏷️ ASP",
         "Spend":    "📣 Ad Spend",
         "ACoS%":    "📊 ACoS%",
+        "PACoS%":   "🎯 PACoS%",
         "Impr":     "👁️ Impressions",
         "Clicks":   "👆 Clicks",
         "CTR%":     "📈 CTR%",
+        "CPC":      "💸 CPC",
         "Ad CVR%":  "🎯 Ad CVR%",
     }
 
@@ -2959,19 +3268,147 @@ def render_asin_360_modal(asin: str, geo: str,
         unsafe_allow_html=True,
     )
 
-    # ── Phase 2 placeholder ─────────────────────────────────────────
+    # ── Action suggestions block ────────────────────────────────────
+    suggestions = _asin_360_suggestions(data)
+    # Per-severity colour tokens. Background uses subtle tints so cards
+    # stack visually without overpowering the metrics grid above.
+    _sev_styles = {
+        "red":   ("#fdd8d8", "#8b1a1a", "#8b1a1a"),    # bg / border / title
+        "amber": ("#fde9c8", "#7a5c00", "#7a5c00"),
+        "green": ("#d4ecd4", "#1a7a3e", "#1a7a3e"),
+        "blue":  ("#e3eef8", "#0b4a6b", "#0b4a6b"),
+    }
     st.markdown(
-        '<div style="margin-top:18px;padding:12px 14px;background:#f5efe0;'
-        'border-left:3px solid #AB8743;border-radius:6px;font-size:12px;'
-        'color:#5a4d35;line-height:1.5;">'
-        '<b>Coming in Phase 2:</b> rule-based action suggestions '
-        '(e.g. "increase ad spend — CM2/Spend = 3.2×"), and a peer '
-        'comparison table showing the top 5 ASINs in the same AMZ Sub '
-        'Category so you can see if the whole category is trending '
-        'with this ASIN or against it.'
+        '<div style="font-size:13px;font-weight:700;color:#004A2B;'
+        'letter-spacing:0.5px;margin:22px 0 10px 0;text-transform:uppercase;">'
+        '⚡ Suggested actions'
         '</div>',
         unsafe_allow_html=True,
     )
+    card_blocks = []
+    for s in suggestions:
+        bg, border, tcol = _sev_styles.get(s["severity"], _sev_styles["blue"])
+        card_blocks.append(
+            f'<div style="background:{bg};border-left:4px solid {border};'
+            f'border-radius:8px;padding:10px 14px;margin-bottom:8px;'
+            f'font-family:Helvetica,Arial,sans-serif;">'
+            f'<div style="font-size:13px;font-weight:700;color:{tcol};'
+            f'letter-spacing:0.2px;margin-bottom:3px;">'
+            f'{s["icon"]} &nbsp; {s["title"]}</div>'
+            f'<div style="font-size:12px;color:#3e2f1c;line-height:1.5;">'
+            f'{s["body"]}</div>'
+            f'</div>'
+        )
+    st.markdown("".join(card_blocks), unsafe_allow_html=True)
+
+    # ── Peer comparison block ───────────────────────────────────────
+    amz_cat = data.get("amz_cat") or ""
+    if amz_cat:
+        peers = get_asin_peers(asin, geo, sfx, amz_cat)
+    else:
+        peers = []
+
+    if peers:
+        st.markdown(
+            f'<div style="font-size:13px;font-weight:700;color:#004A2B;'
+            f'letter-spacing:0.5px;margin:22px 0 4px 0;text-transform:uppercase;">'
+            f'🏷️ Top performers in <span style="color:#AB8743;">'
+            f'{amz_cat}</span> (30-day revenue)'
+            f'</div>'
+            f'<div style="font-size:11px;color:#7a6a50;margin-bottom:10px;">'
+            f'Compare this ASIN against the bucket — if peers are also '
+            f'declining, the category is moving; if only this ASIN is, '
+            f'it&rsquo;s an ASIN-specific issue.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        def _fmt_rev(v):
+            if v is None: return "—"
+            if sfx == "INR": return fmt_lakhs(v)
+            return f"{sym}{_f(v):,.0f}"
+
+        def _color_ach(v):
+            if v is None: return ("#EDE8DC", "#7a6a50")
+            if v >= 100:  return ("#d4ecd4", "#1a7a3e")
+            if v >= 90:   return ("#fde9c8", "#7a5c00")
+            return ("#fdd8d8", "#8b1a1a")
+
+        peer_rows_html = []
+        for p_row in peers:
+            is_self = (p_row["ASIN"] == asin)
+            self_bg = "background:#fef3d6;" if is_self else ""
+            self_marker = ("<span style=\"background:#AB8743;color:#FBF5EA;"
+                           "font-size:10px;font-weight:700;padding:1px 5px;"
+                           "border-radius:4px;margin-right:6px;\">YOU</span>"
+                           if is_self else "")
+            ach = p_row.get("ACH_PCT")
+            ach_bg, ach_fg = _color_ach(ach)
+            ach_html = (f'<span style="background:{ach_bg};color:{ach_fg};'
+                        f'font-weight:700;font-size:11px;padding:2px 7px;'
+                        f'border-radius:6px;">{ach:.1f}%</span>'
+                        if ach is not None else "—")
+            # Sparkline characters — colored green/grey/red by net trend
+            spark = p_row.get("SPARK", "")
+            spark_color = "#7a6a50"
+            if spark and len(spark) >= 6:
+                first_half = spark[:len(spark)//2]
+                second_half = spark[len(spark)//2:]
+                # Average char rank to gauge trend
+                rank = lambda s: sum("▁▂▃▄▅▆▇█".index(c) for c in s) / max(len(s),1)
+                if rank(second_half) > rank(first_half) + 0.5:
+                    spark_color = "#1a7a3e"
+                elif rank(second_half) < rank(first_half) - 0.5:
+                    spark_color = "#8b1a1a"
+            peer_rows_html.append(
+                f'<tr style="{self_bg}">'
+                f'<td style="padding:8px 10px;font-weight:600;color:#004A2B;'
+                f'font-size:12px;font-variant-numeric:tabular-nums;'
+                f'border-bottom:1px solid #ead9b5;">'
+                f'{self_marker}{p_row["ASIN"]}</td>'
+                f'<td style="padding:8px 10px;color:#5a4d35;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;max-width:260px;'
+                f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                f'{p_row["PRODUCT_NAME"][:60]}</td>'
+                f'<td style="padding:8px 10px;text-align:right;font-weight:700;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">'
+                f'{_fmt_rev(p_row["REV_30D"])}</td>'
+                f'<td style="padding:8px 10px;text-align:right;font-size:12px;'
+                f'border-bottom:1px solid #ead9b5;">{ach_html}</td>'
+                f'<td style="padding:8px 10px;text-align:left;font-size:18px;'
+                f'color:{spark_color};letter-spacing:-2px;line-height:1;'
+                f'border-bottom:1px solid #ead9b5;font-family:monospace;">'
+                f'{spark}</td>'
+                f'</tr>'
+            )
+
+        st.markdown(
+            f'<div style="border-radius:10px;overflow:hidden;'
+            f'border:1px solid #d6ccba;box-shadow:0 2px 8px rgba(120,80,30,0.08);">'
+            f'<table style="width:100%;border-collapse:collapse;'
+            f'background:#FFFFFF;">'
+            f'<thead><tr>'
+            f'<th style="padding:9px 10px;text-align:left;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">ASIN</th>'
+            f'<th style="padding:9px 10px;text-align:left;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">Product</th>'
+            f'<th style="padding:9px 10px;text-align:right;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">30d Rev</th>'
+            f'<th style="padding:9px 10px;text-align:right;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">vs Bud</th>'
+            f'<th style="padding:9px 10px;text-align:left;font-size:10px;'
+            f'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+            f'color:#FBF5EA;letter-spacing:0.5px;text-transform:uppercase;">30d Trend</th>'
+            f'</tr></thead>'
+            f'<tbody>' + "".join(peer_rows_html) + '</tbody>'
+            f'</table></div>',
+            unsafe_allow_html=True,
+        )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
