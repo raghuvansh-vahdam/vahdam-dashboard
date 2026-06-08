@@ -2795,6 +2795,52 @@ def _safe_div(num, den):
     return n / d
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_asin_ratings_summary(asin: str, geo: str):
+    """Return {avg_rating, review_count, last_review_date} for one ASIN.
+
+    Queries the Amazon review feed (REVIEWS table). The dashboard
+    already has this data via the Customer Insights view — here we
+    surface just the per-ASIN aggregates for the 360° modal header.
+
+    Falls back to (None, 0, None) when no reviews exist for this ASIN /
+    geo combination, so the modal can show '— stars · no reviews yet'
+    cleanly instead of crashing on empty data.
+    """
+    a = asin.replace("'", "''")
+    g = (geo or "").replace("'", "''").upper()
+    try:
+        df = run_query(f"""
+            SELECT
+                AVG(TRY_TO_NUMBER(RATING))         AS AVG_RATING,
+                COUNT(*)                           AS REVIEW_COUNT,
+                MAX(COALESCE(
+                    TRY_TO_DATE(DATE, 'MMMM DD, YYYY'),
+                    TRY_TO_DATE(DATE, 'DD MMMM YYYY'),
+                    TRY_TO_DATE(DATE, 'DD/MM/YYYY'),
+                    TRY_TO_DATE(DATE, 'MM/DD/YYYY'),
+                    TRY_TO_DATE(DATE, 'YYYY-MM-DD')
+                ))                                 AS LAST_REVIEW_DATE
+            FROM {REVIEWS}
+            WHERE UPPER(TRIM(ASIN)) = '{a}'
+              AND UPPER(TRIM(GEO)) = '{g}'
+              AND TRY_TO_NUMBER(RATING) IS NOT NULL
+        """)
+    except Exception:
+        return {"avg_rating": None, "review_count": 0, "last_review_date": None}
+    if df.empty:
+        return {"avg_rating": None, "review_count": 0, "last_review_date": None}
+    r = df.iloc[0]
+    avg = r.get("AVG_RATING")
+    cnt = r.get("REVIEW_COUNT")
+    last = r.get("LAST_REVIEW_DATE")
+    return {
+        "avg_rating": float(avg) if avg is not None and not pd.isna(avg) else None,
+        "review_count": int(cnt) if cnt is not None and not pd.isna(cnt) else 0,
+        "last_review_date": last,
+    }
+
+
 # ── Phase 2: action-suggestion rule engine ─────────────────────────────
 def _asin_360_suggestions(data: dict) -> list:
     """Rule-based action recommendations from the 360° metrics dict.
@@ -3095,18 +3141,52 @@ def render_asin_360_modal(asin: str, geo: str,
     product_name = data.get("product_name") or fallback_product_name or asin
     yest_date = data.get("yesterday_date")
     amz_url = _amazon_dp_link(asin, geo)
+    # Ratings — separate (cheap) query against the Amazon review feed.
+    # Cached 1h, no Keepa cost. Falls back gracefully when no reviews.
+    ratings = get_asin_ratings_summary(asin, geo)
+
+    # Build the rating chip — full + half stars from avg, plus review count
+    def _stars_html(avg):
+        if avg is None:
+            return ""
+        full = int(avg)
+        half = 1 if (avg - full) >= 0.25 and (avg - full) < 0.75 else 0
+        empty = 5 - full - half
+        # Use ★ ½ ☆ glyphs — broadly supported and matches the dashboard's
+        # minimalist aesthetic without needing image assets.
+        return (("★" * full)
+                + ("½" if half else "")
+                + ("☆" * empty))
+
+    avg = ratings.get("avg_rating")
+    rcount = ratings.get("review_count", 0)
+    if avg is not None:
+        rating_chip = (
+            f'<span style="color:#AB8743;font-size:14px;letter-spacing:1px;'
+            f'font-weight:700;">{_stars_html(avg)}</span> '
+            f'<span style="color:#3e2f1c;font-weight:700;font-size:12px;">'
+            f'{avg:.1f}</span> '
+            f'<span style="color:#7a6a50;font-size:11px;">'
+            f'· {rcount:,} reviews</span>'
+        )
+    else:
+        rating_chip = (
+            '<span style="color:#7a6a50;font-size:11px;font-style:italic;">'
+            'No reviews yet</span>'
+        )
 
     # ── Header ─────────────────────────────────────────────────────
     st.markdown(
         f'<div style="display:flex;justify-content:space-between;'
         f'align-items:flex-start;gap:16px;margin-bottom:10px;">'
-        f'<div>'
+        f'<div style="flex:1;min-width:0;">'
         f'<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;'
         f'color:#AB8743;text-transform:uppercase;">ASIN · {geo}</div>'
         f'<div style="font-size:22px;font-weight:700;color:#004A2B;'
         f'letter-spacing:0.3px;margin:2px 0;">{asin}</div>'
         f'<div style="font-size:13px;color:#5a4d35;line-height:1.4;'
-        f'max-width:560px;">{product_name}</div>'
+        f'max-width:560px;margin-bottom:4px;">{product_name}</div>'
+        f'<div>{rating_chip}</div>'
         f'</div>'
         f'<a href="{amz_url}" target="_blank" rel="noopener" '
         f'style="background:#FFFFFF;border:1px solid #AB8743;color:#004A2B;'
@@ -3409,6 +3489,29 @@ def render_asin_360_modal(asin: str, geo: str,
             f'</table></div>',
             unsafe_allow_html=True,
         )
+
+    # ── Daily-breakdown link ───────────────────────────────────────
+    # Bottom-of-modal escape hatch for users who want the full daily
+    # history (revenue / spend / ACoS time series, etc.) — that lives
+    # on the asin_detail page. Clicking this button dismisses the
+    # modal and navigates the dashboard there.
+    st.markdown(
+        '<div style="margin-top:24px;padding-top:14px;'
+        'border-top:1px solid #d6ccba;"></div>',
+        unsafe_allow_html=True,
+    )
+    open_full = st.button(
+        "📈 Open daily breakdown →",
+        key=f"asin_360_open_detail_{asin}_{geo}",
+        use_container_width=True,
+        type="secondary",
+        help="Daily revenue / units / spend / ACoS time series for this ASIN.",
+    )
+    if open_full:
+        st.session_state.selected_asin         = asin
+        st.session_state.selected_asin_product = product_name
+        st.session_state.view                  = "asin_detail"
+        st.rerun()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -6628,12 +6731,30 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                 column_config["FBA Inv"] = st.column_config.NumberColumn(format="%,d")
                 column_config["ADW Inv"] = st.column_config.NumberColumn(format="%,d")
 
-            st.dataframe(
+            cr_evt = st.dataframe(
                 show.style.apply(_style_cr, axis=1).hide(axis="index"),
                 use_container_width=True, height=560,
                 hide_index=True, column_config=column_config,
+                on_select="rerun", selection_mode="single-row",
                 key=f"cr_tracker_{geo}",
             )
+            # Row click → ASIN 360° modal. Same re-open guard pattern
+            # as the ASIN view: track last-opened-from-this-table so
+            # the modal doesn't auto-reopen when selection persists.
+            try:
+                _cr_rows = cr_evt.selection.rows if cr_evt else []
+            except Exception:
+                _cr_rows = []
+            if _cr_rows:
+                _ridx = _cr_rows[0]
+                _pasin = str(show.iloc[_ridx].get("ASIN", "")).strip()
+                _pprod = str(show.iloc[_ridx].get(
+                    "Product", show.iloc[_ridx].get("PRODUCT_NAME", _pasin)
+                )).strip()
+                _trig_key_cr = f"_asin_360_trig_cr_{geo}"
+                if _pasin and st.session_state.get(_trig_key_cr) != _pasin:
+                    st.session_state[_trig_key_cr] = _pasin
+                    render_asin_360_modal(_pasin, geo, _pprod)
             # CSV download
             csv_bytes = show.to_csv(index=False).encode("utf-8")
             st.download_button(
