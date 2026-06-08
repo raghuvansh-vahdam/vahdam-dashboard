@@ -2609,6 +2609,371 @@ def get_asin_rolling(asin, geo, sfx):
     return merged
 
 
+# ─── ASIN 360° Modal — Phase 1 ──────────────────────────────────────────────
+# A pop-up deep-dive triggered by clicking an ASIN row. Shows everything
+# you need to make a decision about that single product in one place:
+# period-by-period sales, traffic, conversion and ad efficiency, plus an
+# Amazon-side link to the live listing.
+#
+# Phase 1 (this commit): scaffold + period metrics grid (yesterday / 7d /
+# 14d / 30d, plus MTD budget). Phase 2 adds rule-based action
+# suggestions + same-category peer comparison. Phase 3 adds Keepa image
+# + rating/reviews + CR Tracker entry-point + visual polish.
+_AMAZON_DOMAINS = {
+    "USA": "amazon.com",
+    "UK":  "amazon.co.uk",
+    "CA":  "amazon.ca",
+    "DE":  "amazon.de",
+    "FR":  "amazon.fr",
+    "IT":  "amazon.it",
+    "ES":  "amazon.es",
+    "AUS": "amazon.com.au",
+    "UAE": "amazon.ae",
+}
+
+
+def _amazon_dp_link(asin: str, geo: str) -> str:
+    """Build the marketplace-correct product detail page URL.
+    Defaults to amazon.com when the geo isn't mapped."""
+    domain = _AMAZON_DOMAINS.get((geo or "").upper(), "amazon.com")
+    return f"https://www.{domain}/dp/{asin}"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_asin_360_metrics(asin: str, geo: str, sfx: str):
+    """Batch-fetch the per-period metrics the 360° modal needs.
+
+    Returns a dict shaped:
+      {
+        "yest":   {revenue, units, sessions, spend, impressions,
+                   clicks, paid_units, ad_revenue},
+        "7d":     {same shape},
+        "14d":    {same shape},
+        "30d":    {same shape},
+        "budget": {revenue, units, spend},   # MTD budget for context
+        "product_name": "…",
+      }
+
+    Three SQL queries fired serially (each tiny — single ASIN, single
+    geo, 30-day window). All queries hit @st.cache_data so subsequent
+    opens of the same ASIN return instantly. Yesterday anchors to the
+    3 PM IST cutoff (same as `_eff_today_ist()`).
+    """
+    today_ = _eff_today_ist()
+    yest   = today_                                     # the freshest fully-loaded day
+    d7s    = today_ - timedelta(days=6)                 # 7-day window start
+    d14s   = today_ - timedelta(days=13)
+    d30s   = today_ - timedelta(days=29)
+    mtd_s  = today_.replace(day=1)                      # MTD budget anchor
+    a      = asin.replace("'", "''")
+
+    # 1) P&L feed — revenue, units, MTD budget, product name
+    pnl_sql = f"""
+        SELECT
+            MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))                  AS PRODUCT_NAME,
+            SUM(CASE WHEN DAY = '{yest}'                          THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'       THEN SALES_ACTUAL_{sfx} ELSE 0 END) AS REV_30D,
+            SUM(CASE WHEN DAY = '{yest}'                          THEN QTY_ACTUAL         ELSE 0 END) AS UN_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}'       THEN QTY_ACTUAL         ELSE 0 END) AS UN_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}'       THEN QTY_ACTUAL         ELSE 0 END) AS UN_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}'       THEN QTY_ACTUAL         ELSE 0 END) AS UN_30D,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'      THEN SALES_BUDGET_{sfx} ELSE 0 END) AS REV_BUD,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'      THEN QTY_BUDGET         ELSE 0 END) AS UN_BUD,
+            SUM(CASE WHEN DAY BETWEEN '{mtd_s}' AND '{yest}'      THEN PM_SPEND_BUDGET_{sfx} ELSE 0 END) AS SPEND_BUD
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{d30s}' AND '{yest}'
+          AND GEO = '{geo}' AND {GEO_EXCL}
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
+    """
+    pnl_df = run_query(pnl_sql)
+
+    # 2) Marketing feed — spend, impressions, clicks, paid units, ad rev
+    mkt_sql = f"""
+        SELECT
+            SUM(CASE WHEN DAY = '{yest}'                    THEN SPEND       ELSE 0 END) AS SP_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN SPEND       ELSE 0 END) AS SP_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN SPEND       ELSE 0 END) AS SP_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN SPEND       ELSE 0 END) AS SP_30D,
+            SUM(CASE WHEN DAY = '{yest}'                    THEN IMPRESSIONS ELSE 0 END) AS IM_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN IMPRESSIONS ELSE 0 END) AS IM_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN IMPRESSIONS ELSE 0 END) AS IM_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN IMPRESSIONS ELSE 0 END) AS IM_30D,
+            SUM(CASE WHEN DAY = '{yest}'                    THEN CLICKS      ELSE 0 END) AS CL_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN CLICKS      ELSE 0 END) AS CL_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN CLICKS      ELSE 0 END) AS CL_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN CLICKS      ELSE 0 END) AS CL_30D,
+            SUM(CASE WHEN DAY = '{yest}'                    THEN CONVERSIONS ELSE 0 END) AS CV_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN CONVERSIONS ELSE 0 END) AS CV_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN CONVERSIONS ELSE 0 END) AS CV_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN CONVERSIONS ELSE 0 END) AS CV_30D,
+            SUM(CASE WHEN DAY = '{yest}'                    THEN AD_SALES    ELSE 0 END) AS AR_YEST,
+            SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN AD_SALES    ELSE 0 END) AS AR_7D,
+            SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN AD_SALES    ELSE 0 END) AS AR_14D,
+            SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN AD_SALES    ELSE 0 END) AS AR_30D
+        FROM {MKTG}
+        WHERE DAY BETWEEN '{d30s}' AND '{yest}'
+          AND GEO = '{geo}'
+          AND SPLIT_PART(ASIN,' ',1) = '{a}'
+    """
+    mkt_df = run_query(mkt_sql)
+
+    # 3) Sales-marketing feed — sessions (column probed dynamically)
+    sess_col = _sales_mkt_col(
+        "SESSIONS", "SESSIONS_TOTAL", "BROWSER_SESSIONS",
+        "TOTAL_SESSIONS", "SESSIONS_B2C", "ORDERED_SESSIONS",
+    )
+    sm_df = None
+    if sess_col:
+        try:
+            sm_df = run_query(f"""
+                SELECT
+                    SUM(CASE WHEN DAY = '{yest}'                    THEN {sess_col} ELSE 0 END) AS SE_YEST,
+                    SUM(CASE WHEN DAY BETWEEN '{d7s}'  AND '{yest}' THEN {sess_col} ELSE 0 END) AS SE_7D,
+                    SUM(CASE WHEN DAY BETWEEN '{d14s}' AND '{yest}' THEN {sess_col} ELSE 0 END) AS SE_14D,
+                    SUM(CASE WHEN DAY BETWEEN '{d30s}' AND '{yest}' THEN {sess_col} ELSE 0 END) AS SE_30D
+                FROM {SALES_MKT}
+                WHERE DAY BETWEEN '{d30s}' AND '{yest}'
+                  AND GEO = '{geo}'
+                  AND SPLIT_PART(ASIN,' ',1) = '{a}'
+            """)
+        except Exception:
+            sm_df = None
+
+    def _r(df_, col, default=0.0):
+        if df_ is None or df_.empty: return default
+        v = df_.iloc[0].get(col)
+        return float(v) if v is not None and not pd.isna(v) else default
+
+    def _per(suffix):
+        return {
+            "revenue":    _r(pnl_df, f"REV_{suffix}"),
+            "units":      _r(pnl_df, f"UN_{suffix}"),
+            "sessions":   _r(sm_df,  f"SE_{suffix}") if sm_df is not None else 0.0,
+            "spend":      _r(mkt_df, f"SP_{suffix}"),
+            "impressions":_r(mkt_df, f"IM_{suffix}"),
+            "clicks":     _r(mkt_df, f"CL_{suffix}"),
+            "paid_units": _r(mkt_df, f"CV_{suffix}"),
+            "ad_revenue": _r(mkt_df, f"AR_{suffix}"),
+        }
+
+    return {
+        "yest":   _per("YEST"),
+        "7d":     _per("7D"),
+        "14d":    _per("14D"),
+        "30d":    _per("30D"),
+        "budget": {
+            "revenue": _r(pnl_df, "REV_BUD"),
+            "units":   _r(pnl_df, "UN_BUD"),
+            "spend":   _r(pnl_df, "SPEND_BUD"),
+        },
+        "product_name": (str(pnl_df.iloc[0]["PRODUCT_NAME"])
+                         if not pnl_df.empty
+                         and pnl_df.iloc[0].get("PRODUCT_NAME") else asin),
+        "yesterday_date": yest,
+    }
+
+
+# Derived-metric helpers used by the modal's grid
+def _ratio_pct(num, den):
+    """Safe percentage. None when den is 0/None."""
+    n = _f(num); d = _f(den)
+    if d is None or d == 0 or n is None: return None
+    return n / d * 100
+
+
+def _safe_div(num, den):
+    """Safe division returning None on zero denominator."""
+    n = _f(num); d = _f(den)
+    if d is None or d == 0 or n is None: return None
+    return n / d
+
+
+@st.dialog("📊 ASIN 360°", width="large")
+def render_asin_360_modal(asin: str, geo: str,
+                           fallback_product_name: str = ""):
+    """Pop-up deep-dive for a single ASIN.
+
+    Triggered by clicking an ASIN row in the ASIN view (and, in Phase 3,
+    the CR Tracker). Shows period-by-period metrics in a single grid so
+    the user can spot trends without bouncing between tabs.
+
+    Phase 1 scope:
+      * Header: ASIN, product name, Amazon listing link
+      * Period grid: Yesterday / 7d / 14d / 30d × 11 metrics
+      * vs Budget column (MTD context)
+    """
+    data = get_asin_360_metrics(asin, geo, sfx)
+    product_name = data.get("product_name") or fallback_product_name or asin
+    yest_date = data.get("yesterday_date")
+    amz_url = _amazon_dp_link(asin, geo)
+
+    # ── Header ─────────────────────────────────────────────────────
+    st.markdown(
+        f'<div style="display:flex;justify-content:space-between;'
+        f'align-items:flex-start;gap:16px;margin-bottom:10px;">'
+        f'<div>'
+        f'<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;'
+        f'color:#AB8743;text-transform:uppercase;">ASIN · {geo}</div>'
+        f'<div style="font-size:22px;font-weight:700;color:#004A2B;'
+        f'letter-spacing:0.3px;margin:2px 0;">{asin}</div>'
+        f'<div style="font-size:13px;color:#5a4d35;line-height:1.4;'
+        f'max-width:560px;">{product_name}</div>'
+        f'</div>'
+        f'<a href="{amz_url}" target="_blank" rel="noopener" '
+        f'style="background:#FFFFFF;border:1px solid #AB8743;color:#004A2B;'
+        f'padding:8px 14px;border-radius:8px;font-weight:600;font-size:12px;'
+        f'text-decoration:none;letter-spacing:0.3px;white-space:nowrap;'
+        f'box-shadow:0 2px 5px rgba(120,80,30,0.10);">'
+        f'View on Amazon →</a>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    if yest_date:
+        st.caption(
+            f"Snapshot through **{yest_date.strftime('%d %b %Y')}** "
+            f"(3 PM IST cutoff)."
+        )
+
+    # ── Period metrics grid ─────────────────────────────────────────
+    # Compute derived metrics per period. Sessions-CVR = Units/Sessions;
+    # Ad-CVR = PaidUnits/Clicks. ACoS = Spend/Revenue.
+    def _row(per):
+        d = data[per]
+        sess_cvr = _ratio_pct(d["units"], d["sessions"])
+        asp      = _safe_div(d["revenue"], d["units"])
+        acos     = _ratio_pct(d["spend"], d["revenue"])
+        ctr      = _ratio_pct(d["clicks"], d["impressions"])
+        ad_cvr   = _ratio_pct(d["paid_units"], d["clicks"])
+        return {
+            "Sessions":  d["sessions"],
+            "Units":     d["units"],
+            "CVR%":      sess_cvr,
+            "Revenue":   d["revenue"],
+            "ASP":       asp,
+            "Spend":     d["spend"],
+            "ACoS%":     acos,
+            "Impr":      d["impressions"],
+            "Clicks":    d["clicks"],
+            "CTR%":      ctr,
+            "Ad CVR%":   ad_cvr,
+        }
+
+    rows = {
+        "Yesterday":   _row("yest"),
+        "Past 7 Days": _row("7d"),
+        "Past 14 Days":_row("14d"),
+        "Past 30 Days":_row("30d"),
+    }
+
+    # Budget column — MTD context. ACoS budget = Spend Bud / Rev Bud × 100.
+    b = data["budget"]
+    bud_asp  = _safe_div(b["revenue"], b["units"])
+    bud_acos = _ratio_pct(b["spend"], b["revenue"])
+    bud_row = {
+        "Sessions": None, "Units": b["units"], "CVR%": None,
+        "Revenue":  b["revenue"], "ASP": bud_asp,
+        "Spend":    b["spend"],  "ACoS%": bud_acos,
+        "Impr": None, "Clicks": None, "CTR%": None, "Ad CVR%": None,
+    }
+
+    metric_order = ["Sessions","Units","CVR%","Revenue","ASP","Spend",
+                    "ACoS%","Impr","Clicks","CTR%","Ad CVR%"]
+
+    def _fmt(metric, v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return "—"
+        if metric in ("Revenue","Spend","ASP"):
+            return fmt_lakhs(v) if sfx == "INR" else f"{sym}{_f(v):,.0f}"
+        if metric in ("CVR%","ACoS%","CTR%","Ad CVR%"):
+            return f"{_f(v):,.1f}%"
+        # counts: Sessions / Units / Impr / Clicks
+        return f"{int(_f(v) or 0):,}"
+
+    # Build HTML table — inline-styled so it stays visually distinct
+    # from the rest of the dashboard's beige-on-cream theme. Uses a
+    # darker green-on-cream "data cockpit" feel.
+    metric_labels = {
+        "Sessions": "🌐 Sessions",
+        "Units":    "📦 Units",
+        "CVR%":     "🎯 Session CVR%",
+        "Revenue":  "💰 Revenue",
+        "ASP":      "🏷️ ASP",
+        "Spend":    "📣 Ad Spend",
+        "ACoS%":    "📊 ACoS%",
+        "Impr":     "👁️ Impressions",
+        "Clicks":   "👆 Clicks",
+        "CTR%":     "📈 CTR%",
+        "Ad CVR%":  "🎯 Ad CVR%",
+    }
+
+    period_labels = list(rows.keys()) + ["Bud (MTD)"]
+    cells_html = []
+    for m in metric_order:
+        cells_html.append(
+            f'<tr>'
+            f'<td style="padding:8px 12px;font-weight:700;color:#004A2B;'
+            f'background:#FBF5EA;border-right:1px solid #d6ccba;'
+            f'letter-spacing:0.2px;font-size:12px;">{metric_labels[m]}</td>'
+        )
+        for plabel in list(rows.keys()):
+            v = rows[plabel][m]
+            cells_html.append(
+                f'<td style="padding:8px 12px;text-align:right;font-weight:600;'
+                f'color:#171717;font-variant-numeric:tabular-nums;font-size:13px;">'
+                f'{_fmt(m, v)}</td>'
+            )
+        # Budget cell — slightly muted to read as "context, not actual"
+        cells_html.append(
+            f'<td style="padding:8px 12px;text-align:right;font-weight:600;'
+            f'color:#7a6a50;font-variant-numeric:tabular-nums;font-size:13px;'
+            f'background:#f5efe0;border-left:1px solid #d6ccba;">'
+            f'{_fmt(m, bud_row[m])}</td>'
+        )
+        cells_html.append('</tr>')
+
+    header_cells = ['<th style="padding:10px 12px;text-align:left;'
+                    'background:linear-gradient(180deg,#004A2B 0%,#2E7D32 100%);'
+                    'color:#FBF5EA;font-size:11px;letter-spacing:0.5px;'
+                    'text-transform:uppercase;border-right:1px solid #AB8743;">'
+                    'Metric</th>']
+    for p in period_labels:
+        bg = ("linear-gradient(180deg,#AB8743 0%,#7a5c00 100%)"
+              if p == "Bud (MTD)"
+              else "linear-gradient(180deg,#004A2B 0%,#2E7D32 100%)")
+        header_cells.append(
+            f'<th style="padding:10px 12px;text-align:right;background:{bg};'
+            f'color:#FBF5EA;font-size:11px;letter-spacing:0.5px;'
+            f'text-transform:uppercase;">{p}</th>'
+        )
+
+    st.markdown(
+        f'<div style="margin-top:14px;border-radius:10px;overflow:hidden;'
+        f'border:1px solid #d6ccba;box-shadow:0 2px 8px rgba(120,80,30,0.08);">'
+        f'<table style="width:100%;border-collapse:collapse;'
+        f'font-family:Helvetica,Arial,sans-serif;background:#FFFFFF;">'
+        f'<thead><tr>' + "".join(header_cells) + '</tr></thead>'
+        f'<tbody>' + "".join(cells_html) + '</tbody>'
+        f'</table></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Phase 2 placeholder ─────────────────────────────────────────
+    st.markdown(
+        '<div style="margin-top:18px;padding:12px 14px;background:#f5efe0;'
+        'border-left:3px solid #AB8743;border-radius:6px;font-size:12px;'
+        'color:#5a4d35;line-height:1.5;">'
+        '<b>Coming in Phase 2:</b> rule-based action suggestions '
+        '(e.g. "increase ad spend — CM2/Spend = 3.2×"), and a peer '
+        'comparison table showing the top 5 ASINs in the same AMZ Sub '
+        'Category so you can see if the whole category is trending '
+        'with this ASIN or against it.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_totals(geo, sub_cat, d1, d2, sfx, amz_subcat=None):
     """One-row totals for a (geo, sub_cat, date range).
@@ -6224,7 +6589,15 @@ def render_asin():
             on_select="rerun",
             selection_mode="single-row",
             key=f"asin_pnl_table_{geo}_{subcat}")
-        # Row click → drill into ASIN detail view
+        # Row click → open the ASIN 360° pop-up. Keeps the user in the
+        # ASIN-list context (no navigation), and the modal has its own
+        # "Open daily breakdown →" link in Phase 3 for those who want
+        # the full detail page.
+        #
+        # Re-open guard: st.dataframe's selection state PERSISTS across
+        # reruns, so the dialog would loop infinitely on dismiss. Track
+        # the last-opened ASIN; only open the modal when the selection
+        # CHANGES. To reopen the same ASIN, click any other row first.
         try:
             rows = evt_pnl.selection.rows if evt_pnl else []
         except Exception:
@@ -6233,10 +6606,10 @@ def render_asin():
             idx = rows[0]
             picked_asin = str(p.iloc[idx]["ASIN"])
             picked_prod = str(p.iloc[idx].get("Product", picked_asin))
-            st.session_state.selected_asin         = picked_asin
-            st.session_state.selected_asin_product = picked_prod
-            st.session_state.view                  = "asin_detail"
-            st.rerun()
+            _trig_key = f"_asin_360_trig_{geo}_{subcat}"
+            if st.session_state.get(_trig_key) != picked_asin:
+                st.session_state[_trig_key] = picked_asin
+                render_asin_360_modal(picked_asin, geo, picked_prod)
 
     # ── Tab 2: Ad Performance ──
     with tab_ads:
