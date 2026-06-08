@@ -4189,11 +4189,24 @@ def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
                         COALESCE(r.U_30D, 0) / 30.0
                     ), 1)
                 ELSE NULL
-            END                                                                     AS COVER_DAYS
+            END                                                                     AS COVER_DAYS,
+            -- SQP funnel from RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR_ASIN —
+            -- one row per ASIN per week. USA-only currently (other geos
+            -- backfill returns NULL). Shows the market-side view: how
+            -- big the search-demand bucket is (T_QUERY = SV) and what
+            -- share Vahdam captures at each funnel stage.
+            ROUND(s.T_QUERY)                AS SQP_SV,
+            ROUND(s.T_IS_PCT,   2)          AS SQP_IS_PCT,
+            ROUND(s.B_CS_PCT,   2)          AS SQP_CS_PCT,
+            ROUND(s.B_ATCS_PCT, 2)          AS SQP_ATCS_PCT,
+            ROUND(s.O_S_PCT,    2)          AS SQP_OS_PCT
         FROM pnl p
         LEFT JOIN mkt  m ON p.ASIN_KEY = m.ASIN_KEY
         LEFT JOIN inv  i ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
         LEFT JOIN roll r ON p.ASIN_KEY = r.ASIN_KEY
+        LEFT JOIN RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR_ASIN s
+            ON UPPER(s.ASIN) = UPPER(p.ASIN_KEY)
+           AND UPPER(s.GEO) = UPPER('{geo}')
         WHERE COALESCE(p.ACT_REVENUE_RAW, 0) > 0
            OR COALESCE(m.PAID_SPEND_RAW,   0) > 0
         ORDER BY p.ACT_REVENUE_RAW DESC NULLS LAST
@@ -7427,6 +7440,14 @@ def render_asin():
             # = the spend reallocation list. Values < 1.0 mean the ASIN
             # loses money on every paid sale.
             ("CM2_PER_SPEND", "CM2 / Ad₹"),
+            # SQP funnel from RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR_ASIN.
+            # USA-loaded only — other geos render as em-dash until
+            # backfilled. Columns: market Search Volume, Brand
+            # Impression Share %, Click Share %, Order Share %.
+            ("SQP_SV",      "SV"),
+            ("SQP_IS_PCT",  "IS%"),
+            ("SQP_CS_PCT",  "CS%"),
+            ("SQP_OS_PCT",  "OS%"),
         ] + inv_cols
         p = df[[c for c,_ in pnl_cols]].rename(columns=dict(pnl_cols)).copy()
         p["Act Units"] = p["Act Units"].apply(fmt_num)
@@ -7452,6 +7473,22 @@ def render_asin():
         # the list = "give me one more rupee of spend, please".
         p["CM2 / Ad₹"] = df["CM2_PER_SPEND"].apply(
             lambda v: "—" if (_f(v) is None) else f"{_f(v):,.2f}x")
+        # SQP columns — Search Volume = absolute count (K/M short form),
+        # IS%/CS%/OS% = percentages with 2 decimals. Em-dash when not
+        # loaded for this geo / ASIN.
+        def _fmt_sv_compact(v):
+            x = _f(v)
+            if x is None: return "—"
+            if x >= 1e6: return f"{x/1e6:.1f}M"
+            if x >= 1e3: return f"{x/1e3:.1f}K"
+            return f"{int(x):,}"
+        p["SV"]  = df["SQP_SV"].apply(_fmt_sv_compact)
+        for col in ("IS%", "CS%", "OS%"):
+            src = {"IS%": "SQP_IS_PCT",
+                   "CS%": "SQP_CS_PCT",
+                   "OS%": "SQP_OS_PCT"}[col]
+            p[col] = df[src].apply(
+                lambda v: "—" if _f(v) is None else f"{_f(v):.2f}%")
         # Inventory + cover-days formatting
         if is_usa_view:
             p["FBA Inv"] = df["FBA_INV"].apply(
