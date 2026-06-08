@@ -3298,47 +3298,57 @@ def get_asin_top_keywords(asin: str, geo: str, limit: int = 10):
     if rows.empty:
         return []
 
-    # Step 2 — pull Search Volume for USA only, from BOTH SQP sources:
-    #   1. Maplemonk Airbyte sync of Brand Analytics SQP (currently
-    #      sparse — only ~1 ASIN syncing, but auto-refreshes weekly
-    #      when it works).
-    #   2. RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR — the Hector-MCP-sourced
-    #      backfill (one-time seed of top USA ASINs, see DAILY_DBR
-    #      docs for re-run instructions). Cross-database query in
-    #      Snowflake is just a fully-qualified table name; permission
-    #      already granted to CLAUDE_ROLE.
-    # UNION ALL the two then take MAX(SV) per keyword. Hector data
-    # takes precedence when both report a value because it's pulled
-    # at our cadence; Airbyte numbers fill in gaps when Hector has
-    # fewer search terms for that ASIN.
-    sv_by_kw: Dict[str, float] = {}
+    # Step 2 — per-keyword SQP funnel for USA. Two sources, both
+    # carrying SV; the Hector seed adds the brand-share funnel metrics
+    # (IS% / CS% / OS%) that Airbyte's payload doesn't include.
+    #   1. Maplemonk Airbyte sync of Brand Analytics SQP — sparse
+    #      coverage (only ~1 ASIN syncing today) but auto-refreshes
+    #      weekly when wired correctly. SV-only.
+    #   2. RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR — Hector-MCP backfill
+    #      with full brand-share funnel per (ASIN, search_term).
+    #      Covers the top USA ASINs seeded so far; ask Claude to
+    #      extend.
+    # Output keyed by lower-trimmed search term →
+    #   {sv, is_pct, cs_pct, os_pct}.  We MAX over duplicates so
+    # whichever source carries the higher SV wins; share % comes from
+    # Hector only (Airbyte side coalesced to NULL).
+    sqp_by_kw: Dict[str, Dict[str, float]] = {}
     if g == "USA":
         try:
             sv_df = run_query(f"""
-                WITH airbyte_sv AS (
+                WITH airbyte AS (
                     SELECT
-                        LOWER(TRIM(s.SEARCHQUERY))  AS KEY_LC,
-                        COALESCE(s.SEARCHQUERYVOLUME, 0) AS SV
+                        LOWER(TRIM(s.SEARCHQUERY))     AS KEY_LC,
+                        COALESCE(s.SEARCHQUERYVOLUME, 0) AS SV,
+                        NULL AS IS_PCT, NULL AS CS_PCT, NULL AS OS_PCT
                     FROM vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT p
                     JOIN vahdam_db.maplemonk.GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_SEARCHQUERYDATA s
                       ON s._AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID
                        = p._AIRBYTE_GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT_HASHID
                     WHERE UPPER(TRIM(p.ASIN)) = UPPER('{a}')
                 ),
-                hector_sv AS (
+                hector AS (
                     SELECT
-                        LOWER(TRIM(SEARCH_TERM))  AS KEY_LC,
-                        COALESCE(T_QUERY, 0)      AS SV
+                        LOWER(TRIM(SEARCH_TERM)) AS KEY_LC,
+                        COALESCE(T_QUERY, 0)     AS SV,
+                        T_IS_PCT                 AS IS_PCT,
+                        B_CS_PCT                 AS CS_PCT,
+                        O_S_PCT                  AS OS_PCT
                     FROM RYTHM_DB.PUBLIC.VAHDAM_SQP_HECTOR
                     WHERE UPPER(ASIN) = UPPER('{a}')
                       AND UPPER(GEO) = 'USA'
                 ),
                 combined AS (
-                    SELECT KEY_LC, SV FROM airbyte_sv
+                    SELECT * FROM airbyte
                     UNION ALL
-                    SELECT KEY_LC, SV FROM hector_sv
+                    SELECT * FROM hector
                 )
-                SELECT KEY_LC, MAX(SV) AS SV
+                SELECT
+                    KEY_LC,
+                    MAX(SV)      AS SV,
+                    MAX(IS_PCT)  AS IS_PCT,
+                    MAX(CS_PCT)  AS CS_PCT,
+                    MAX(OS_PCT)  AS OS_PCT
                 FROM combined
                 WHERE KEY_LC IS NOT NULL AND KEY_LC <> ''
                 GROUP BY KEY_LC
@@ -3346,9 +3356,14 @@ def get_asin_top_keywords(asin: str, geo: str, limit: int = 10):
             for _, r in sv_df.iterrows():
                 k = str(r.get("KEY_LC") or "").strip()
                 if k:
-                    sv_by_kw[k] = float(r.get("SV") or 0)
+                    sqp_by_kw[k] = {
+                        "sv":     float(r.get("SV") or 0) if r.get("SV") is not None else None,
+                        "is_pct": float(r.get("IS_PCT")) if r.get("IS_PCT") is not None else None,
+                        "cs_pct": float(r.get("CS_PCT")) if r.get("CS_PCT") is not None else None,
+                        "os_pct": float(r.get("OS_PCT")) if r.get("OS_PCT") is not None else None,
+                    }
         except Exception:
-            sv_by_kw = {}   # SQP join is opt-in; keyword block still renders
+            sqp_by_kw = {}   # SQP join is opt-in; keyword block still renders
 
     # Step 3 — assemble per-keyword dicts with derived ratios
     out = []
@@ -3362,6 +3377,7 @@ def get_asin_top_keywords(asin: str, geo: str, limit: int = 10):
         ctr   = (clicks / impr * 100) if impr else None
         ad_cvr = (conv / clicks * 100) if clicks else None
         acos  = (spend / rev * 100) if rev else None
+        sqp = sqp_by_kw.get(key_lc) or {}
         out.append({
             "keyword":     str(r["KEYWORD"]),
             "spend":       spend,
@@ -3372,7 +3388,12 @@ def get_asin_top_keywords(asin: str, geo: str, limit: int = 10):
             "ctr_pct":     ctr,
             "ad_cvr_pct":  ad_cvr,
             "acos_pct":    acos,
-            "sv":          sv_by_kw.get(key_lc),
+            # SQP funnel — only populated for USA + ASINs in the Hector
+            # seed. Non-loaded keywords render as em-dash.
+            "sv":          sqp.get("sv"),
+            "is_pct":      sqp.get("is_pct"),
+            "cs_pct":      sqp.get("cs_pct"),
+            "os_pct":      sqp.get("os_pct"),
         })
     return out
 
@@ -3825,6 +3846,15 @@ def render_asin_360_modal(asin: str, geo: str,
             if v <= 50:   return "#7a5c00"
             return "#8b1a1a"
 
+        # Funnel cells share the gold-tinted "context column" treatment
+        # so the eye groups SV / IS% / CS% / OS% together as the
+        # market-share block (vs Spend / ACoS / CTR which is our
+        # paid-ad performance block).
+        _ctx_td = (
+            'padding:7px 10px;text-align:right;font-weight:600;'
+            'color:#7a6a50;font-variant-numeric:tabular-nums;font-size:12px;'
+            'border-bottom:1px solid #ead9b5;background:#f5efe0;'
+        )
         kw_rows_html = []
         for kr in kw_rows:
             acos_col = _acos_color(kr["acos_pct"])
@@ -3832,9 +3862,9 @@ def render_asin_360_modal(asin: str, geo: str,
                 f'<tr>'
                 f'<td style="padding:7px 10px;font-weight:600;color:#3e2f1c;'
                 f'font-size:12px;border-bottom:1px solid #ead9b5;'
-                f'max-width:260px;overflow:hidden;text-overflow:ellipsis;'
+                f'max-width:240px;overflow:hidden;text-overflow:ellipsis;'
                 f'white-space:nowrap;" title="{kr["keyword"]}">'
-                f'{kr["keyword"][:48]}</td>'
+                f'{kr["keyword"][:44]}</td>'
                 f'<td style="padding:7px 10px;text-align:right;font-weight:700;'
                 f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
                 f'border-bottom:1px solid #ead9b5;">{_fmt_ccy(kr["spend"])}</td>'
@@ -3853,10 +3883,11 @@ def render_asin_360_modal(asin: str, geo: str,
                 f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
                 f'color:#171717;font-variant-numeric:tabular-nums;font-size:12px;'
                 f'border-bottom:1px solid #ead9b5;">{_fmt_p(kr["ad_cvr_pct"])}</td>'
-                f'<td style="padding:7px 10px;text-align:right;font-weight:600;'
-                f'color:#7a6a50;font-variant-numeric:tabular-nums;font-size:12px;'
-                f'border-bottom:1px solid #ead9b5;background:#f5efe0;">'
-                f'{_fmt_sv(kr["sv"])}</td>'
+                # ── SQP brand-share funnel block ────────────────────
+                f'<td style="{_ctx_td}">{_fmt_sv(kr["sv"])}</td>'
+                f'<td style="{_ctx_td}">{_fmt_p(kr["is_pct"], dp=2)}</td>'
+                f'<td style="{_ctx_td}">{_fmt_p(kr["cs_pct"], dp=2)}</td>'
+                f'<td style="{_ctx_td}">{_fmt_p(kr["os_pct"], dp=2)}</td>'
                 f'</tr>'
             )
 
@@ -3876,7 +3907,11 @@ def render_asin_360_modal(asin: str, geo: str,
             f'<th style="{_th}text-align:right;">Impr</th>'
             f'<th style="{_th}text-align:right;">CTR%</th>'
             f'<th style="{_th}text-align:right;">Ad CVR%</th>'
-            f'<th style="{_th_sv}text-align:right;">Search Vol</th>'
+            # SQP brand-share funnel (gold-headed = "market context" block)
+            f'<th style="{_th_sv}text-align:right;">SV</th>'
+            f'<th style="{_th_sv}text-align:right;">IS%</th>'
+            f'<th style="{_th_sv}text-align:right;">CS%</th>'
+            f'<th style="{_th_sv}text-align:right;">OS%</th>'
             f'</tr></thead>'
             f'<tbody>' + "".join(kw_rows_html) + '</tbody>'
             f'</table></div>',
