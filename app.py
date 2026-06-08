@@ -2847,6 +2847,15 @@ def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
                    / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)                         AS ACT_ACOS_PCT,
             ROUND(p.CM2_ACT_RAW / NULLIF(p.ACT_REVENUE_RAW, 0) * 100, 1)            AS ACT_CM2_PCT,
             ROUND(p.CM2_ACT_RAW, 0)                                                 AS ACT_CM2_ABS,
+            -- CM2 per ad-rupee: actual margin earned per rupee of ad spend.
+            -- Differs from ACoS (which is just Revenue / Spend) — this is
+            -- profit-per-spend. Sort ASCENDING and the top of the list is
+            -- where the next ad-rupee earns the most margin → that's the
+            -- "increase spend here" list. < 1.0 means the ASIN is losing
+            -- money on every paid sale (ad cost exceeds margin generated).
+            ROUND(p.CM2_ACT_RAW
+                   / NULLIF(p.PM_SPEND_ACT_RAW + p.GADS_SPEND_ACT_RAW, 0),
+                   2)                                                               AS CM2_PER_SPEND,
             ROUND(p.ACT_REVENUE_RAW / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)        AS REV_ACHVD_PCT,
             -- Marketing (paid ads) — null-safe when no ad rows exist
             COALESCE(ROUND(m.PAID_SPEND_RAW,    0), 0)                              AS PAID_SPEND,
@@ -6097,6 +6106,11 @@ def render_asin():
             ("ACT_CM2_PCT",   "Act CM2%"),
             ("BUD_CM2_PCT",   "Bud CM2%"),
             ("ACT_CM2_ABS",   "CM2 Abs"),
+            # CM2 / Ad₹ — profit per ad-rupee. Sort ASCENDING and the top
+            # of the list is "next ad-rupee earns the most margin here"
+            # = the spend reallocation list. Values < 1.0 mean the ASIN
+            # loses money on every paid sale.
+            ("CM2_PER_SPEND", "CM2 / Ad₹"),
         ] + inv_cols
         p = df[[c for c,_ in pnl_cols]].rename(columns=dict(pnl_cols)).copy()
         p["Act Units"] = p["Act Units"].apply(fmt_num)
@@ -6116,6 +6130,12 @@ def render_asin():
         for col in ["Rev %","Act CM1%","Bud CM1%","Act ACoS%","Bud ACoS%","Act CM2%","Bud CM2%"]:
             src = [c for c,n in pnl_cols if n == col][0]
             p[col] = df[src].apply(fmt_pct)
+        # CM2 / Ad₹ — a ratio (₹ margin per ₹ ad spend). Format with 2
+        # decimals, no currency symbol. Em-dash when spend is zero
+        # (denominator NaN). Sort by this column ASCENDING — top of
+        # the list = "give me one more rupee of spend, please".
+        p["CM2 / Ad₹"] = df["CM2_PER_SPEND"].apply(
+            lambda v: "—" if (_f(v) is None) else f"{_f(v):,.2f}x")
         # Inventory + cover-days formatting
         if is_usa_view:
             p["FBA Inv"] = df["FBA_INV"].apply(
