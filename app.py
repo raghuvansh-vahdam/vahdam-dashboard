@@ -5158,13 +5158,17 @@ def render_subcategory():
 
     c1, c2 = st.columns([1, 9])
     with c1:
+        # Back hops to the Executive Summary (CEO) tab — that's where the
+        # country tiles live, and it's the natural parent of a per-GEO
+        # sub-category drill. Previous behavior sent users to the Overview
+        # tab, which made them lose their place in the drill flow.
         if st.button("← Back"):
-            st.session_state.view = "overview"
+            st.session_state.view = "ceo"
             st.rerun()
     with c2:
         render_breadcrumbs([
-            ("Overview", "overview", None, None),
-            (geo, "subcategory", geo, None),
+            ("Executive", "ceo",         None, None),
+            (geo,         "subcategory", geo,  None),
         ])
         st.markdown(
             f'<div class="page-title">Sub-Category Breakdown &mdash; {geo}</div>',
