@@ -1652,7 +1652,7 @@ with st.sidebar:
         # "HP - teas" duplicates from dirty source data).
         return run_query(
             f"SELECT DISTINCT BRAND, {_cat_norm('CATEGORY')} AS CATEGORY, "
-            f"CHANNEL, GEO, {_subcat_norm('SUB_CATEGORY')} AS SUB_CATEGORY, "
+            f"CHANNEL, GEO, SUB_CATEGORY, "
             f"{_amz_cat_norm('AMZ_CATEGORY')} AS AMZ_CATEGORY "
             f"FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
@@ -1998,19 +1998,14 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
         w.append(f"GEO = '{geo_override}'")
     elif f_geo:
         w.append(f"GEO IN ({','.join(repr(x) for x in f_geo)})")
-    # SUB_CATEGORY filter is matched against the *normalised* expression
-    # so a user-selected "HP - Teas" picks up every Handpick tea sub-cat
-    # (Green Teas, Matcha, Herbal Teas, Samplers, Chai, Iced …) per the
-    # _subcat_norm rule defined alongside the other normalisers.
-    _sc_norm = _subcat_norm("SUB_CATEGORY")
     if subcat_override is not None:
         if subcat_override == "(untagged)":
-            w.append(f"COALESCE(NULLIF({_sc_norm},''),'(untagged)') = '(untagged)'")
+            w.append("COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'")
         else:
             esc = subcat_override.replace("'", "''")
-            w.append(f"UPPER(TRIM(COALESCE({_sc_norm},''))) = UPPER(TRIM('{esc}'))")
+            w.append(f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))")
     elif f_subcat:
-        w.append(f"{_sc_norm} IN ({','.join(repr(x) for x in f_subcat)})")
+        w.append(f"SUB_CATEGORY IN ({','.join(repr(x) for x in f_subcat)})")
     # AMZ Sub Category filter — Amazon's finer-grained AMZ_CATEGORY tag.
     # Independent of CATEGORY / SUB_CATEGORY so the three can stack.
     # Match against the *normalized* column so a user-selected
@@ -2390,7 +2385,7 @@ def get_view2(where, sfx):
     # Budget side stays PM-only (no GADS budget column).
     spend_act = _spend_actual_sum_sql(sfx)
     return run_query(f"""
-        SELECT COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)') AS SUB_CATEGORY,
+        SELECT COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') AS SUB_CATEGORY,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)  AS SALES_BUD,
             ROUND(SUM(SALES_ACTUAL_{sfx}),0)  AS SALES_ACT,
             ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS REV_PCT,
@@ -2409,7 +2404,7 @@ def get_view2(where, sfx):
             COALESCE(SUM(QTY_BUDGET),0)       AS UNITS_BUD,
             COALESCE(SUM(QTY_ACTUAL),0)       AS UNITS_ACT
         FROM {TABLE} WHERE {where}
-        GROUP BY COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)')
+        GROUP BY COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)')
         UNION ALL
         SELECT 'GRAND TOTAL',
             ROUND(SUM(SALES_BUDGET_{sfx}),0),
@@ -2436,11 +2431,11 @@ def get_view2(where, sfx):
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_fm_budget_v2(where_fm, sfx):
     return run_query(f"""
-        SELECT COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)') AS SUB_CATEGORY,
+        SELECT COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') AS SUB_CATEGORY,
             ROUND(SUM(SALES_BUDGET_{sfx}),0) AS FM_SALES_BUD,
             ROUND(SUM(CM2_BUDGET_{sfx}),0)   AS FM_CM2_BUD
         FROM {TABLE} WHERE {where_fm}
-        GROUP BY COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)')
+        GROUP BY COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)')
         UNION ALL
         SELECT 'GRAND TOTAL',
             ROUND(SUM(SALES_BUDGET_{sfx}),0),
@@ -2462,8 +2457,11 @@ def get_view2_amz(where, sfx):
     spend_act = _spend_actual_sum_sql(sfx)
     # AMZ_CATEGORY is first canonicalised (case + plural dedupe), then
     # collapsed to "HP - Teas" for every Handpick row whose AMZ_CATEGORY
-    # is a tea-flavoured bucket — matches the SUB_CATEGORY rule in
-    # _subcat_norm so the two charts present a consistent Handpick view.
+    # is a tea-flavoured bucket. Applied only on the AMZ Sub Category
+    # chart — the general Sub-Category chart keeps the raw SUB_CATEGORY
+    # splits (per Vahdam team direction). The _HP_TEA_SUBCATS list is
+    # shared with _subcat_norm in case we ever want to apply the same
+    # collapse elsewhere.
     amz_expr = f"""CASE
         WHEN LOWER(TRIM(BRAND)) = 'handpick'
              AND UPPER(TRIM({_amz_cat_norm('AMZ_CATEGORY')})) IN ({_HP_TEA_SUBCATS},'HP - TEAS')
@@ -4037,14 +4035,10 @@ def get_asin_totals(geo, sub_cat, d1, d2, sfx, amz_subcat=None):
             pnl_subcat = f"{amz_norm} = '{esc_amz}'"
     else:
         esc = sub_cat.replace("'","''")
-        # Match against the normalised SUB_CATEGORY so "HP - Teas" picks
-        # up every Handpick tea bucket the user collapsed into it
-        # (mirrors the _subcat_norm rule applied in build_where).
-        _sc_norm_local = _subcat_norm("SUB_CATEGORY")
         if sub_cat == "(untagged)":
-            pnl_subcat = f"COALESCE(NULLIF({_sc_norm_local},''),'(untagged)') = '(untagged)'"
+            pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
         else:
-            pnl_subcat = f"UPPER(TRIM(COALESCE({_sc_norm_local},''))) = UPPER(TRIM('{esc}'))"
+            pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
 
     pnl = run_query(f"""
         SELECT
@@ -4137,14 +4131,10 @@ def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
             pnl_subcat = f"{amz_norm} = '{esc_amz}'"
     else:
         esc = sub_cat.replace("'","''")
-        # Match against the normalised SUB_CATEGORY so "HP - Teas" picks
-        # up every Handpick tea bucket the user collapsed into it
-        # (mirrors the _subcat_norm rule applied in build_where).
-        _sc_norm_local = _subcat_norm("SUB_CATEGORY")
         if sub_cat == "(untagged)":
-            pnl_subcat = f"COALESCE(NULLIF({_sc_norm_local},''),'(untagged)') = '(untagged)'"
+            pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
         else:
-            pnl_subcat = f"UPPER(TRIM(COALESCE({_sc_norm_local},''))) = UPPER(TRIM('{esc}'))"
+            pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
 
     # Anchor the 7/14/30-day Cover-Days windows to the 3pm-IST effective
     # day so partial-day today never lifts the max-velocity denominator
@@ -4463,7 +4453,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))   AS PRODUCT_NAME,
                 MAX(BRAND)                                               AS BRAND,
                 MAX(CATEGORY)                                            AS CATEGORY,
-                MAX(COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)'))      AS SUB_CATEGORY,
+                MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)'))      AS SUB_CATEGORY,
                 -- Amazon's finer-grained AMZ_CATEGORY tag (Black Teas,
                 -- Samplers, Green Teas, HP - Teas, etc.). Normalized
                 -- via _amz_cat_norm so dirty case-duplicates
@@ -4893,7 +4883,7 @@ def get_sku_lookup(term, d1, d2, sfx):
             MAX(BRAND)                                                             AS BRAND,
             GEO                                                                    AS GEO,
             CHANNEL                                                                AS CHANNEL,
-            MAX(COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'—'))                            AS SUB_CAT,
+            MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'—'))                            AS SUB_CAT,
             ROUND(SUM(SALES_ACTUAL_{sfx}),0)                                      AS ACT_REV,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)                                      AS BUD_REV,
             ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS REV_PCT,
