@@ -11421,6 +11421,88 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def get_nb_asin_prior3(geo, asin_csv, m1_from, m1_to, m2_from, m2_to,
+                       m3_from, m3_to, sfx):
+    """Per-ASIN totals across the 3 most-recently-completed full calendar
+    months. M1 = oldest, M3 = newest (so chronological left-to-right in
+    the rendered table).
+
+    Returns one row per ASIN with the raw numerators we need to compute
+    Units / CR% / ASP / ACoS% per month in pandas — Revenue, Units,
+    Sessions, Spend (PM + GADS from the P&L feed, so currency matches
+    the sfx toggle the same way every other NB cell does). The query
+    uses conditional SUMs in a single pass instead of three round-trips.
+    """
+    if not asin_csv:
+        return pd.DataFrame()
+    geo_pnl  = _nb_geo_sql_filter(geo)
+    geo_sess = (f"AND UPPER(GEO) = UPPER('{geo}')"
+                if geo and geo != "All" else "")
+    geo_mkt  = _nb_geo_sql_filter(geo)
+    gads     = _gads_actual_col_expr(sfx)  # per-row GADS column expr
+
+    def _sum_pnl(metric_sfx, d_from, d_to):
+        return (f"SUM(CASE WHEN DAY BETWEEN '{d_from}' AND '{d_to}' "
+                f"THEN COALESCE({metric_sfx},0) ELSE 0 END)")
+
+    def _sum_pm_plus_gads(d_from, d_to):
+        return (f"SUM(CASE WHEN DAY BETWEEN '{d_from}' AND '{d_to}' "
+                f"THEN COALESCE(PM_SPEND_ACTUAL_{sfx},0) "
+                f"     + COALESCE({gads},0) ELSE 0 END)")
+
+    pnl_cte = f"""
+        SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+               {_sum_pnl(f'QTY_ACTUAL',         m1_from, m1_to)} AS M1_UNITS,
+               {_sum_pnl(f'SALES_ACTUAL_{sfx}', m1_from, m1_to)} AS M1_REV,
+               {_sum_pm_plus_gads(m1_from, m1_to)}              AS M1_SPEND,
+               {_sum_pnl(f'QTY_ACTUAL',         m2_from, m2_to)} AS M2_UNITS,
+               {_sum_pnl(f'SALES_ACTUAL_{sfx}', m2_from, m2_to)} AS M2_REV,
+               {_sum_pm_plus_gads(m2_from, m2_to)}              AS M2_SPEND,
+               {_sum_pnl(f'QTY_ACTUAL',         m3_from, m3_to)} AS M3_UNITS,
+               {_sum_pnl(f'SALES_ACTUAL_{sfx}', m3_from, m3_to)} AS M3_REV,
+               {_sum_pm_plus_gads(m3_from, m3_to)}              AS M3_SPEND
+        FROM {TABLE}
+        WHERE DAY BETWEEN '{m1_from}' AND '{m3_to}'
+          {geo_pnl} AND {GEO_EXCL}
+          AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
+        GROUP BY SPLIT_PART(ASIN,' ',1)
+    """
+    sess_cte = f"""
+        SELECT SPLIT_PART(ASIN,' ',1) AS ASIN_KEY,
+               SUM(CASE WHEN DAY BETWEEN '{m1_from}' AND '{m1_to}'
+                        THEN COALESCE(SESSIONS,0) ELSE 0 END) AS M1_SESS,
+               SUM(CASE WHEN DAY BETWEEN '{m2_from}' AND '{m2_to}'
+                        THEN COALESCE(SESSIONS,0) ELSE 0 END) AS M2_SESS,
+               SUM(CASE WHEN DAY BETWEEN '{m3_from}' AND '{m3_to}'
+                        THEN COALESCE(SESSIONS,0) ELSE 0 END) AS M3_SESS
+        FROM {SALES_MKT}
+        WHERE DAY BETWEEN '{m1_from}' AND '{m3_to}'
+          {geo_sess}
+          AND SPLIT_PART(ASIN,' ',1) IN ({asin_csv})
+        GROUP BY SPLIT_PART(ASIN,' ',1)
+    """
+    return run_query(f"""
+        WITH pnl AS ({pnl_cte}),
+             sess AS ({sess_cte})
+        SELECT  p.ASIN_KEY                      AS ASIN,
+                ROUND(COALESCE(p.M1_UNITS,0),0) AS M1_UNITS,
+                ROUND(COALESCE(p.M1_REV,0),0)   AS M1_REV,
+                ROUND(COALESCE(p.M1_SPEND,0),0) AS M1_SPEND,
+                ROUND(COALESCE(s.M1_SESS,0),0)  AS M1_SESS,
+                ROUND(COALESCE(p.M2_UNITS,0),0) AS M2_UNITS,
+                ROUND(COALESCE(p.M2_REV,0),0)   AS M2_REV,
+                ROUND(COALESCE(p.M2_SPEND,0),0) AS M2_SPEND,
+                ROUND(COALESCE(s.M2_SESS,0),0)  AS M2_SESS,
+                ROUND(COALESCE(p.M3_UNITS,0),0) AS M3_UNITS,
+                ROUND(COALESCE(p.M3_REV,0),0)   AS M3_REV,
+                ROUND(COALESCE(p.M3_SPEND,0),0) AS M3_SPEND,
+                ROUND(COALESCE(s.M3_SESS,0),0)  AS M3_SESS
+        FROM pnl p
+        LEFT JOIN sess s ON p.ASIN_KEY = s.ASIN_KEY
+    """)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_nb_asin_periods(asin, geo, periods_tuple, sfx):
     """Per-period funnel breakdown for ONE ASIN across the 9 periods.
     Returns one row per period. Each metric is aggregated with
@@ -11657,6 +11739,28 @@ def render_new_business():
     summary    = get_nb_asin_summary(geo, asin_csv, nb_d_from, nb_d_to, sfx)
     summary_lp = get_nb_asin_summary(geo, asin_csv,
                                       nb_prev_d_from, nb_prev_d_to, sfx)
+    # 3 most-recently-completed full calendar months (M-3, M-2, M-1)
+    # relative to eff_today, used for the per-ASIN trailing-month columns
+    # appended to the Product Performance Summary table below.
+    def _shift_month(y, m, delta):
+        idx = (y * 12 + (m - 1)) + delta
+        return idx // 12, (idx % 12) + 1
+    _m_anchor_y, _m_anchor_m = eff_today.year, eff_today.month
+    _pm_windows = []
+    _pm_labels  = []
+    for _back in (3, 2, 1):
+        _y, _m = _shift_month(_m_anchor_y, _m_anchor_m, -_back)
+        _ms = date(_y, _m, 1)
+        _me = (date(_y, _m + 1, 1) if _m < 12 else date(_y + 1, 1, 1)) - timedelta(days=1)
+        _pm_windows.append((_ms.isoformat(), _me.isoformat()))
+        _pm_labels.append(_ms.strftime("%b %y"))   # e.g. "Mar 26"
+    prior3 = get_nb_asin_prior3(
+        geo, asin_csv,
+        _pm_windows[0][0], _pm_windows[0][1],
+        _pm_windows[1][0], _pm_windows[1][1],
+        _pm_windows[2][0], _pm_windows[2][1],
+        sfx,
+    )
     _ph.empty()
     if summary.empty:
         st.info(f"📭 No data for {geo} New Business in the selected date range.")
@@ -11786,6 +11890,26 @@ def render_new_business():
                 '</span></div>', unsafe_allow_html=True)
 
     disp = summary.copy().reset_index(drop=True)
+    # ── Merge in the 3 prior-month per-ASIN metrics ──
+    # Units / CR% / ASP / ACoS% per month appear at the right edge of
+    # the table so the current-period block stays where users expect it.
+    _prior3_added_cols = []      # populated below when prior3 has rows
+    if prior3 is not None and not prior3.empty:
+        prior3 = prior3.copy()
+        for _i, _lbl in enumerate(_pm_labels, start=1):
+            _u = pd.to_numeric(prior3[f"M{_i}_UNITS"], errors="coerce").fillna(0)
+            _r = pd.to_numeric(prior3[f"M{_i}_REV"],   errors="coerce").fillna(0)
+            _s = pd.to_numeric(prior3[f"M{_i}_SESS"],  errors="coerce").fillna(0)
+            _sp= pd.to_numeric(prior3[f"M{_i}_SPEND"], errors="coerce").fillna(0)
+            prior3[f"{_lbl} Units"] = _u.round().astype(int)
+            prior3[f"{_lbl} CR%"]   = (_u / _s.replace(0, pd.NA) * 100).round(2)
+            prior3[f"{_lbl} ASP"]   = (_r / _u.replace(0, pd.NA)).round(2)
+            prior3[f"{_lbl} ACoS%"] = (_sp / _r.replace(0, pd.NA) * 100).round(1)
+            _prior3_added_cols.extend([f"{_lbl} Units", f"{_lbl} CR%",
+                                       f"{_lbl} ASP",  f"{_lbl} ACoS%"])
+        disp = disp.merge(
+            prior3[["ASIN"] + _prior3_added_cols], on="ASIN", how="left")
+
     # Hide ZERO-revenue ASINs by default? No — show them so the user
     # can spot fully-stale launches. Sort already puts them at the end.
     show_cols = [
@@ -11816,6 +11940,11 @@ def render_new_business():
         ("CM2_ABS",     "CM2 Abs"),
         ("CM2_PCT",     "CM2%"),
     ]
+    # Append the 3 prior-month (Units / CR% / ASP / ACoS%) columns to
+    # the right of the current-period block. Done as identity tuples
+    # because the merged column names already match the desired labels.
+    for _lbl in _prior3_added_cols:
+        show_cols.append((_lbl, _lbl))
     src_cols  = [s for s, _ in show_cols if s in disp.columns]
     label_map = {s: l for s, l in show_cols}
     table_df  = disp[src_cols].rename(columns=label_map).reset_index(drop=True)
@@ -11862,6 +11991,22 @@ def render_new_business():
         "CM2 Abs":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
         "CM2%":        st.column_config.NumberColumn(format="%.1f%%"),
     }
+    # Per-prior-month column configs (trailing 3 months, e.g. Mar 26 /
+    # Apr 26 / May 26). Same format pattern across each month so the eye
+    # can scan diagonally.
+    for _lbl in _pm_labels:
+        col_cfg[f"{_lbl} Units"] = st.column_config.NumberColumn(
+            f"{_lbl} Units", format="%,d",
+            help=f"P&L units sold in {_lbl} (full calendar month).")
+        col_cfg[f"{_lbl} CR%"] = st.column_config.NumberColumn(
+            f"{_lbl} CR%", format="%.2f%%",
+            help=f"Units ÷ Sessions × 100 for {_lbl} (organic + paid).")
+        col_cfg[f"{_lbl} ASP"] = st.column_config.NumberColumn(
+            f"{_lbl} ASP", format=f"{currency_sym}%,.2f",
+            help=f"Average selling price for {_lbl} (Revenue ÷ Units).")
+        col_cfg[f"{_lbl} ACoS%"] = st.column_config.NumberColumn(
+            f"{_lbl} ACoS%", format="%.1f%%",
+            help=f"(PM Spend + GADS) ÷ Revenue × 100 for {_lbl}.")
 
     sel_event = st.dataframe(
         table_df, use_container_width=True, height=460,
