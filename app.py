@@ -11901,10 +11901,16 @@ def render_new_business():
             _r = pd.to_numeric(prior3[f"M{_i}_REV"],   errors="coerce").fillna(0)
             _s = pd.to_numeric(prior3[f"M{_i}_SESS"],  errors="coerce").fillna(0)
             _sp= pd.to_numeric(prior3[f"M{_i}_SPEND"], errors="coerce").fillna(0)
+            # Cast the division result back to float64 first — when the
+            # denominator has zeros we replace with pd.NA, and the
+            # resulting Series becomes object-dtype which .round() rejects.
             prior3[f"{_lbl} Units"] = _u.round().astype(int)
-            prior3[f"{_lbl} CR%"]   = (_u / _s.replace(0, pd.NA) * 100).round(2)
-            prior3[f"{_lbl} ASP"]   = (_r / _u.replace(0, pd.NA)).round(2)
-            prior3[f"{_lbl} ACoS%"] = (_sp / _r.replace(0, pd.NA) * 100).round(1)
+            prior3[f"{_lbl} CR%"]   = pd.to_numeric(
+                _u / _s.replace(0, pd.NA) * 100, errors="coerce").round(2)
+            prior3[f"{_lbl} ASP"]   = pd.to_numeric(
+                _r / _u.replace(0, pd.NA),       errors="coerce").round(2)
+            prior3[f"{_lbl} ACoS%"] = pd.to_numeric(
+                _sp / _r.replace(0, pd.NA) * 100, errors="coerce").round(1)
             _prior3_added_cols.extend([f"{_lbl} Units", f"{_lbl} CR%",
                                        f"{_lbl} ASP",  f"{_lbl} ACoS%"])
         disp = disp.merge(
