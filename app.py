@@ -968,6 +968,34 @@ def _cat_norm(cat_expr, geo_expr="GEO"):
         ELSE {cat_expr}
     END"""
 
+
+# ── SUB_CATEGORY normaliser (Handpick → HP - Teas bucket) ────────────────────
+# The source feed splits Handpick-brand teas across the same tea sub-cats
+# used for Vahdam-brand rows (Green Teas, Black Tea, Matcha, Herbal Teas,
+# Samplers, Chai Teas, Iced Teas, …). The merchandising team treats every
+# Handpick tea as a single "HP - Teas" line in P&L roll-ups, so we collapse
+# all those tea-flavoured buckets to "HP - Teas" whenever BRAND = Handpick.
+# Non-tea Handpick sub-cats (Spices, Supplements, …) and every Vahdam row
+# are returned untouched.
+#
+# Applied at all SUB_CATEGORY touchpoints so the sidebar dropdown, the
+# WHERE filter, the Sub-Cat chart, the CR Tracker column, the AMZ Sub
+# Category chart, and the ASIN view all show the same bucket name.
+_HP_TEA_SUBCATS = (
+    "'GREEN TEAS','GREEN TEA','BLACK TEA','BLACK TEAS','MATCHA',"
+    "'HERBAL TEAS','HERBAL TEA','SAMPLERS','SAMPLER',"
+    "'CHAI TEAS','CHAI TEA','CHAI','ICED TEAS','ICED TEA',"
+    "'WHITE TEA','WHITE TEAS','OOLONG','OOLONG TEAS','OOLONG TEA'"
+)
+
+def _subcat_norm(subcat_expr, brand_expr="BRAND"):
+    return f"""CASE
+        WHEN LOWER(TRIM({brand_expr})) = 'handpick'
+             AND UPPER(TRIM({subcat_expr})) IN ({_HP_TEA_SUBCATS})
+            THEN 'HP - Teas'
+        ELSE {subcat_expr}
+    END"""
+
 # ── Effective-today helper (data-load cutoff, geo-aware) ─────────────────────
 # Maplemonk warehouse refreshes per geo at different IST hours:
 #   * USA, CA, IN (and the default fallback): ~15:00 IST
@@ -1624,7 +1652,7 @@ with st.sidebar:
         # "HP - teas" duplicates from dirty source data).
         return run_query(
             f"SELECT DISTINCT BRAND, {_cat_norm('CATEGORY')} AS CATEGORY, "
-            f"CHANNEL, GEO, SUB_CATEGORY, "
+            f"CHANNEL, GEO, {_subcat_norm('SUB_CATEGORY')} AS SUB_CATEGORY, "
             f"{_amz_cat_norm('AMZ_CATEGORY')} AS AMZ_CATEGORY "
             f"FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
@@ -1970,14 +1998,19 @@ def build_where(geo_override=None, subcat_override=None, date_from=None, date_to
         w.append(f"GEO = '{geo_override}'")
     elif f_geo:
         w.append(f"GEO IN ({','.join(repr(x) for x in f_geo)})")
+    # SUB_CATEGORY filter is matched against the *normalised* expression
+    # so a user-selected "HP - Teas" picks up every Handpick tea sub-cat
+    # (Green Teas, Matcha, Herbal Teas, Samplers, Chai, Iced …) per the
+    # _subcat_norm rule defined alongside the other normalisers.
+    _sc_norm = _subcat_norm("SUB_CATEGORY")
     if subcat_override is not None:
         if subcat_override == "(untagged)":
-            w.append("COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'")
+            w.append(f"COALESCE(NULLIF({_sc_norm},''),'(untagged)') = '(untagged)'")
         else:
             esc = subcat_override.replace("'", "''")
-            w.append(f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))")
+            w.append(f"UPPER(TRIM(COALESCE({_sc_norm},''))) = UPPER(TRIM('{esc}'))")
     elif f_subcat:
-        w.append(f"SUB_CATEGORY IN ({','.join(repr(x) for x in f_subcat)})")
+        w.append(f"{_sc_norm} IN ({','.join(repr(x) for x in f_subcat)})")
     # AMZ Sub Category filter — Amazon's finer-grained AMZ_CATEGORY tag.
     # Independent of CATEGORY / SUB_CATEGORY so the three can stack.
     # Match against the *normalized* column so a user-selected
@@ -2357,7 +2390,7 @@ def get_view2(where, sfx):
     # Budget side stays PM-only (no GADS budget column).
     spend_act = _spend_actual_sum_sql(sfx)
     return run_query(f"""
-        SELECT COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') AS SUB_CATEGORY,
+        SELECT COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)') AS SUB_CATEGORY,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)  AS SALES_BUD,
             ROUND(SUM(SALES_ACTUAL_{sfx}),0)  AS SALES_ACT,
             ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS REV_PCT,
@@ -2376,7 +2409,7 @@ def get_view2(where, sfx):
             COALESCE(SUM(QTY_BUDGET),0)       AS UNITS_BUD,
             COALESCE(SUM(QTY_ACTUAL),0)       AS UNITS_ACT
         FROM {TABLE} WHERE {where}
-        GROUP BY COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)')
+        GROUP BY COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)')
         UNION ALL
         SELECT 'GRAND TOTAL',
             ROUND(SUM(SALES_BUDGET_{sfx}),0),
@@ -2403,11 +2436,11 @@ def get_view2(where, sfx):
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_fm_budget_v2(where_fm, sfx):
     return run_query(f"""
-        SELECT COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') AS SUB_CATEGORY,
+        SELECT COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)') AS SUB_CATEGORY,
             ROUND(SUM(SALES_BUDGET_{sfx}),0) AS FM_SALES_BUD,
             ROUND(SUM(CM2_BUDGET_{sfx}),0)   AS FM_CM2_BUD
         FROM {TABLE} WHERE {where_fm}
-        GROUP BY COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)')
+        GROUP BY COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)')
         UNION ALL
         SELECT 'GRAND TOTAL',
             ROUND(SUM(SALES_BUDGET_{sfx}),0),
@@ -2427,7 +2460,16 @@ def get_fm_budget_v2(where_fm, sfx):
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_view2_amz(where, sfx):
     spend_act = _spend_actual_sum_sql(sfx)
-    amz_expr  = _amz_cat_norm("AMZ_CATEGORY")
+    # AMZ_CATEGORY is first canonicalised (case + plural dedupe), then
+    # collapsed to "HP - Teas" for every Handpick row whose AMZ_CATEGORY
+    # is a tea-flavoured bucket — matches the SUB_CATEGORY rule in
+    # _subcat_norm so the two charts present a consistent Handpick view.
+    amz_expr = f"""CASE
+        WHEN LOWER(TRIM(BRAND)) = 'handpick'
+             AND UPPER(TRIM({_amz_cat_norm('AMZ_CATEGORY')})) IN ({_HP_TEA_SUBCATS},'HP - TEAS')
+            THEN 'HP - Teas'
+        ELSE {_amz_cat_norm('AMZ_CATEGORY')}
+    END"""
     return run_query(f"""
         SELECT COALESCE(NULLIF({amz_expr},''),'(untagged)') AS SUB_CATEGORY,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)  AS SALES_BUD,
@@ -3995,10 +4037,14 @@ def get_asin_totals(geo, sub_cat, d1, d2, sfx, amz_subcat=None):
             pnl_subcat = f"{amz_norm} = '{esc_amz}'"
     else:
         esc = sub_cat.replace("'","''")
+        # Match against the normalised SUB_CATEGORY so "HP - Teas" picks
+        # up every Handpick tea bucket the user collapsed into it
+        # (mirrors the _subcat_norm rule applied in build_where).
+        _sc_norm_local = _subcat_norm("SUB_CATEGORY")
         if sub_cat == "(untagged)":
-            pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+            pnl_subcat = f"COALESCE(NULLIF({_sc_norm_local},''),'(untagged)') = '(untagged)'"
         else:
-            pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+            pnl_subcat = f"UPPER(TRIM(COALESCE({_sc_norm_local},''))) = UPPER(TRIM('{esc}'))"
 
     pnl = run_query(f"""
         SELECT
@@ -4091,10 +4137,14 @@ def get_asin_data(where, geo, sub_cat, sfx, amz_subcat=None):
             pnl_subcat = f"{amz_norm} = '{esc_amz}'"
     else:
         esc = sub_cat.replace("'","''")
+        # Match against the normalised SUB_CATEGORY so "HP - Teas" picks
+        # up every Handpick tea bucket the user collapsed into it
+        # (mirrors the _subcat_norm rule applied in build_where).
+        _sc_norm_local = _subcat_norm("SUB_CATEGORY")
         if sub_cat == "(untagged)":
-            pnl_subcat = "COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)') = '(untagged)'"
+            pnl_subcat = f"COALESCE(NULLIF({_sc_norm_local},''),'(untagged)') = '(untagged)'"
         else:
-            pnl_subcat = f"UPPER(TRIM(COALESCE(SUB_CATEGORY,''))) = UPPER(TRIM('{esc}'))"
+            pnl_subcat = f"UPPER(TRIM(COALESCE({_sc_norm_local},''))) = UPPER(TRIM('{esc}'))"
 
     # Anchor the 7/14/30-day Cover-Days windows to the 3pm-IST effective
     # day so partial-day today never lifts the max-velocity denominator
@@ -4413,7 +4463,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                 MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))   AS PRODUCT_NAME,
                 MAX(BRAND)                                               AS BRAND,
                 MAX(CATEGORY)                                            AS CATEGORY,
-                MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'(untagged)'))      AS SUB_CATEGORY,
+                MAX(COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'(untagged)'))      AS SUB_CATEGORY,
                 -- Amazon's finer-grained AMZ_CATEGORY tag (Black Teas,
                 -- Samplers, Green Teas, HP - Teas, etc.). Normalized
                 -- via _amz_cat_norm so dirty case-duplicates
@@ -4843,7 +4893,7 @@ def get_sku_lookup(term, d1, d2, sfx):
             MAX(BRAND)                                                             AS BRAND,
             GEO                                                                    AS GEO,
             CHANNEL                                                                AS CHANNEL,
-            MAX(COALESCE(NULLIF(SUB_CATEGORY,''),'—'))                            AS SUB_CAT,
+            MAX(COALESCE(NULLIF({_subcat_norm('SUB_CATEGORY')},''),'—'))                            AS SUB_CAT,
             ROUND(SUM(SALES_ACTUAL_{sfx}),0)                                      AS ACT_REV,
             ROUND(SUM(SALES_BUDGET_{sfx}),0)                                      AS BUD_REV,
             ROUND(SUM(SALES_ACTUAL_{sfx})/NULLIF(SUM(SALES_BUDGET_{sfx}),0)*100,1) AS REV_PCT,
@@ -11307,11 +11357,16 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
         inv AS (
-            -- Pick the LATEST snapshot per (ASIN, GEO) from the inventory
-            -- table — the table stores ~14 daily snapshots with DATE as
-            -- text 'DD-MON-YYYY'. For geo='All' we SUM across geos so
-            -- each marketplace contributes its FBA + ADW pool exactly
-            -- once; for a single geo there's just one row per ASIN.
+            -- Pick the LATEST **non-zero** snapshot per (ASIN, GEO). The
+            -- 3P-inv feed sometimes posts blank rows (FBAINV=0, ADWINV=0)
+            -- on weekends or before the daily sync completes, which
+            -- previously made the latest-by-date pick show 0 for healthy
+            -- SKUs. Ordering by `is_non_zero` first, then by parsed date,
+            -- prefers a real reading over an empty one while still
+            -- picking the most recent real reading.
+            -- For geo='All' we SUM across geos so each marketplace
+            -- contributes its FBA + ADW pool exactly once; for a single
+            -- geo there's just one row per ASIN.
             SELECT
                 UPPER(SPLIT_PART(latest.ASIN, ' ', 1))  AS ASIN_KEY,
                 SUM(COALESCE(latest.FBAINV, 0))         AS FBA_INV,
@@ -11321,7 +11376,10 @@ def get_nb_asin_summary(geo, asin_csv, d_from, d_to, sfx):
                     ASIN, GEO, FBAINV, ADWINV,
                     ROW_NUMBER() OVER (
                         PARTITION BY UPPER(SPLIT_PART(ASIN, ' ', 1)), UPPER(GEO)
-                        ORDER BY TRY_TO_DATE(DATE, 'DD-MON-YYYY') DESC NULLS LAST
+                        ORDER BY
+                            CASE WHEN COALESCE(FBAINV,0)+COALESCE(ADWINV,0) > 0
+                                 THEN 1 ELSE 0 END DESC,
+                            TRY_TO_DATE(DATE, 'DD-MON-YYYY') DESC NULLS LAST
                     ) AS rn
                 FROM {INV_3P}
                 WHERE ASIN IS NOT NULL
@@ -11832,16 +11890,35 @@ def render_new_business():
         sel_row   = disp.iloc[picked_idx[0]]
         sel_asin  = sel_row["ASIN"]
         sel_name  = sel_row.get("PRODUCT_NAME") or sel_asin
+        # Pop the ASIN 360° modal on a fresh click. Guarded so reruns
+        # triggered by other widgets don't re-open it.
+        _trig_key_nb = f"_asin_360_trig_nb_{geo}"
+        if sel_asin and st.session_state.get(_trig_key_nb) != sel_asin:
+            st.session_state[_trig_key_nb] = sel_asin
+            render_asin_360_modal(sel_asin, geo, sel_name)
     else:
         # Default to the top-revenue ASIN so the page is never empty.
         sel_row   = disp.iloc[0]
         sel_asin  = sel_row["ASIN"]
         sel_name  = sel_row.get("PRODUCT_NAME") or sel_asin
 
+    # Marketplace-correct PDP link for the selected ASIN. For GEO='All'
+    # we look up the ASIN's home marketplace from universe_df so the link
+    # routes to the right Amazon domain.
+    if geo == "All":
+        _sel_geo = (universe_df.loc[universe_df["ASIN"] == sel_asin, "GEO"]
+                                .astype(str).head(1).tolist() or ["USA"])[0]
+    else:
+        _sel_geo = geo
+    _sel_pdp = _amazon_dp_link(sel_asin, _sel_geo)
     st.markdown(
         f'<div class="section-hdr" style="margin-top:18px;">'
         f'Funnel breakdown · '
-        f'<span style="color:#AB8743;">{sel_asin}</span> &nbsp;·&nbsp; '
+        f'<span style="color:#AB8743;">{sel_asin}</span> '
+        f'<a href="{_sel_pdp}" target="_blank" rel="noopener" '
+        f'   style="font-size:12px;color:#5a78b8;text-decoration:none;'
+        f'          margin-left:6px;">🔗 PDP</a>'
+        f' &nbsp;·&nbsp; '
         f'<span style="font-size:13px;color:#7a6a50;font-weight:500;">{sel_name}</span>'
         f'</div>',
         unsafe_allow_html=True)
@@ -11893,6 +11970,10 @@ def render_new_business():
     # effort — meaningful only when sfx=LOCAL. Inherited approximation
     # from the existing dashboard; flagged in the caption below.
     paid_share  = paid_rev / revenue.replace(0, pd.NA) * 100
+    # Ads CVR% = Paid Units / Clicks — measures ad-creative + landing-page
+    # effectiveness for the paid-click cohort only (vs CR% above which
+    # uses overall sessions and total P&L units).
+    ads_cvr_pct = paid_units / clicks.replace(0, pd.NA) * 100
     pcos_pct    = ad_spend / paid_rev.replace(0, pd.NA) * 100
     acos_pct    = total_spend / revenue.replace(0, pd.NA) * 100
     cm1_pct     = cm1_abs / revenue.replace(0, pd.NA) * 100
@@ -11933,6 +12014,7 @@ def render_new_business():
         ("Revenue",      revenue,     _fmt_money),
         ("Paid Revenue", paid_rev,    _fmt_money),
         ("Paid %",       paid_share,  _fmt_pct),
+        ("Ads CVR%",     ads_cvr_pct, _fmt_pct),
         ("Spend",        total_spend, _fmt_money),
         ("PCOS%",        pcos_pct,    _fmt_pct),
         ("ACoS%",        acos_pct,    _fmt_pct),
@@ -11975,6 +12057,29 @@ def render_new_business():
         column_config=bkd_col_cfg,
     )
 
+    # ── Per-period date ranges (explicit, so users know what each
+    # week column covers). Rendered as a small chip strip below the table.
+    _wks = [p for p in periods if p[3] == "week"]
+    _mths = [p for p in periods if p[3] == "month"]
+    _chip = ("<span style=\"display:inline-block;background:#f3eadb;"
+             "border:1px solid #e3d6b8;border-radius:12px;padding:2px 10px;"
+             "margin:2px 4px 2px 0;font-size:11.5px;color:#4a3e23;\">"
+             "<b>{lbl}</b> &middot; {rng}</span>")
+    _chips_html = "".join(
+        _chip.format(
+            lbl=p[0],
+            rng=(f"{p[1].strftime('%d %b')} – {p[2].strftime('%d %b %Y')}"
+                 if p[1] != p[2]
+                 else p[1].strftime('%d %b %Y')))
+        for p in _mths + _wks
+    )
+    st.markdown(
+        f'<div style="margin:4px 0 6px 0;">'
+        f'<span style="font-size:11.5px;color:#7a6a50;font-weight:600;'
+        f'             margin-right:6px;">Date ranges:</span>'
+        f'{_chips_html}</div>',
+        unsafe_allow_html=True)
+
     # Caption explaining columns
     mtd_lbl = next((p[0] for p in periods if p[3] == "month" and "MTD" in p[0]), "MTD")
     st.caption(
@@ -11992,7 +12097,14 @@ def render_new_business():
         f"the marketing table which stores values in local currency "
         f"(USD/GBP/EUR/CAD/…). The PCOS% ratio is unit-safe; the Paid "
         f"Revenue cell and Paid % column should be read as INR-ish "
-        f"only when the dashboard currency toggle is set to *Local*."
+        f"only when the dashboard currency toggle is set to *Local*. "
+        f"**Why Paid Revenue can exceed Revenue in a single week**: "
+        f"Paid Revenue (Amazon Ads `AD_SALES`) is gross and uses a "
+        f"14-day attribution window in Amazon's PST timezone — a click "
+        f"this week can still book a sale next week. Revenue (P&L "
+        f"`SALES_ACTUAL`) is net of refunds in IST settlement date. "
+        f"Different denominators + refund timing can push paid > net "
+        f"for short windows; it converges over months."
     )
 
 
