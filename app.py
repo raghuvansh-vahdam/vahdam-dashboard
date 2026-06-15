@@ -2604,20 +2604,23 @@ def _sales_mkt_col(*candidates):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_asin_rolling(asin, geo, sfx):
-    """Fetch the LAST 90 DAYS of (units, revenue, spend, sessions) for one
+    """Fetch the LAST 180 DAYS of (units, revenue, spend, sessions) for one
     ASIN, regardless of the user-selected window. Used to build the
-    rolling 7 / 30 / 90 day cards so they are always accurate even when
-    the user picked a short window. Returns one row per day with columns
-    DAY, REVENUE, UNITS, SPEND, SESSIONS. Sessions come from
+    rolling 7 / 30 / 90 day cards AND the 4 most-recently-completed full
+    calendar-month rows in the same table — both always accurate even
+    when the user picked a short window. Returns one row per day with
+    columns DAY, REVENUE, UNITS, SPEND, SESSIONS. Sessions come from
     vahdam_amazon_sales_marketing — the sessions column name is discovered
     dynamically and the column degrades gracefully to 0 if missing.
 
     Anchored to the 3pm-IST effective day (see _eff_today_ist) so the
-    90-day window ends on the freshest fully-loaded day — partial-day
-    today never contaminates the rolling totals.
+    window ends on the freshest fully-loaded day — partial-day today
+    never contaminates the rolling totals.
     """
     today_ = _eff_today_ist()
-    d_start = today_ - timedelta(days=89)
+    # 180 days = enough headroom to cover 4 prior full calendar months
+    # even when the user lands on day-1 of a month.
+    d_start = today_ - timedelta(days=179)
     a = asin.replace("'", "''")
 
     pnl = run_query(f"""
@@ -8020,20 +8023,40 @@ def render_asin_detail():
         r   = _sumlbl(slice_, "REVENUE")
         sp  = _sumlbl(slice_, "SPEND")
         ses = _sumlbl(slice_, "SESSIONS")
-        asp = (r / u) if (r is not None and u) else None
-        cr  = (u / ses * 100.0) if (u is not None and ses) else None
+        asp  = (r / u) if (r is not None and u) else None
+        cr   = (u / ses * 100.0) if (u is not None and ses) else None
+        acos = (sp / r * 100.0) if (r is not None and sp is not None and r) else None
         return {"Window": label,
                 "Units ordered": u,
                 "Sessions":      ses,
                 "CR%":           cr,
                 "Revenue":       r,
                 "Avg ASP":       asp,
-                "Spend":         sp}
+                "Spend":         sp,
+                "ACoS%":         acos}
+
+    # 4 most-recently-completed full calendar months. roll already covers
+    # the last 180 days so slicing by month range stays inside the cache.
+    def _month_slice(year, month):
+        if roll.empty:
+            return roll
+        m_start = date(year, month, 1)
+        m_end   = (date(year, month + 1, 1) if month < 12
+                   else date(year + 1, 1, 1)) - timedelta(days=1)
+        return roll[(roll["DAY"] >= pd.Timestamp(m_start)) &
+                    (roll["DAY"] <= pd.Timestamp(m_end))]
+    _month_rows = []
+    for _back in (4, 3, 2, 1):
+        _idx = (today_.year * 12 + today_.month - 1) - _back
+        _y, _m = _idx // 12, (_idx % 12) + 1
+        _lbl   = date(_y, _m, 1).strftime("%b'%y")   # Feb'26 style
+        _month_rows.append(_row(_lbl, _month_slice(_y, _m)))
 
     rolling = pd.DataFrame([
         _row("Last 7 days",  last7),
         _row("Last 30 days", last30),
         _row("Last 90 days", last90),
+        *_month_rows,
     ])
     rolling["Units ordered"] = rolling["Units ordered"].apply(
         lambda v: "—" if v is None else f"{v:,.0f}")
@@ -8045,15 +8068,20 @@ def render_asin_detail():
     rolling["Avg ASP"] = rolling["Avg ASP"].apply(
         lambda v: "—" if v is None else f"{sym}{v:,.2f}")
     rolling["Spend"]   = rolling["Spend"].apply(fmt_lakhs)
+    rolling["ACoS%"]   = rolling["ACoS%"].apply(
+        lambda v: "—" if v is None else f"{v:.1f}%")
     # height= triggers Streamlit's sticky header behaviour.
     st.dataframe(rolling, use_container_width=True, hide_index=True,
-                 height=min(360, 60 + len(rolling) * 38))
+                 height=min(420, 60 + len(rolling) * 38))
     st.caption(
-        "Rolling windows are computed from the last 90 days "
-        "regardless of the period selector above. "
-        "CR% = Units ÷ Sessions (sessions from "
-        "`vahdam_amazon_sales_marketing`; “—” means the table or column "
-        "isn't available for this GEO)."
+        "Rolling windows are computed from the last 180 days "
+        "regardless of the period selector above. The first three rows "
+        "are trailing 7/30/90-day windows ending on today's data "
+        "cutoff; the last four rows are full calendar months "
+        "(most-recent on the bottom). "
+        "CR% = Units ÷ Sessions; ACoS% = Spend ÷ Revenue × 100 "
+        "(sessions from `vahdam_amazon_sales_marketing`; “—” means the "
+        "table or column isn't available for this GEO)."
     )
 
     # ── Time-series chart with rich hover (Revenue, ASP, Units, Spend, ACoS) ──
