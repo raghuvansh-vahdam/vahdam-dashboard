@@ -4474,6 +4474,11 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
                                     THEN DAY END)                        AS ACT_UNIT_DAYS,
                 SUM(SALES_BUDGET_{sfx})                                  AS BUD_REVENUE_RAW,
                 SUM(SALES_ACTUAL_{sfx})                                  AS ACT_REVENUE_RAW,
+                -- Local-currency net sales kept alongside the sfx version
+                -- so Paid Sale % can divide AD_SALES (always local) by a
+                -- matching-currency denominator regardless of the user's
+                -- sfx toggle. Avoids the cross-currency ratio bug.
+                SUM(SALES_ACTUAL_LOCAL)                                  AS ACT_REVENUE_LOCAL_RAW,
                 SUM(CM1_BUDGET_{sfx})                                    AS CM1_BUD_RAW,
                 SUM(CM1_ACTUAL_{sfx})                                    AS CM1_ACT_RAW,
                 SUM(PM_SPEND_BUDGET_{sfx})                               AS SPEND_BUD_RAW,
@@ -4508,6 +4513,19 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             FROM {TABLE}
             WHERE DAY BETWEEN '{d_30}' AND '{eff_today}'
               AND GEO = '{geo}' AND {GEO_EXCL}
+              AND ASIN IS NOT NULL AND ASIN != ''
+            GROUP BY SPLIT_PART(ASIN,' ',1)
+        ),
+        mkt_pd AS (
+            -- Paid-attributed revenue for the selected period. AD_SALES is
+            -- always in LOCAL currency (USD/GBP/EUR/...) — we pair it with
+            -- ACT_REVENUE_LOCAL_RAW (also local) in the SELECT so Paid
+            -- Sale % stays currency-consistent regardless of sfx toggle.
+            SELECT SPLIT_PART(ASIN,' ',1)            AS ASIN_KEY,
+                   SUM(AD_SALES)                     AS PAID_REV_LOCAL_RAW
+            FROM {MKTG}
+            WHERE DAY BETWEEN '{d_from_}' AND '{d_to_}'
+              AND GEO = '{geo}'
               AND ASIN IS NOT NULL AND ASIN != ''
             GROUP BY SPLIT_PART(ASIN,' ',1)
         ),
@@ -4617,6 +4635,11 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
             -- (PM Spend 7d + GADS Spend 7d) / Revenue 7d × 100.
             ROUND((COALESCE(r.SPEND_7D, 0) + COALESCE(r.GADS_7D, 0))
                     / NULLIF(r.REV_7D, 0) * 100, 1)                                  AS ACT_ACOS_7D_PCT,
+            -- Paid Sale % = paid-attributed revenue (Amazon Ads AD_SALES)
+            -- ÷ total net revenue × 100. Both numerator and denominator
+            -- are kept in LOCAL currency to stay sfx-toggle-safe.
+            ROUND(COALESCE(m.PAID_REV_LOCAL_RAW, 0)
+                    / NULLIF(p.ACT_REVENUE_LOCAL_RAW, 0) * 100, 1)                   AS PCT_PAID_SALES,
             -- Margin / ad-cost % (ratios of selected-period absolutes)
             -- ACoS Actual = (PM Spend + Google Ads Spend) / Sales × 100
             ROUND(p.CM1_BUD_RAW   / NULLIF(p.BUD_REVENUE_RAW, 0) * 100, 1)          AS BUD_CM1_PCT,
@@ -4647,6 +4670,7 @@ def get_cr_tracker_data(geo, d_from_, d_to_, sfx):
         FROM pnl p
         LEFT JOIN roll r ON p.ASIN_KEY = r.ASIN_KEY
         LEFT JOIN inv  i ON UPPER(p.ASIN_KEY) = i.ASIN_KEY
+        LEFT JOIN mkt_pd m ON p.ASIN_KEY = m.ASIN_KEY
         LEFT JOIN pm   pm ON p.ASIN_KEY = pm.ASIN_KEY
         LEFT JOIN pm1  pm1 ON p.ASIN_KEY = pm1.ASIN_KEY
         {sess_joins}
@@ -7067,6 +7091,10 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                 ("ACT_CM1_PCT",     "Act CM1%"),
                 ("BUD_ACOS_PCT",    "Bud ACoS%"),
                 ("ACT_ACOS_PCT",    "Act ACoS%"),
+                # Paid Sale % = AD_SALES ÷ Net Sales × 100 — sits with the
+                # ad-economics block (Bud/Act ACoS%) so the reader sees
+                # spend ratio + paid-share contribution side-by-side.
+                ("PCT_PAID_SALES",  "Paid Sale %"),
                 ("ACT_SPEND",       "PM Spend"),
                 ("GADS_SPEND_ACT",  "GADS Spend"),
                 # Past-7-Day ACoS% — same (PM+GADS)/Sales formula as Act ACoS%
@@ -7207,6 +7235,13 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                     format="%.1f%%",
                     help="ACoS = (PM Spend + GADS Spend) ÷ Sales × 100. "
                          "Includes both Amazon Ads and Google Ads spend."),
+                "Paid Sale %":     st.column_config.NumberColumn(
+                    format="%.1f%%",
+                    help="Share of net sales that came from paid ads "
+                         "(Amazon Ads AD_SALES ÷ Net Sales × 100). Both "
+                         "numerator and denominator are in LOCAL currency "
+                         "so the ratio stays correct regardless of the "
+                         "sidebar's Currency toggle."),
                 "PM Spend":        st.column_config.NumberColumn(
                     format=f"{currency_sym}%,.0f",
                     help="Performance Marketing (Amazon Ads) spend — actuals."),
