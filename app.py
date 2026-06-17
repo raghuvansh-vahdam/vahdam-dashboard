@@ -7035,9 +7035,13 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
         if cr.empty:
             st.info("📭 No ASIN data found for this GEO in the selected range.")
         else:
-            # Brand + Sub-Category filters side-by-side
-            brand_opts    = sorted(b for b in cr["BRAND"].dropna().unique() if str(b).strip())
-            sub_cat_opts  = sorted(s for s in cr["SUB_CATEGORY"].dropna().unique() if str(s).strip())
+            # Brand + AMZ Sub Category filters side-by-side. AMZ Sub
+            # Category (Amazon's AMZ_CATEGORY tag — Black Teas, HP - Teas,
+            # Samplers, …) is the more useful slice for ad-spend
+            # decisioning than the internal Sub-Category taxonomy, so we
+            # filter on that column here.
+            brand_opts        = sorted(b for b in cr["BRAND"].dropna().unique() if str(b).strip())
+            amz_subcat_opts   = sorted(s for s in cr["AMZ_SUB_CATEGORY"].dropna().unique() if str(s).strip())
             fc1, fc2 = st.columns(2, gap="medium")
             with fc1:
                 picked_brands = st.multiselect(
@@ -7045,14 +7049,14 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                     brand_opts, default=[], placeholder="All brands",
                     key=f"cr_brand_{geo}") if len(brand_opts) > 1 else []
             with fc2:
-                picked_subcats = st.multiselect(
-                    f"🗂 Filter by Sub-Category ({len(sub_cat_opts)} available)",
-                    sub_cat_opts, default=[], placeholder="All sub-categories",
-                    key=f"cr_subcat_{geo}") if len(sub_cat_opts) > 1 else []
+                picked_amz_subcats = st.multiselect(
+                    f"🗂 Filter by AMZ Sub Category ({len(amz_subcat_opts)} available)",
+                    amz_subcat_opts, default=[], placeholder="All AMZ sub-categories",
+                    key=f"cr_amz_subcat_{geo}") if len(amz_subcat_opts) > 1 else []
             if picked_brands:
                 cr = cr[cr["BRAND"].isin(picked_brands)].reset_index(drop=True)
-            if picked_subcats:
-                cr = cr[cr["SUB_CATEGORY"].isin(picked_subcats)].reset_index(drop=True)
+            if picked_amz_subcats:
+                cr = cr[cr["AMZ_SUB_CATEGORY"].isin(picked_amz_subcats)].reset_index(drop=True)
 
             # Build column list — USA gets FBA + ADW + Total Inv; others Total only
             inv_cols = ([("FBA_INV", "FBA Inv"),
