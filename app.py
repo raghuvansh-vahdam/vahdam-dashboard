@@ -9623,6 +9623,46 @@ def render_pnl():
                             hovertemplate=(f"<b>{name}</b><br>%{{x|%d %b}}<br>"
                                            f"{sym}%{{y:.2f}}{_unit}<extra></extra>"),
                         ))
+
+                # ── ACoS% per day on a secondary y-axis ──
+                # ACoS% Actual = (PM Spend + GADS Spend) / Sales × 100
+                # ACoS% Budget = PM Spend Budget / Sales Budget × 100
+                #               (no GADS budget column in the P&L feed)
+                # Plotted on yaxis="y2" so the % scale doesn't squash the
+                # ₹-denominated lines above. Default visibility =
+                # 'legendonly' so the chart stays uncluttered — click the
+                # legend entry to toggle them on; they still appear in
+                # the unified hover tooltip on every data point.
+                _sales_act = pd.to_numeric(daily.get("SALES_ACT"), errors="coerce")
+                _sales_bud = pd.to_numeric(daily.get("SALES_BUD"), errors="coerce")
+                _pm_act    = pd.to_numeric(daily.get("PM_SPEND_ACT"), errors="coerce")
+                _pm_bud    = pd.to_numeric(daily.get("PM_SPEND_BUD"), errors="coerce")
+                _gads_act  = pd.to_numeric(daily.get("GOOGLE_SPEND_ACT"),
+                                            errors="coerce").fillna(0) \
+                              if "GOOGLE_SPEND_ACT" in daily.columns \
+                              else pd.Series([0] * len(daily))
+                _acos_act = (_pm_act.fillna(0) + _gads_act) / _sales_act.replace(0, pd.NA) * 100
+                _acos_bud = _pm_bud / _sales_bud.replace(0, pd.NA) * 100
+                _acos_act = pd.to_numeric(_acos_act, errors="coerce")
+                _acos_bud = pd.to_numeric(_acos_bud, errors="coerce")
+                fig.add_trace(go.Scatter(
+                    x=daily["DAY"], y=_acos_act, mode="lines+markers",
+                    name="ACoS% (Actual)", yaxis="y2",
+                    line=dict(color="#8b1a1a", dash="solid", width=2),
+                    marker=dict(size=5),
+                    visible="legendonly",
+                    hovertemplate=("<b>ACoS% (Actual)</b><br>%{x|%d %b}<br>"
+                                   "%{y:.1f}%<extra></extra>"),
+                ))
+                fig.add_trace(go.Scatter(
+                    x=daily["DAY"], y=_acos_bud, mode="lines+markers",
+                    name="ACoS% (Budget)", yaxis="y2",
+                    line=dict(color="#8b1a1a", dash="dot", width=2),
+                    marker=dict(size=5),
+                    visible="legendonly",
+                    hovertemplate=("<b>ACoS% (Budget)</b><br>%{x|%d %b}<br>"
+                                   "%{y:.1f}%<extra></extra>"),
+                ))
                 _title_unit = f" (₹ {_unit})" if _unit else ""
                 fig.update_layout(
                     title=dict(text=f"<b>Daily P&L Trend</b>{_title_unit}",
@@ -9633,6 +9673,13 @@ def render_pnl():
                     legend=dict(orientation="h", yanchor="bottom", y=-0.4,
                                 bgcolor="rgba(0,0,0,0)"),
                     hovermode="x unified",
+                    yaxis2=dict(
+                        title=dict(text="ACoS %",
+                                   font=dict(color="#8b1a1a", size=11)),
+                        overlaying="y", side="right",
+                        showgrid=False,
+                        tickfont=dict(color="#8b1a1a", size=10),
+                        ticksuffix="%"),
                 )
                 fig.update_xaxes(title_text="Date", showgrid=True, gridcolor="rgba(171,135,67,0.15)")
                 fig.update_yaxes(title_text=f"₹ {_unit}".strip(),
