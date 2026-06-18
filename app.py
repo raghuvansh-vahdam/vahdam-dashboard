@@ -1728,36 +1728,6 @@ with st.sidebar:
         st.session_state.view = "customer_insights"
         st.rerun()
 
-    # ── Refresh data ──
-    # Clear ALL @st.cache_data results EXCEPT the Keepa price-tracker
-    # functions. Keepa charges a token per ASIN refresh, so the Price
-    # Tracker is locked to one auto-refresh per day at 14:00 IST (see
-    # `_keepa_refresh_window`). No user can force-burn the daily quota
-    # via this button.
-    st.markdown("---")
-    if st.button("🔄 Refresh data", use_container_width=True, key="refresh_data",
-                 help="Clear Snowflake cache and refetch. Price Tracker "
-                      "auto-refreshes once a day per geo: 2pm IST for "
-                      "USA/UK/DE/FR, 3pm IST for CA/IT/ES/AUS/UAE (small "
-                      "geos wait so Keepa tokens have replenished). "
-                      "This button does NOT clear Keepa caches — see "
-                      "the Price Tracker page for the lockout reason."):
-        _keepa_protected = {"_fetch_keepa_chunk", "fetch_keepa_products"}
-        for _name, _obj in list(globals().items()):
-            if _name in _keepa_protected:
-                continue
-            _clr = getattr(_obj, "clear", None)
-            if callable(_clr):
-                try:
-                    _clr()
-                except Exception:
-                    pass
-        st.rerun()
-    from datetime import datetime as _dt
-    st.markdown(f"<div style='font-size:10.5px;color:#AB8743;text-align:center;"
-                f"margin-top:4px;'>Last loaded · {_dt.now().strftime('%H:%M:%S')}"
-                f"</div>", unsafe_allow_html=True)
-
     # ── Dark mode toggle ──
     # Lives at the bottom of the sidebar (below Refresh data) so the top
     # stays focused on the filters / search / navigation that users touch
