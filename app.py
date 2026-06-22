@@ -5477,7 +5477,18 @@ def build_country_perf_chart(view1_df, fm_df=None):
         return None
     t = view1_df[view1_df["CHANNEL"] == "TOTAL"].copy()
     t["REV_PCT_n"] = pd.to_numeric(t["REV_PCT"], errors="coerce")
-    t = t.dropna(subset=["REV_PCT_n"]).copy()
+    # Previously dropped rows with NaN REV_PCT (no budget set, e.g.
+    # India in MTD Jun 2026). That hid those geos from the chart even
+    # when they had real actuals. Now we keep the row, render the bar in
+    # a neutral grey with "(no budget)" hover, and let the user see the
+    # actual revenue side-by-side with budgeted geos. Filter only on
+    # rows that have neither actuals nor budget so empty marketplaces
+    # don't clutter the chart.
+    _has_act_bud = (
+        pd.to_numeric(t.get("SALES_ACT"), errors="coerce").fillna(0).abs()
+        + pd.to_numeric(t.get("SALES_BUD"), errors="coerce").fillna(0).abs()
+    ) > 0
+    t = t[_has_act_bud].copy()
     if t.empty: return None
     # Sort by ABSOLUTE revenue (descending) so the biggest market sits at
     # the top of the chart. The y-axis below uses autorange="reversed",
@@ -5537,9 +5548,13 @@ def build_country_perf_chart(view1_df, fm_df=None):
         _fm_sales_v = _f(fm_sales.iloc[i])
         _fm_qty_v   = _f(fm_qty.iloc[i])
         _fm_cm2a_v  = _f(fm_cm2a.iloc[i])
+        # REV_PCT can be NaN when budget is missing (e.g. India before
+        # finance loads the IN budget). Guard the f-string so the chart
+        # still renders — the hover just shows "—" for that geo.
+        _rev_pct_v = _f(t["REV_PCT_n"].iloc[i])
         cd = [
             fmt_lakhs(sales_act.iloc[i]),     fmt_lakhs(sales_bud.iloc[i]),
-            f"{_f(t['REV_PCT_n'].iloc[i]):.1f}%",
+            (f"{_rev_pct_v:.1f}%" if _rev_pct_v is not None else "—"),
             _pct_str(_f(cm1_act.iloc[i])),    _pct_str(_f(cm1_bud.iloc[i])),
             _pp_str(_ppdiff([cm1_act.iloc[i]], [cm1_bud.iloc[i]])[0]),
             _pct_str(_f(acos_act.iloc[i])),   _pct_str(_f(acos_bud.iloc[i])),
