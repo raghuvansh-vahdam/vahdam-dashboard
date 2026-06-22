@@ -925,9 +925,13 @@ MKTG           = "vahdam_db.maplemonk.VAHDAM_AMAZON_MARKETING"
 SALES_MKT      = "vahdam_db.maplemonk.VAHDAM_AMAZON_SALES_MARKETING"
 INV_3P         = "vahdam_db.maplemonk.vahdam_amazon_3P_inv"
 REVIEWS        = "vahdam_db.maplemonk.Amazon_reviews_detailed_reviews"
-GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS"]
+GEO_ORDER = ["USA", "UK", "DE", "IT", "FR", "ES", "CA", "UAE", "AUS", "IN"]
 GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)])
-GEO_EXCL  = "GEO NOT IN ('IN', 'MX')"
+# Mexico stays excluded (negligible volume + reported separately by
+# finance). India was previously excluded too but is now surfaced
+# alongside the other geos — it appears in the sidebar GEO filter,
+# country perf chart, P&L by country, CR Tracker, ASIN view, etc.
+GEO_EXCL  = "GEO NOT IN ('MX')"
 
 # ── AMZ_CATEGORY canonicalizer ──────────────────────────────────────────────
 # The AMZ_CATEGORY column in the P&L table has dirty duplicates:
