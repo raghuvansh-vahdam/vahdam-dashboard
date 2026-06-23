@@ -5582,8 +5582,28 @@ def build_country_perf_chart(view1_df, fm_df=None):
         return "#8b1a1a"
     colors = [_bar_color(_f(v)) for v in t["REV_PCT_n"]]
 
-    rev_x = [min(max(_f(v) or 0, 0), 150) for v in t["REV_PCT_n"]]
-    labels = [f"{_f(v):.1f}%" if _f(v) is not None else "—" for v in t["REV_PCT_n"]]
+    # Bar width:
+    #   * If REV_PCT is a real number → use it (clamped to 0-150 so the
+    #     chart axis stays bounded).
+    #   * If REV_PCT is NaN (no budget set — e.g. India) → render the bar
+    #     at the 100 % mark in neutral grey, with the actual revenue
+    #     printed outside instead of a % label. Keeps the geo visually
+    #     present on the chart even without a budget reference.
+    _sales_act_vals = [_f(v) for v in t["SALES_ACT"]]
+    rev_x = []
+    labels = []
+    for i, v in enumerate(t["REV_PCT_n"]):
+        _vf = _f(v)
+        if _vf is None:
+            rev_x.append(100)
+            labels.append(
+                f"{fmt_lakhs(_sales_act_vals[i])} · no budget"
+                if _sales_act_vals[i] is not None
+                else "no budget"
+            )
+        else:
+            rev_x.append(min(max(_vf, 0), 150))
+            labels.append(f"{_vf:.1f}%")
 
     fig = go.Figure(go.Bar(
         x=rev_x,
