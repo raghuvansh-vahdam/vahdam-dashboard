@@ -916,6 +916,87 @@ st.markdown("""
     /* ── Misc ── */
     hr { border-color: #d6ccba; }
     .small-muted { font-size: 11px; color: #7a6a50; }
+
+    /* ══ Interaction polish pack ══════════════════════════════════════
+       Micro-interactions that make the dashboard feel responsive:
+       nav active-states, hover feedback everywhere, branded scrollbars,
+       and smooth transitions. Pure CSS — zero runtime cost. */
+
+    /* ── Sidebar navigation ── */
+    /* Left-align nav labels so the icon column lines up like a menu,
+       and give every nav button a hover slide + smooth transition. */
+    section[data-testid="stSidebar"] .stButton > button {
+        justify-content: flex-start !important;
+        text-align: left !important;
+        transition: transform .12s ease, box-shadow .12s ease,
+                    background .15s ease, border-color .15s ease;
+    }
+    section[data-testid="stSidebar"] .stButton > button:hover {
+        transform: translateX(3px);
+    }
+    /* Active view = Streamlit `primary` button. Restyle from Streamlit's
+       default red to the brand forest-green gradient with a gold left
+       rail, so the current page reads instantly. */
+    section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background: linear-gradient(90deg, #0b5c38 0%, #0e6b41 100%) !important;
+        color: #FBF5EA !important;
+        border: 1px solid #0b5c38 !important;
+        border-left: 4px solid #E0B54C !important;
+        font-weight: 700 !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
+    }
+    section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+        transform: none;               /* active item shouldn't slide */
+        filter: brightness(1.08);
+    }
+
+    /* ── Table row hover ── */
+    /* Streamlit's glide-data-grid draws rows as canvas so CSS can't
+       reach them, but the styled-HTML tables (P&L statement, DBR
+       mini-tables) are real <tr>s — give them a warm hover tint. */
+    .stMarkdown table tbody tr { transition: background .12s ease; }
+    .stMarkdown table tbody tr:hover { background: #f3ecdc !important; }
+
+    /* ── Branded scrollbars (WebKit + Firefox) ── */
+    * { scrollbar-width: thin; scrollbar-color: #C9A76A #f3ecdc; }
+    *::-webkit-scrollbar { width: 9px; height: 9px; }
+    *::-webkit-scrollbar-track { background: #f3ecdc; }
+    *::-webkit-scrollbar-thumb {
+        background: #C9A76A; border-radius: 5px;
+        border: 2px solid #f3ecdc;
+    }
+    *::-webkit-scrollbar-thumb:hover { background: #AB8743; }
+
+    /* ── Tabs: clearer selected state + hover ── */
+    .stTabs [data-baseweb="tab"] {
+        transition: color .12s ease, background .12s ease;
+        border-radius: 6px 6px 0 0;
+    }
+    .stTabs [data-baseweb="tab"]:hover { background: rgba(171,135,67,0.10); }
+    .stTabs [aria-selected="true"] { font-weight: 700; }
+
+    /* ── Inputs: focus ring in brand gold ── */
+    [data-testid="stSidebar"] [data-baseweb="select"]:focus-within,
+    [data-testid="stSidebar"] [data-baseweb="input"]:focus-within {
+        box-shadow: 0 0 0 2px rgba(224,181,76,0.45);
+        border-radius: 8px;
+        transition: box-shadow .15s ease;
+    }
+
+    /* ── Expander hover (Filters etc.) ── */
+    [data-testid="stExpander"] summary {
+        transition: color .12s ease;
+    }
+    [data-testid="stExpander"] summary:hover { color: #E0B54C !important; }
+
+    /* ── Download / CSV buttons: subtle lift ── */
+    .stDownloadButton > button {
+        transition: transform .12s ease, box-shadow .12s ease;
+    }
+    .stDownloadButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 3px 8px rgba(0,74,43,0.15);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1553,6 +1634,36 @@ with st.sidebar:
         Amazon P&L Dashboard</div>""", unsafe_allow_html=True)
     st.markdown("---")
 
+    # ── Navigation ──
+    # Lives at the TOP of the sidebar (it used to sit below all the
+    # filters, forcing a scroll just to change pages). Each entry gets an
+    # icon and the current view renders as a `primary` button so users
+    # always know where they are. Drill-down views (Sub-Category / ASIN /
+    # ASIN Deep Dive) highlight their parent "Executive Summary" entry.
+    _NAV_ITEMS = [
+        ("ceo",               "📊", "Executive Summary"),
+        ("overview",          "🧭", "Overview"),
+        ("pnl",               "📒", "P&L Statement"),
+        ("dbr",               "📅", "DBR"),
+        ("category",          "🗂️", "Category"),
+        ("new_business",      "🚀", "New Business"),
+        ("price",             "🏷️", "Price Tracker"),
+        ("customer_insights", "💬", "Customer Insights"),
+    ]
+    _NAV_PARENT = {"subcat": "ceo", "asin": "ceo", "asin_detail": "ceo"}
+    _cur_nav_view = st.session_state.get("view", "ceo")
+    _active_nav   = _NAV_PARENT.get(_cur_nav_view, _cur_nav_view)
+    st.markdown('<div class="vahdam-nav">', unsafe_allow_html=True)
+    for _vkey, _icon, _lbl in _NAV_ITEMS:
+        if st.button(f"{_icon}  {_lbl}", use_container_width=True,
+                     key=f"nav_{_vkey}",
+                     type=("primary" if _active_nav == _vkey
+                           else "secondary")):
+            st.session_state.view = _vkey
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("---")
+
     # View-aware currency default:
     #   * Rollup views (CEO / Overall / Category / Sub-Category / P&L / DBR)
     #     default to INR — exec-level reads stay denominated in the home
@@ -1661,76 +1772,76 @@ with st.sidebar:
             f"FROM {TABLE} WHERE {GEO_EXCL}")
     opts = get_options()
 
-    st.markdown("#### Filters")
-    if st.button("⟲ Clear all filters", use_container_width=True,
-                 key="clear_filters",
-                 help="Reset Brand / Category / Channel / GEO / Sub-Category / "
-                      "AMZ Sub Category / SKU search"):
-        for k in ["flt_brand","flt_cat","flt_channel","flt_geo",
-                  "flt_subcat","flt_amz_subcat","sku_search"]:
-            st.session_state.pop(k, None)
-        st.rerun()
+    # Filters live inside a collapsible expander so the sidebar stays
+    # short when nothing is filtered. The label carries a live count of
+    # active filters (read from session_state — the previous run's
+    # values, which is always current because every multiselect change
+    # triggers a rerun). Auto-expands whenever a filter is active so the
+    # user can see at a glance what's constraining the data.
+    _flt_keys  = ["flt_brand", "flt_cat", "flt_channel",
+                  "flt_geo", "flt_subcat", "flt_amz_subcat"]
+    _active_n  = sum(1 for k in _flt_keys if st.session_state.get(k))
+    _flt_label = (f"🎛️ Filters · {_active_n} active"
+                  if _active_n else "🎛️ Filters")
+    with st.expander(_flt_label, expanded=bool(_active_n)):
+        if st.button("⟲ Clear all filters", use_container_width=True,
+                     key="clear_filters",
+                     help="Reset Brand / Category / Channel / GEO / Sub-Category / "
+                          "AMZ Sub Category / SKU search"):
+            for k in _flt_keys + ["sku_search"]:
+                st.session_state.pop(k, None)
+            st.rerun()
 
-    f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
-                               key="flt_brand")
-    f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
-                               key="flt_cat")
-    _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
-    _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
-    _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
-    f_channel = [c.replace(" ", "_") for c in _ch_pick]
-    f_geo     = st.multiselect("GEO",
-                               [g for g in GEO_ORDER if g in opts["GEO"].dropna().unique()],
-                               key="flt_geo")
-    f_subcat  = st.multiselect("Sub-Category", sorted(opts["SUB_CATEGORY"].dropna().unique()),
-                               key="flt_subcat")
-    # AMZ Sub Category — Amazon's finer-grained AMZ_CATEGORY tag from
-    # the P&L table (e.g. Black Teas, Samplers, Green Teas, Herbal Teas,
-    # HP - Teas, HP - Spices, Matcha, Single Spices, Iced Teas …). This
-    # is distinct from the broader CATEGORY column above (which only
-    # has Tea and Botanicals / Supplements / Coffee) and from
-    # SUB_CATEGORY (Vahdam's internal sub-category taxonomy).
-    f_amz_subcat = st.multiselect(
-        "AMZ Sub Category",
-        sorted(opts["AMZ_CATEGORY"].dropna().unique()),
-        key="flt_amz_subcat",
-        help="Amazon's AMZ_CATEGORY tag from the FY27 P&L table "
-             "(Black Teas, Samplers, Green Teas, HP - Teas, etc.). "
-             "Distinct from the broader Category filter above and "
-             "from Sub-Category.")
+        f_brand   = st.multiselect("Brand",        sorted(opts["BRAND"].dropna().unique()),
+                                   key="flt_brand")
+        f_cat     = st.multiselect("Category",     sorted(opts["CATEGORY"].dropna().unique()),
+                                   key="flt_cat")
+        _ch_raw   = sorted(opts["CHANNEL"].dropna().unique())
+        _ch_disp  = [c.replace("_", " ") for c in _ch_raw]
+        _ch_pick  = st.multiselect("Channel", _ch_disp, key="flt_channel")
+        f_channel = [c.replace(" ", "_") for c in _ch_pick]
+        f_geo     = st.multiselect("GEO",
+                                   [g for g in GEO_ORDER if g in opts["GEO"].dropna().unique()],
+                                   key="flt_geo")
+        f_subcat  = st.multiselect("Sub-Category", sorted(opts["SUB_CATEGORY"].dropna().unique()),
+                                   key="flt_subcat")
+        # AMZ Sub Category — Amazon's finer-grained AMZ_CATEGORY tag from
+        # the P&L table (e.g. Black Teas, Samplers, Green Teas, Herbal Teas,
+        # HP - Teas, HP - Spices, Matcha, Single Spices, Iced Teas …). This
+        # is distinct from the broader CATEGORY column above (which only
+        # has Tea and Botanicals / Supplements / Coffee) and from
+        # SUB_CATEGORY (Vahdam's internal sub-category taxonomy).
+        f_amz_subcat = st.multiselect(
+            "AMZ Sub Category",
+            sorted(opts["AMZ_CATEGORY"].dropna().unique()),
+            key="flt_amz_subcat",
+            help="Amazon's AMZ_CATEGORY tag from the FY27 P&L table "
+                 "(Black Teas, Samplers, Green Teas, HP - Teas, etc.). "
+                 "Distinct from the broader Category filter above and "
+                 "from Sub-Category.")
 
-    # Active-filter count badge
-    _active = sum(1 for x in [f_brand, f_cat, f_channel, f_geo,
-                              f_subcat, f_amz_subcat] if x)
-    if _active:
-        st.caption(f"🔵 {_active} filter{'s' if _active != 1 else ''} active")
+    # Compact chip strip under the expander summarising what's active —
+    # visible even when the expander is collapsed.
+    _chip_bits = []
+    for _lbl, _vals in [("Brand", st.session_state.get("flt_brand")),
+                        ("Cat",   st.session_state.get("flt_cat")),
+                        ("Ch",    st.session_state.get("flt_channel")),
+                        ("GEO",   st.session_state.get("flt_geo")),
+                        ("Sub",   st.session_state.get("flt_subcat")),
+                        ("AMZ",   st.session_state.get("flt_amz_subcat"))]:
+        if _vals:
+            _txt = ", ".join(str(v) for v in _vals[:2])
+            if len(_vals) > 2:
+                _txt += f" +{len(_vals)-2}"
+            _chip_bits.append(f"<b>{_lbl}:</b> {_txt}")
+    if _chip_bits:
+        st.markdown(
+            '<div style="font-size:10.5px;color:#C9A76A;line-height:1.7;'
+            'margin-top:-6px;">' + " · ".join(_chip_bits) + "</div>",
+            unsafe_allow_html=True)
 
-    # ── Navigation ──
-    st.markdown("---")
-    if st.button("Executive Summary", use_container_width=True, key="nav_ceo"):
-        st.session_state.view = "ceo"
-        st.rerun()
-    if st.button("Overview", use_container_width=True, key="nav_overview"):
-        st.session_state.view = "overview"
-        st.rerun()
-    if st.button("P&L Statement", use_container_width=True, key="nav_pnl"):
-        st.session_state.view = "pnl"
-        st.rerun()
-    if st.button("DBR", use_container_width=True, key="nav_dbr"):
-        st.session_state.view = "dbr"
-        st.rerun()
-    if st.button("Category", use_container_width=True, key="nav_category"):
-        st.session_state.view = "category"
-        st.rerun()
-    if st.button("New Business", use_container_width=True, key="nav_new_business"):
-        st.session_state.view = "new_business"
-        st.rerun()
-    if st.button("Price Tracker", use_container_width=True, key="nav_price"):
-        st.session_state.view = "price"
-        st.rerun()
-    if st.button("Customer Insights", use_container_width=True, key="nav_ci"):
-        st.session_state.view = "customer_insights"
-        st.rerun()
+    # (Navigation moved to the top of the sidebar — see the block right
+    # below the logo. It now carries icons + an active-view highlight.)
 
     # ── Dark mode toggle ──
     # Lives at the bottom of the sidebar (below Refresh data) so the top
