@@ -3,6 +3,7 @@ import snowflake.connector
 import pandas as pd
 import calendar
 import math
+import re
 import hmac
 import hashlib
 import time
@@ -1011,6 +1012,49 @@ GEO_CASE  = " ".join([f"WHEN '{g}' THEN {i+1}" for i, g in enumerate(GEO_ORDER)]
 # country perf chart, P&L by country, CR Tracker, ASIN view, etc.
 GEO_EXCL  = "GEO NOT IN ('MX')"
 
+# ── Dark-mode chart theming (single choke point) ─────────────────────────────
+# Every chart in the app is displayed through st.plotly_chart, so instead
+# of touching the ~17 places that hard-code plot_bgcolor="#FBF5EA", we wrap
+# st.plotly_chart once. When the sidebar dark-mode toggle is ON, the wrapper
+# re-skins the figure just before display: dark canvas, light fonts,
+# dark-tuned gridlines and hover cards. Light mode passes through untouched,
+# so the existing house style is unchanged by default.
+_DARK_CHART = dict(
+    bg="#0F1A14", font="#F5F0E0", title="#6CC791",
+    grid="rgba(201,167,106,0.18)", axisline="#2A3530",
+    tick="#A89A7A", hoverbg="#15241B", hoverborder="#6CC791",
+)
+
+_orig_plotly_chart = st.plotly_chart
+
+def _themed_plotly_chart(fig, *args, **kwargs):
+    if (st.session_state.get("theme") == "dark"
+            and fig is not None and hasattr(fig, "update_layout")):
+        try:
+            d = _DARK_CHART
+            fig.update_layout(
+                plot_bgcolor=d["bg"], paper_bgcolor=d["bg"],
+                font=dict(color=d["font"]),
+                hoverlabel=dict(bgcolor=d["hoverbg"],
+                                font=dict(color=d["font"]),
+                                bordercolor=d["hoverborder"]),
+                legend=dict(font=dict(color=d["font"])),
+            )
+            if fig.layout.title and fig.layout.title.text:
+                fig.update_layout(title_font_color=d["title"])
+            fig.update_xaxes(gridcolor=d["grid"], linecolor=d["axisline"],
+                             tickcolor=d["axisline"],
+                             tickfont=dict(color=d["tick"]),
+                             title_font_color=d["tick"])
+            fig.update_yaxes(gridcolor=d["grid"], linecolor=d["axisline"],
+                             tickfont=dict(color=d["tick"]),
+                             title_font_color=d["tick"])
+        except Exception:
+            pass   # never let theming break a chart render
+    return _orig_plotly_chart(fig, *args, **kwargs)
+
+st.plotly_chart = _themed_plotly_chart
+
 # ── AMZ_CATEGORY canonicalizer ──────────────────────────────────────────────
 # The AMZ_CATEGORY column in the P&L table has dirty duplicates:
 #   * "Gifts" vs "gifts"
@@ -1722,6 +1766,42 @@ with st.sidebar:
     st.markdown("#### Search")
     sku_search = st.text_input("SKU / ASIN / Product",
                                placeholder="e.g. B09YXMVQTV…", key="sku_search")
+
+    # ── ASIN quick-jump (command-palette style) ──
+    # When the search text is a complete ASIN (B0 + 8 alphanumerics),
+    # offer one-click "open ASIN 360°" buttons — one per marketplace the
+    # ASIN sells in, ordered by revenue. The click records a jump request
+    # in session_state (render_asin_360_modal isn't defined yet at this
+    # point in the module), which the router consumes on the next run.
+    _asin_m = re.match(r"^\s*(B0[A-Z0-9]{8})\s*$", (sku_search or "").upper())
+    if _asin_m:
+        _jump_asin = _asin_m.group(1)
+
+        @st.cache_data(ttl=3600, show_spinner=False)
+        def _asin_jump_targets(a):
+            return run_query(f"""
+                SELECT GEO,
+                       MAX(COALESCE(NULLIF(COMMON_SKU_DESCRIPTION,''), ASIN))
+                                                        AS PRODUCT_NAME,
+                       ROUND(SUM(SALES_ACTUAL_INR), 0)  AS REV
+                FROM {TABLE}
+                WHERE SPLIT_PART(ASIN,' ',1) = '{a}' AND {GEO_EXCL}
+                GROUP BY GEO
+                ORDER BY REV DESC NULLS LAST
+            """)
+        _jt = _asin_jump_targets(_jump_asin)
+        if _jt.empty:
+            st.caption("🔍 No marketplace found for this ASIN.")
+        else:
+            st.caption("⚡ Quick open · ASIN 360°")
+            for _, _jr in _jt.iterrows():
+                if st.button(f"🔎 {_jump_asin} · {_jr['GEO']}",
+                             use_container_width=True,
+                             key=f"asin_jump_{_jump_asin}_{_jr['GEO']}"):
+                    st.session_state["_asin_jump_req"] = (
+                        _jump_asin, str(_jr["GEO"]),
+                        str(_jr["PRODUCT_NAME"]))
+                    st.rerun()
 
     # ── Filters ──
     @st.cache_data(ttl=7200)   # 2h — filter dropdown values rarely change
@@ -13386,6 +13466,18 @@ st.markdown("""
 
 
 view = st.session_state.view
+
+# ── ASIN quick-jump: consume a pending request from the sidebar search ──
+# The sidebar records (asin, geo, product_name) in session_state because
+# render_asin_360_modal isn't defined yet when the sidebar renders.
+# Popped (not read) so the modal fires exactly once per click and doesn't
+# re-open on subsequent reruns.
+_jump_req = st.session_state.pop("_asin_jump_req", None)
+if _jump_req:
+    try:
+        render_asin_360_modal(*_jump_req)
+    except Exception:
+        pass   # a failed jump should never take down the whole page
 
 # Pre-warm critical caches on the first session render. Runs ONCE per
 # session (guarded by session_state flag inside _warm_critical_caches).
