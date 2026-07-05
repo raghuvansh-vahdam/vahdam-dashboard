@@ -6330,48 +6330,6 @@ def render_ceo():
     kly = kpi_ly.iloc[0] if not kpi_ly.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
 
-    # ── Status banner (A1): the whole story in one line ──
-    # "Am I on plan and where am I bleeding?" answered before the user
-    # reads a single card. Verdict tier drives the left-border colour.
-    try:
-        _s_act, _s_bud = _f(k.get("SALES_ACT")), _f(k.get("SALES_BUD"))
-        _ach_pct = (_s_act / _s_bud * 100) if (_s_act and _s_bud) else None
-        _lag_geos = []
-        if df is not None and not df.empty and "REV_PCT" in df.columns:
-            for _r in df[df["CHANNEL"] == "TOTAL"].itertuples():
-                _rp = _f(getattr(_r, "REV_PCT", None))
-                if _rp is not None and _rp < 90:
-                    _lag_geos.append(str(_r.GEO))
-        _acos_a, _acos_b = _f(k.get("ACOS_ACT")), _f(k.get("ACOS_BUD"))
-        if _ach_pct is not None:
-            if _ach_pct >= 100:
-                _bcol, _bico, _bverdict = "#1a7a3e", "🟢", "On plan"
-            elif _ach_pct >= 90:
-                _bcol, _bico, _bverdict = "#AB8743", "🟡", "Slightly behind plan"
-            else:
-                _bcol, _bico, _bverdict = "#8b1a1a", "🔴", "Behind plan"
-            _bits = [f"<b>{_bverdict}</b> — {fmt_lakhs(_s_act)} · "
-                     f"{_ach_pct:.1f}% of budget"]
-            _bits.append(
-                (f"{len(_lag_geos)} market"
-                 f"{'s' if len(_lag_geos) != 1 else ''} behind plan "
-                 f"({', '.join(_lag_geos[:4])}"
-                 f"{'…' if len(_lag_geos) > 4 else ''})")
-                if _lag_geos else "all markets ≥90% of plan")
-            if _acos_a is not None and _acos_b is not None:
-                _bits.append("ACoS healthy" if _acos_a <= _acos_b
-                             else f"ACoS above budget "
-                                  f"({_acos_a:.1f}% vs {_acos_b:.1f}%)")
-            st.markdown(
-                f'<div style="border:1px solid #e3d6b8;'
-                f'border-left:4px solid {_bcol};background:#faf5e9;'
-                f'border-radius:8px;padding:8px 14px;margin:4px 0 10px 0;'
-                f'font-size:13.5px;color:#2b2b2b;">{_bico} '
-                + " &nbsp;·&nbsp; ".join(_bits) + "</div>",
-                unsafe_allow_html=True)
-    except Exception:
-        pass   # banner is garnish — never block the page
-
     # Narrative
     narrative = build_narrative(k, df if not df.empty else None)
     if narrative:
