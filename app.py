@@ -2197,6 +2197,18 @@ def _warm_critical_caches():
             lambda: get_pnl_agg(_where, sfx),
             lambda: get_pnl_daily(_where, sfx),
             lambda: get_dbr_data(d_from, d_to, sfx),
+            # E3 additions — the Exec Summary's comparison cards (LM /
+            # LY / FM) and the P&L breakdown tabs were the remaining
+            # cold spots: each stalled its section by a full query
+            # round-trip on first visit. Warm them alongside the rest.
+            lambda: get_kpis(build_where(date_from=lm_d_from,
+                                         date_to=lm_d_to), sfx),
+            lambda: get_kpis(build_where(date_from=ly_d_from,
+                                         date_to=ly_d_to), sfx),
+            lambda: get_kpis(_where_fm, sfx),
+            lambda: get_pnl_category(_where, sfx),
+            lambda: get_pnl_channel(_where, sfx),
+            lambda: get_data_freshness(),
         )
         # max_workers caps concurrent connection use; 6 is comfortably
         # below typical Snowflake account session limits.
@@ -2209,6 +2221,61 @@ def _warm_critical_caches():
         # views just pay the normal first-visit cost. Don't fail the
         # whole page just because pre-warm hiccuped.
         st.session_state._caches_warmed_v1 = True
+
+
+# ── Data-freshness badge (G1) ────────────────────────────────────────────────
+# One cheap cached query answers the recurring "is the data updated?"
+# question on every page: latest day with real actuals, per GEO. The
+# badge renders top-right on every view (single call site: the router).
+@st.cache_data(ttl=900, show_spinner=False)
+def get_data_freshness():
+    return run_query(f"""
+        SELECT GEO, MAX(DAY) AS LAST_DAY
+        FROM {TABLE}
+        WHERE COALESCE(SALES_ACTUAL_LOCAL, 0) > 0 AND {GEO_EXCL}
+        GROUP BY GEO
+    """)
+
+
+def render_freshness_badge():
+    """Small right-aligned pill: 'Data through <date> · USA → <date>'.
+    Lists up to 3 geos that lag the overall max so users instantly know
+    which marketplace is still syncing. Best-effort — never raises."""
+    try:
+        fr = get_data_freshness()
+        if fr is None or fr.empty:
+            return
+        fr = fr.copy()
+        fr["LAST_DAY"] = pd.to_datetime(fr["LAST_DAY"]).dt.date
+        overall = fr["LAST_DAY"].max()
+        lagging = fr[fr["LAST_DAY"] < overall].sort_values("LAST_DAY")
+        lag_txt = ""
+        if not lagging.empty:
+            bits = [f"{r.GEO} → {r.LAST_DAY.strftime('%d %b')}"
+                    for r in lagging.itertuples()][:3]
+            if len(lagging) > 3:
+                bits.append(f"+{len(lagging) - 3} more")
+            lag_txt = " · " + ", ".join(bits)
+        st.markdown(
+            f'<div style="text-align:right;margin-bottom:-4px;">'
+            f'<span style="display:inline-block;background:#eef7f0;'
+            f'border:1px solid #bfe0c8;border-radius:12px;padding:2px 10px;'
+            f'font-size:10.5px;color:#1a7a3e;" title="Latest day with '
+            f'loaded actuals per marketplace. Geos shown after the dot '
+            f'are still syncing.">🟢 Data through '
+            f'{overall.strftime("%d %b %Y")}{lag_txt}</span></div>',
+            unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+# ── Guided empty states (E2) ─────────────────────────────────────────────────
+def empty_state(what: str, hint: str = ""):
+    """Standard empty-state message: says WHAT is empty and, crucially,
+    what the user can do about it. Use instead of bare '📭 No data'."""
+    _hint = hint or ("Try widening the date range, clearing sidebar "
+                     "filters, or switching GEO.")
+    st.info(f"📭 {what}\n\n💡 {_hint}")
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -6253,12 +6320,57 @@ def render_ceo():
     df         = get_view1(where, sfx)
 
     if kpi.empty:
-        st.warning("📭 No data found for the selected filters.")
+        empty_state("No data found for the selected filters.",
+                    "This usually means the Brand / GEO / Category combo "
+                    "has no rows in this window — clear a filter or pick "
+                    "a wider date preset (e.g. Last 30 Days).")
         return
     k = kpi.iloc[0]
     klm = kpi_lm.iloc[0] if not kpi_lm.empty else None
     kly = kpi_ly.iloc[0] if not kpi_ly.empty else None
     kfm = kpi_fm.iloc[0] if not kpi_fm.empty else None
+
+    # ── Status banner (A1): the whole story in one line ──
+    # "Am I on plan and where am I bleeding?" answered before the user
+    # reads a single card. Verdict tier drives the left-border colour.
+    try:
+        _s_act, _s_bud = _f(k.get("SALES_ACT")), _f(k.get("SALES_BUD"))
+        _ach_pct = (_s_act / _s_bud * 100) if (_s_act and _s_bud) else None
+        _lag_geos = []
+        if df is not None and not df.empty and "REV_PCT" in df.columns:
+            for _r in df[df["CHANNEL"] == "TOTAL"].itertuples():
+                _rp = _f(getattr(_r, "REV_PCT", None))
+                if _rp is not None and _rp < 90:
+                    _lag_geos.append(str(_r.GEO))
+        _acos_a, _acos_b = _f(k.get("ACOS_ACT")), _f(k.get("ACOS_BUD"))
+        if _ach_pct is not None:
+            if _ach_pct >= 100:
+                _bcol, _bico, _bverdict = "#1a7a3e", "🟢", "On plan"
+            elif _ach_pct >= 90:
+                _bcol, _bico, _bverdict = "#AB8743", "🟡", "Slightly behind plan"
+            else:
+                _bcol, _bico, _bverdict = "#8b1a1a", "🔴", "Behind plan"
+            _bits = [f"<b>{_bverdict}</b> — {fmt_lakhs(_s_act)} · "
+                     f"{_ach_pct:.1f}% of budget"]
+            _bits.append(
+                (f"{len(_lag_geos)} market"
+                 f"{'s' if len(_lag_geos) != 1 else ''} behind plan "
+                 f"({', '.join(_lag_geos[:4])}"
+                 f"{'…' if len(_lag_geos) > 4 else ''})")
+                if _lag_geos else "all markets ≥90% of plan")
+            if _acos_a is not None and _acos_b is not None:
+                _bits.append("ACoS healthy" if _acos_a <= _acos_b
+                             else f"ACoS above budget "
+                                  f"({_acos_a:.1f}% vs {_acos_b:.1f}%)")
+            st.markdown(
+                f'<div style="border:1px solid #e3d6b8;'
+                f'border-left:4px solid {_bcol};background:#faf5e9;'
+                f'border-radius:8px;padding:8px 14px;margin:4px 0 10px 0;'
+                f'font-size:13.5px;color:#2b2b2b;">{_bico} '
+                + " &nbsp;·&nbsp; ".join(_bits) + "</div>",
+                unsafe_allow_html=True)
+    except Exception:
+        pass   # banner is garnish — never block the page
 
     # Narrative
     narrative = build_narrative(k, df if not df.empty else None)
@@ -7200,7 +7312,10 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
         _ph.empty()
 
         if cr.empty:
-            st.info("📭 No ASIN data found for this GEO in the selected range.")
+            empty_state("No ASIN data found for this GEO in the selected range.",
+                        "Widen the sidebar date preset, or check the "
+                        "freshness badge (top-right) — this GEO's feed may "
+                        "still be syncing today's data.")
         else:
             # Brand + AMZ Sub Category filters side-by-side. AMZ Sub
             # Category (Amazon's AMZ_CATEGORY tag — Black Teas, HP - Teas,
@@ -7225,6 +7340,29 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
             if picked_amz_subcats:
                 cr = cr[cr["AMZ_SUB_CATEGORY"].isin(picked_amz_subcats)].reset_index(drop=True)
 
+            # ── ⚑ Health flags (B2) ──
+            # Compact red/amber signals so problem ASINs pop without
+            # scanning 35 numeric columns. Thresholds match the existing
+            # tier conventions: ACoS >30 red / >20 amber; CM2 <0 red /
+            # <10 amber; Cover Days <20 red / <40 amber.
+            _acos_n = pd.to_numeric(cr.get("ACT_ACOS_PCT"), errors="coerce")
+            _cm2_n  = pd.to_numeric(cr.get("ACT_CM2_PCT"),  errors="coerce")
+            _cov_n  = pd.to_numeric(cr.get("COVER_DAYS"),   errors="coerce")
+            def _mk_flags(a, c, cov):
+                f = []
+                if pd.notna(a):
+                    if a > 30:   f.append("🔴ACoS")
+                    elif a > 20: f.append("🟡ACoS")
+                if pd.notna(c):
+                    if c < 0:    f.append("🔴CM2")
+                    elif c < 10: f.append("🟡CM2")
+                if pd.notna(cov):
+                    if cov < 20:   f.append("🔴Stock")
+                    elif cov < 40: f.append("🟡Stock")
+                return " ".join(f)
+            cr["HEALTH"] = [_mk_flags(a, c, cov)
+                            for a, c, cov in zip(_acos_n, _cm2_n, _cov_n)]
+
             # Build column list — USA gets FBA + ADW + Total Inv; others Total only
             inv_cols = ([("FBA_INV", "FBA Inv"),
                          ("ADW_INV", "ADW Inv"),
@@ -7234,6 +7372,7 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
             col_map = [
                 ("ASIN",            "ASIN"),
                 ("PRODUCT_NAME",    "Product"),
+                ("HEALTH",          "⚑"),
                 ("BRAND",           "Brand"),
                 ("SUB_CATEGORY",    "Sub-Category"),
                 # AMZ Sub Category — Amazon's finer-grained AMZ_CATEGORY
@@ -7401,6 +7540,12 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
                     help="Budget Revenue − Actual Revenue. Positive = behind plan."),
                 "Bud CM1%":        st.column_config.NumberColumn(format="%.1f%%"),
                 "Act CM1%":        st.column_config.NumberColumn(format="%.1f%%"),
+                "⚑":               st.column_config.TextColumn(
+                    "⚑", width="small",
+                    help="Health flags. 🔴/🟡 ACoS: spend ratio above "
+                         "30% / 20%. 🔴/🟡 CM2: margin below 0% / 10%. "
+                         "🔴/🟡 Stock: cover under 20 / 40 days. Blank = "
+                         "all three metrics healthy."),
                 "Bud ACoS%":       st.column_config.NumberColumn(format="%.1f%%"),
                 "Act ACoS%":       st.column_config.NumberColumn(
                     format="%.1f%%",
@@ -10662,6 +10807,24 @@ def render_dbr():
     Business Type radio at the top scopes which breakdowns appear inside
     each expander (Both / CORE / NEW).
     """
+    # ── Cross-view drill links (C2) ──
+    # DBR shows WHERE a country lags but had no way to jump into WHY.
+    # One chip per GEO opens that country's Sub-Category breakdown.
+    _dbr_drill_geos = [g for g in GEO_ORDER]
+    st.markdown('<div style="font-size:11.5px;color:#7a6a50;'
+                'margin-bottom:2px;">🔗 Drill into a country&rsquo;s '
+                'sub-categories:</div>', unsafe_allow_html=True)
+    _chip_cols = st.columns(len(_dbr_drill_geos), gap="small")
+    for _cc, _g in zip(_chip_cols, _dbr_drill_geos):
+        with _cc:
+            if st.button(_g, key=f"dbr_drill_{_g}",
+                         use_container_width=True):
+                st.session_state.selected_geo        = _g
+                st.session_state.selected_subcat     = None
+                st.session_state.selected_amz_subcat = None
+                st.session_state.view = "subcategory"
+                st.rerun()
+
     st.markdown('<div class="page-title">DBR &mdash; Daily Business Report</div>',
                  unsafe_allow_html=True)
     st.markdown(
@@ -10704,7 +10867,10 @@ def render_dbr():
     data_y0  = get_dbr_data(_y0_d, _y0_d, sfx)
     _ph.empty()
     if data.empty:
-        st.info("📭 No data for the selected date range.")
+        empty_state("No data for the selected date range.",
+                    "DBR needs at least one loaded day in the window — "
+                    "check the freshness badge (top-right) or pick an "
+                    "earlier range.")
         return
 
     numeric_cols = [c for c in data.columns
@@ -11942,7 +12108,9 @@ def render_new_business():
         sel_df = universe_df
     asin_list_filtered = sel_df["ASIN"].dropna().unique().tolist()
     if not asin_list_filtered:
-        st.info("📭 No ASINs match the current selection.")
+        empty_state("No ASINs match the current selection.",
+                    "Clear the product multi-select above, or switch GEO — "
+                    "New Business ASINs are auto-detected per marketplace.")
         return
     asin_csv = _nb_asin_in_list(asin_list_filtered)
 
@@ -12199,11 +12367,26 @@ def render_new_business():
         disp = disp.merge(
             prior3[["ASIN"] + _prior3_added_cols], on="ASIN", how="left")
 
+    # ── ⚑ Health flags (B2) — same convention as CR Tracker ──
+    _nb_acos = pd.to_numeric(disp.get("ACOS_PCT"), errors="coerce")
+    _nb_cm2  = pd.to_numeric(disp.get("CM2_PCT"),  errors="coerce")
+    def _nb_flags(a, c):
+        f = []
+        if pd.notna(a):
+            if a > 30:   f.append("🔴ACoS")
+            elif a > 20: f.append("🟡ACoS")
+        if pd.notna(c):
+            if c < 0:    f.append("🔴CM2")
+            elif c < 10: f.append("🟡CM2")
+        return " ".join(f)
+    disp["HEALTH"] = [_nb_flags(a, c) for a, c in zip(_nb_acos, _nb_cm2)]
+
     # Hide ZERO-revenue ASINs by default? No — show them so the user
     # can spot fully-stale launches. Sort already puts them at the end.
     show_cols = [
         ("ASIN",        "ASIN"),
         ("PRODUCT_NAME","Product"),
+        ("HEALTH",      "⚑"),
         ("REVENUE",     "Revenue"),
         ("UNITS",       "Units"),
         # Inventory between Units + ASP so the run-rate context (Units sold
@@ -12242,6 +12425,10 @@ def render_new_business():
     col_cfg = {
         "ASIN":        st.column_config.TextColumn("ASIN", width="small", pinned=True),
         "Product":     st.column_config.TextColumn("Product", width="large", pinned=True),
+        "⚑":           st.column_config.TextColumn(
+            "⚑", width="small",
+            help="Health flags. 🔴/🟡 ACoS: above 30% / 20%. "
+                 "🔴/🟡 CM2: margin below 0% / 10%. Blank = healthy."),
         "Revenue":     st.column_config.NumberColumn(format=f"{currency_sym}%,.0f"),
         "Units":       st.column_config.NumberColumn(format="%,d"),
         "Inventory":   st.column_config.NumberColumn(
@@ -13484,6 +13671,26 @@ if _jump_req:
 # Effect: subsequent tab clicks find the heavy view queries already in
 # cache, so first-visit pop-in is replaced by an instant render.
 _warm_critical_caches()
+
+# ── Freshness badge (G1) — every page, top-right ──
+render_freshness_badge()
+
+# ── Breadcrumb consistency (C1) ──
+# Drill-down views (subcategory / asin / asin_detail) render their own
+# multi-segment breadcrumbs; top-level views get a single-segment crumb
+# here so every page carries the same "you are here" marker.
+_TOP_VIEW_LABELS = {
+    "ceo":               "Executive Summary",
+    "overview":          "Overview",
+    "pnl":               "P&L Statement",
+    "dbr":               "DBR",
+    "category":          "Category",
+    "new_business":      "New Business",
+    "price":             "Price Tracker",
+    "customer_insights": "Customer Insights",
+}
+if view in _TOP_VIEW_LABELS:
+    render_breadcrumbs([(_TOP_VIEW_LABELS[view], view, None, None)])
 
 # Top-level router with a friendly-error safety net. Snowflake /
 # database errors bubble up here and get rendered as a recovery card
