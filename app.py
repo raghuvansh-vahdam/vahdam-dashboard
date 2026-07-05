@@ -7298,6 +7298,53 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
             if picked_amz_subcats:
                 cr = cr[cr["AMZ_SUB_CATEGORY"].isin(picked_amz_subcats)].reset_index(drop=True)
 
+            # ── Row filter (Google-Sheets-style "contains") ──
+            # Pick a column, type text → only matching rows stay.
+            # Comma = OR ("green, matcha"); "-term" excludes
+            # ("himalayan, -sampler" = himalayan rows without sampler).
+            _RF_COLS = {
+                "Any text column":  ["PRODUCT_NAME", "ASIN", "BRAND",
+                                     "SUB_CATEGORY", "AMZ_SUB_CATEGORY"],
+                "Product":          ["PRODUCT_NAME"],
+                "ASIN":             ["ASIN"],
+                "Brand":            ["BRAND"],
+                "Sub-Category":     ["SUB_CATEGORY"],
+                "AMZ Sub Category": ["AMZ_SUB_CATEGORY"],
+            }
+            _rf1, _rf2 = st.columns([1, 2.2], gap="medium")
+            with _rf1:
+                _rf_col = st.selectbox("🔎 Filter rows by", list(_RF_COLS),
+                                       key=f"cr_rf_col_{geo}")
+            with _rf2:
+                _rf_txt = st.text_input(
+                    "…that contain", key=f"cr_rf_txt_{geo}",
+                    placeholder="e.g. himalayan  ·  green, matcha "
+                                "(comma = OR)  ·  -sampler (exclude)")
+            if _rf_txt and _rf_txt.strip():
+                _inc, _exc = [], []
+                for _t in (t.strip().lower()
+                           for t in _rf_txt.split(",") if t.strip()):
+                    (_exc if _t.startswith("-") else _inc).append(
+                        _t.lstrip("-").strip())
+                _rf_src = [c for c in _RF_COLS[_rf_col] if c in cr.columns]
+                _hay = (cr[_rf_src].fillna("").astype(str)
+                          .agg(" ".join, axis=1).str.lower())
+                _mask = pd.Series(True, index=cr.index)
+                if _inc:
+                    _mask &= _hay.apply(
+                        lambda h: any(t in h for t in _inc))
+                for _t in _exc:
+                    if _t:
+                        _mask &= ~_hay.str.contains(re.escape(_t),
+                                                    regex=True)
+                cr = cr[_mask].reset_index(drop=True)
+                st.caption(f"🔎 {len(cr)} row{'s' if len(cr) != 1 else ''} "
+                           f"match the text filter")
+                if cr.empty:
+                    empty_state("No rows match the text filter.",
+                                "Check spelling, or clear the filter box "
+                                "above to see all rows again.")
+
             # ── ⚑ Health flags (B2) ──
             # Compact red/amber signals so problem ASINs pop without
             # scanning 35 numeric columns. Thresholds match the existing
@@ -7387,7 +7434,7 @@ def _render_cr_tracker_body(geo, d_from, d_to, sfx, use_inr):
             # NOTE: text columns must be listed here — if any text
             # column is left out, it gets pd.to_numeric'd to NaN and
             # shows as "None" in the rendered table.
-            _text_cols = {"ASIN", "PRODUCT_NAME", "BRAND",
+            _text_cols = {"ASIN", "PRODUCT_NAME", "BRAND", "HEALTH",
                           "CATEGORY", "SUB_CATEGORY", "AMZ_SUB_CATEGORY"}
             show = pd.DataFrame({
                 disp: pd.to_numeric(cr[raw], errors="coerce")
@@ -12324,6 +12371,38 @@ def render_new_business():
                                        f"{_lbl} ASP",  f"{_lbl} ACoS%"])
         disp = disp.merge(
             prior3[["ASIN"] + _prior3_added_cols], on="ASIN", how="left")
+
+    # ── Row filter (Google-Sheets-style "contains") ──
+    # Same semantics as the CR Tracker filter: comma = OR, "-term"
+    # excludes. Matches against Product name, ASIN and Brand.
+    _nbf = st.text_input(
+        "🔎 Filter rows — product / ASIN / brand contains…",
+        key=f"nb_rowfilter_{geo}",
+        placeholder="e.g. turmeric  ·  ashwagandha, shilajit (comma = OR)"
+                    "  ·  -pack (exclude)")
+    if _nbf and _nbf.strip():
+        _inc, _exc = [], []
+        for _t in (t.strip().lower()
+                   for t in _nbf.split(",") if t.strip()):
+            (_exc if _t.startswith("-") else _inc).append(
+                _t.lstrip("-").strip())
+        _nb_src = [c for c in ("PRODUCT_NAME", "ASIN", "BRAND")
+                   if c in disp.columns]
+        _hay = (disp[_nb_src].fillna("").astype(str)
+                  .agg(" ".join, axis=1).str.lower())
+        _mask = pd.Series(True, index=disp.index)
+        if _inc:
+            _mask &= _hay.apply(lambda h: any(t in h for t in _inc))
+        for _t in _exc:
+            if _t:
+                _mask &= ~_hay.str.contains(re.escape(_t), regex=True)
+        disp = disp[_mask].reset_index(drop=True)
+        st.caption(f"🔎 {len(disp)} row{'s' if len(disp) != 1 else ''} "
+                   f"match the text filter")
+        if disp.empty:
+            empty_state("No rows match the text filter.",
+                        "Check spelling, or clear the filter box above.")
+            return
 
     # ── ⚑ Health flags (B2) — same convention as CR Tracker ──
     _nb_acos = pd.to_numeric(disp.get("ACOS_PCT"), errors="coerce")
