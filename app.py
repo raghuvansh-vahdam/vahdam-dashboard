@@ -1025,35 +1025,43 @@ _DARK_CHART = dict(
     tick="#A89A7A", hoverbg="#15241B", hoverborder="#6CC791",
 )
 
-_orig_plotly_chart = st.plotly_chart
+# IMPORTANT — wrap exactly ONCE per Python process. On Streamlit Cloud
+# the process survives across script reruns, and this module top-level
+# code re-executes on every rerun. Without the sentinel guard below,
+# each rerun captured the PREVIOUS rerun's wrapper as "_orig", nesting
+# the wrapper one level deeper per rerun until any chart call blew the
+# recursion limit (RecursionError after ~1000 reruns in production).
+if not getattr(st.plotly_chart, "_vahdam_themed", False):
+    _orig_plotly_chart = st.plotly_chart
 
-def _themed_plotly_chart(fig, *args, **kwargs):
-    if (st.session_state.get("theme") == "dark"
-            and fig is not None and hasattr(fig, "update_layout")):
-        try:
-            d = _DARK_CHART
-            fig.update_layout(
-                plot_bgcolor=d["bg"], paper_bgcolor=d["bg"],
-                font=dict(color=d["font"]),
-                hoverlabel=dict(bgcolor=d["hoverbg"],
-                                font=dict(color=d["font"]),
-                                bordercolor=d["hoverborder"]),
-                legend=dict(font=dict(color=d["font"])),
-            )
-            if fig.layout.title and fig.layout.title.text:
-                fig.update_layout(title_font_color=d["title"])
-            fig.update_xaxes(gridcolor=d["grid"], linecolor=d["axisline"],
-                             tickcolor=d["axisline"],
-                             tickfont=dict(color=d["tick"]),
-                             title_font_color=d["tick"])
-            fig.update_yaxes(gridcolor=d["grid"], linecolor=d["axisline"],
-                             tickfont=dict(color=d["tick"]),
-                             title_font_color=d["tick"])
-        except Exception:
-            pass   # never let theming break a chart render
-    return _orig_plotly_chart(fig, *args, **kwargs)
+    def _themed_plotly_chart(fig, *args, **kwargs):
+        if (st.session_state.get("theme") == "dark"
+                and fig is not None and hasattr(fig, "update_layout")):
+            try:
+                d = _DARK_CHART
+                fig.update_layout(
+                    plot_bgcolor=d["bg"], paper_bgcolor=d["bg"],
+                    font=dict(color=d["font"]),
+                    hoverlabel=dict(bgcolor=d["hoverbg"],
+                                    font=dict(color=d["font"]),
+                                    bordercolor=d["hoverborder"]),
+                    legend=dict(font=dict(color=d["font"])),
+                )
+                if fig.layout.title and fig.layout.title.text:
+                    fig.update_layout(title_font_color=d["title"])
+                fig.update_xaxes(gridcolor=d["grid"], linecolor=d["axisline"],
+                                 tickcolor=d["axisline"],
+                                 tickfont=dict(color=d["tick"]),
+                                 title_font_color=d["tick"])
+                fig.update_yaxes(gridcolor=d["grid"], linecolor=d["axisline"],
+                                 tickfont=dict(color=d["tick"]),
+                                 title_font_color=d["tick"])
+            except Exception:
+                pass   # never let theming break a chart render
+        return _orig_plotly_chart(fig, *args, **kwargs)
 
-st.plotly_chart = _themed_plotly_chart
+    _themed_plotly_chart._vahdam_themed = True
+    st.plotly_chart = _themed_plotly_chart
 
 # ── AMZ_CATEGORY canonicalizer ──────────────────────────────────────────────
 # The AMZ_CATEGORY column in the P&L table has dirty duplicates:
