@@ -1025,42 +1025,48 @@ _DARK_CHART = dict(
     tick="#A89A7A", hoverbg="#15241B", hoverborder="#6CC791",
 )
 
-# IMPORTANT — wrap exactly ONCE per Python process. On Streamlit Cloud
-# the process survives across script reruns, and this module top-level
-# code re-executes on every rerun. Without the sentinel guard below,
-# each rerun captured the PREVIOUS rerun's wrapper as "_orig", nesting
-# the wrapper one level deeper per rerun until any chart call blew the
-# recursion limit (RecursionError after ~1000 reruns in production).
-if not getattr(st.plotly_chart, "_vahdam_themed", False):
-    _orig_plotly_chart = st.plotly_chart
+# IMPORTANT — this wrapper must be STACK-PROOF. Streamlit Cloud keeps
+# the Python process alive across script reruns AND can hot-reload the
+# file without restarting the process, so any pattern that captures
+# `st.plotly_chart` as "the original" can end up capturing a previous
+# wrapper and nesting one level per rerun (a RecursionError took the
+# app down twice this way). The wrapper below never reads
+# st.plotly_chart at all: it delegates straight to the main
+# DeltaGenerator's own method (`st._main.plotly_chart`), which our
+# module-attribute patch never touches. Rebinding st.plotly_chart to a
+# fresh copy of this wrapper on every rerun is therefore harmless —
+# and it self-heals a process poisoned by an older stacked wrapper.
+def _themed_plotly_chart(fig, *args, **kwargs):
+    if (st.session_state.get("theme") == "dark"
+            and fig is not None and hasattr(fig, "update_layout")):
+        try:
+            d = _DARK_CHART
+            fig.update_layout(
+                plot_bgcolor=d["bg"], paper_bgcolor=d["bg"],
+                font=dict(color=d["font"]),
+                hoverlabel=dict(bgcolor=d["hoverbg"],
+                                font=dict(color=d["font"]),
+                                bordercolor=d["hoverborder"]),
+                legend=dict(font=dict(color=d["font"])),
+            )
+            if fig.layout.title and fig.layout.title.text:
+                fig.update_layout(title_font_color=d["title"])
+            fig.update_xaxes(gridcolor=d["grid"], linecolor=d["axisline"],
+                             tickcolor=d["axisline"],
+                             tickfont=dict(color=d["tick"]),
+                             title_font_color=d["tick"])
+            fig.update_yaxes(gridcolor=d["grid"], linecolor=d["axisline"],
+                             tickfont=dict(color=d["tick"]),
+                             title_font_color=d["tick"])
+        except Exception:
+            pass   # never let theming break a chart render
+    # Delegate to the untouched underlying method — NOT st.plotly_chart.
+    return st._main.plotly_chart(fig, *args, **kwargs)
 
-    def _themed_plotly_chart(fig, *args, **kwargs):
-        if (st.session_state.get("theme") == "dark"
-                and fig is not None and hasattr(fig, "update_layout")):
-            try:
-                d = _DARK_CHART
-                fig.update_layout(
-                    plot_bgcolor=d["bg"], paper_bgcolor=d["bg"],
-                    font=dict(color=d["font"]),
-                    hoverlabel=dict(bgcolor=d["hoverbg"],
-                                    font=dict(color=d["font"]),
-                                    bordercolor=d["hoverborder"]),
-                    legend=dict(font=dict(color=d["font"])),
-                )
-                if fig.layout.title and fig.layout.title.text:
-                    fig.update_layout(title_font_color=d["title"])
-                fig.update_xaxes(gridcolor=d["grid"], linecolor=d["axisline"],
-                                 tickcolor=d["axisline"],
-                                 tickfont=dict(color=d["tick"]),
-                                 title_font_color=d["tick"])
-                fig.update_yaxes(gridcolor=d["grid"], linecolor=d["axisline"],
-                                 tickfont=dict(color=d["tick"]),
-                                 title_font_color=d["tick"])
-            except Exception:
-                pass   # never let theming break a chart render
-        return _orig_plotly_chart(fig, *args, **kwargs)
-
-    _themed_plotly_chart._vahdam_themed = True
+# Patch only when the underlying DeltaGenerator handle exists (it does on
+# all Streamlit versions we run; if a future version removes st._main we
+# silently skip theming rather than risk breaking charts).
+if hasattr(st, "_main") and hasattr(st._main, "plotly_chart"):
     st.plotly_chart = _themed_plotly_chart
 
 # ── AMZ_CATEGORY canonicalizer ──────────────────────────────────────────────
